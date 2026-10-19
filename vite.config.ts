@@ -50,6 +50,9 @@ export default defineConfig(({ mode }) => {
     exclude: ['**/node_modules/**', '**/dist/**', '**/restore-backup-*/**', '**/.preview-pre-v2/**', '**/experiments/**'],
     maxWorkers: 1,
     fileParallelism: false,
+    // `// @vitest-environment jsdom-server` loads vitest-environment-jsdom-server: jsdom on the
+    // node pipeline, for front-end tests that start the real server (see the file for why).
+    alias: { 'vitest-environment-jsdom-server': path.resolve(__dirname, './src/test/jsdomServerEnvironment.ts') },
   },
   }
 })
