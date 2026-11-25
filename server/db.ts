@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { rowFingerprint } from './uploads.ts'
+import { ensureTenancySchema } from './tenancy.ts'
 
 /**
  * SQLite through Node's built-in driver: no native dependency, one file on
@@ -138,6 +139,9 @@ export function openDatabase(path: string): DatabaseSync {
       }
     }
   }
+  // Additive (financial foundation workstream): organisations and memberships.
+  // Every account is migrated into a one-member organisation it owns.
+  ensureTenancySchema(db)
   return db
 }
 

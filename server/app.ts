@@ -438,6 +438,8 @@ export function createApp(deps: AppDependencies): App {
       const { auditId } = await req.json<{ auditId?: unknown }>()
       if (typeof auditId !== 'string' || !/^[\w-]{1,100}$/.test(auditId)) throw new HttpError(400, 'Send the audit to link.')
       if (!qboConnection(user.id)) throw new HttpError(409, 'Connect QuickBooks first.', 'quickbooks_not_connected')
+      // Only an audit this account has saved on the server can be linked (audit S8).
+      if (!db.prepare('SELECT 1 FROM projects WHERE user_id = ? AND id = ?').get(user.id, auditId)) throw new HttpError(404, 'That audit was not found.', 'audit_not_found')
       db.prepare("UPDATE integration_connections SET linked_project_id = ? WHERE user_id = ? AND provider = 'quickbooks'").run(auditId, user.id)
       return json(200, { ok: true, linkedAuditId: auditId })
     }
