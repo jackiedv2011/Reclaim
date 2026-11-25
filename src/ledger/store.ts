@@ -228,6 +228,8 @@ function matchEarlier(records: APRecord[], incoming: APRecord[]): Map<APRecord, 
   const passes: ((r: APRecord) => APRecord[])[] = [
     (r) => identity(r).filter((e) => e.amountPaid === r.amountPaid && sameVendor(e, r) && sameDay(e, r) && couldBeSamePayment(e, r)),
     (r) => payment(r).filter((e) => couldBeSamePayment(e, r)),
+    // The same transaction paying the same bill on the same day, whatever its vendor is now called.
+    (r) => transaction(r).filter((e) => reference(r) !== null && reference(e) === reference(r) && e.amountPaid === r.amountPaid && sameDay(e, r) && couldBeSamePayment(e, r)),
     // The same transaction, with its invoice since added or left out.
     (r) => transaction(r).filter((e) => sameBooks(e, r) && sameBill(e, r) && e.amountPaid === r.amountPaid && sameDay(e, r)),
     // The same transaction and bill saying something different: a conflict, not another payment.

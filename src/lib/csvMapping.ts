@@ -148,6 +148,16 @@ export interface CsvTable {
   warnings: string[]
   /** The sheet of a workbook this came from, and the others it left out. */
   sheet?: { name: string; others: string[] }
+  /** Cells a worksheet holds as numbers (see cellKey). Their size is never in doubt, however the file writes amounts as text. */
+  numbers?: ReadonlySet<number>
+}
+
+/** One number for a cell of a worksheet, whose columns stop at 16,384. */
+export const cellKey = (row: number, column: number): number => row * 16_384 + column
+
+/** How to read the amount in a cell: as the file writes them, unless the cell is already a number. */
+export function styleAt(table: CsvTable, row: number, column: number | undefined, style: AmountStyle | undefined): AmountStyle | undefined {
+  return column !== undefined && table.numbers?.has(cellKey(row, column)) ? 'point' : style
 }
 
 /** "Invoice No.", " PAYMENT DATE ", "Invoice #" → invoice_no, payment_date, invoice. */
@@ -210,10 +220,10 @@ export function readCsvTable(text: string): CsvTable {
 }
 
 /** A table from rows already split into cells: a CSV's, or a worksheet's. */
-export function tableOf(text: string, rows: string[][], warnings: string[] = [], sheet?: CsvTable['sheet']): CsvTable {
+export function tableOf(text: string, rows: string[][], warnings: string[] = [], sheet?: CsvTable['sheet'], numbers?: ReadonlySet<number>): CsvTable {
   const kept = [...rows]
   while (kept.length > 0 && isBlankRow(kept[kept.length - 1])) kept.pop()
-  return { text, rows: kept, headerIndex: findHeaderRow(kept), warnings, ...(sheet ? { sheet } : {}) }
+  return { text, rows: kept, headerIndex: findHeaderRow(kept), warnings, ...(sheet ? { sheet } : {}), ...(numbers ? { numbers } : {}) }
 }
 
 /**
@@ -528,18 +538,18 @@ export function amountStyleOf(table: CsvTable, columns: ColumnMap, headerIndex =
   let point = 0
   let groupedByComma = 0
   let threeDecimals: string | null = null
-  // A worksheet's numbers are numbers already; only text can be written either way.
-  const typed = table.sheet !== undefined
-  for (const row of dataRows(table, headerIndex)) {
+  for (let position = headerIndex + 1; position < table.rows.length; position += 1) {
+    const row = table.rows[position]
     for (const index of [columns.amount_paid, columns.invoice_amount]) {
       const cell = index === undefined ? '' : (row[index] ?? '').trim()
-      if (cell === '') continue
+      // A worksheet's numbers are numbers already; only text can be written either way.
+      if (cell === '' || index === undefined || table.numbers?.has(cellKey(position, index))) continue
       const asPoint = parseMoney(cell) !== null
       const asComma = parseMoney(cell, 'comma') !== null
       if (asComma && !asPoint) comma += 1
       else if (asPoint && !asComma) point += 1
       else if (asPoint && /\d,\d{3}(?!\d)/.test(cell)) groupedByComma += 1
-      else if (asPoint && !typed && parseMoney(cell, 'point-strict') === null && !/(^|\D)0\.\d{3}/.test(cell)) threeDecimals ??= cell
+      else if (asPoint && parseMoney(cell, 'point-strict') === null && !/(^|\D)0\.\d{3}/.test(cell)) threeDecimals ??= cell
     }
   }
   if (comma >= 2 && point === 0 && groupedByComma === 0) return { style: 'comma', example: null }
@@ -562,8 +572,9 @@ export function negativePayments(table: CsvTable, columns: ColumnMap, options: {
   let negative = 0
   let positive = 0
   let example: string | null = null
-  for (const row of dataRows(table, options.headerIndex ?? table.headerIndex)) {
-    const amount = parseMoney(row[paid], options.amountStyle)?.amount
+  for (let position = (options.headerIndex ?? table.headerIndex) + 1; position < table.rows.length; position += 1) {
+    const row = table.rows[position]
+    const amount = parseMoney(row[paid], styleAt(table, position, paid, options.amountStyle))?.amount
     if (!amount || !parseDate(row[date], options.dateOrder) || (!options.vendorGrouped && !(row[vendor] ?? '').trim())) continue
     if (amount > 0) positive += 1
     else {

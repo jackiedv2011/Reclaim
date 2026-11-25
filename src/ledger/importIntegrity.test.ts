@@ -129,6 +129,11 @@ describe('the same payment is recognised however the next file is written', () =
     expect(mergeImport(bills, file(t, 'Acme,INV-1,2026-01-05,500,P1', 'Acme,INV-2,2026-01-05,500,P1')).records).toHaveLength(2)
   })
 
+  it('by its transaction ID and bill when the vendor has been renamed', () => {
+    const t = `${plain},transaction_id`
+    expect(mergeImport(mergeImport(null, file(t, 'Acme,INV-1,2026-01-05,100,T1')), file(t, 'Acme Supply Company,INV-1,2026-01-05,100,T1')).records).toHaveLength(1)
+  })
+
   it('but an ID never outvotes a different vendor, bill or day', () => {
     const t = `${plain},transaction_id`
     const batch = mergeImport(null, file(t, 'Acme,A-1,2026-01-05,100,RUN5'))

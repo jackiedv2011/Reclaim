@@ -1,6 +1,6 @@
 import type { APRecord, ImportReading, ParseResult, ImportRowResult } from '@/types'
 import { canonicalCurrency, isoDay, numericDateParts, parseDate, parseMoney, normalizeVendor, type AmountStyle, type DateOrder } from '@/lib/format'
-import { columnCount, columnName, dateOrderEvidence, headingsOf, isBlankRow, readCsvTable, recognizedColumns, recognizedField, sameColumns, uniqueKeys, type ColumnMap, type CsvField, type CsvTable } from '@/lib/csvMapping'
+import { columnCount, columnName, dateOrderEvidence, headingsOf, isBlankRow, readCsvTable, recognizedColumns, recognizedField, sameColumns, styleAt, uniqueKeys, type ColumnMap, type CsvField, type CsvTable } from '@/lib/csvMapping'
 import { resolveVendors } from '@/lib/vendorResolution'
 import { checksum, normalizeReference, vendorTransformations, recordIdentity } from './sourceIdentity'
 
@@ -39,26 +39,21 @@ function rejectionReason(vendor: string | null, date: string | null, paymentDate
 
 /**
  * "1,234.56" without quotation marks is two cells, and the first alone would
- * import as 1. The sign of it is a row with a cell too many: more than the
- * file's other rows have, or more than its headings with cents in the second
- * half. A row of the usual length is only suspect when the next column is one
- * that hardly ever holds a number.
+ * import as 1. The sign of it is a row with more cells than the headings. With
+ * cents in the second half that is enough; without, other rows have to show
+ * that the headings are the file's true width. A row of the usual length is
+ * only suspect when cents landed where an invoice number or free text belongs.
  */
-function splitAmount(cells: string[], columns: ColumnMap, headingCount: number, usualLength: number, nextIsText: boolean): string | null {
+function splitAmount(cells: string[], columns: ColumnMap, headingCount: number, headingsFit: boolean, nextIsText: boolean): string | null {
   const index = columns.amount_paid
   if (index === undefined) return null
   const [whole, rest] = [cells[index]?.trim() ?? '', cells[index + 1]?.trim() ?? '']
   if (!/^[^\d.]{0,6}\d{1,3}$/.test(whole) || !/^\d{3}(?:\.\d+)?\D{0,4}$/.test(rest)) return null
   const cents = /^\d{3}\.\d{2}\D{0,4}$/.test(rest)
-  if (!(cells.length > usualLength || (cents && ((headingCount > 0 && cells.length > headingCount) || nextIsText)))) return null
+  const longer = headingCount > 0 && cells.length > headingCount && cells.slice(headingCount - 1).some((cell) => cell.trim() !== '')
+  const misplaced = cents && (nextIsText || columns.invoice_number === index + 1)
+  if (!misplaced && !(longer && (cents || headingsFit))) return null
   return `the amount looks split in two by a comma without quotation marks: ${whole},${rest}`
-}
-
-/** How many cells most rows have. */
-function usualRowLength(rows: string[][]): number {
-  const counts = new Map<number, number>()
-  for (const row of rows) if (!isBlankRow(row)) counts.set(row.length, (counts.get(row.length) ?? 0) + 1)
-  return [...counts].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]?.[0] ?? 0
 }
 
 /** Whether the column after the amount is free text that hardly ever holds a number on its own. */
@@ -100,7 +95,7 @@ export function parseCsv(input: string | CsvTable, options: ParseOptions = {}): 
   let skippedCount = 0
   let group: { vendor: string; rowNumber: number } | null = null
   const nextIsText = textAfterAmount(table.rows.slice(headerIndex + 1), columns)
-  const usualLength = usualRowLength(table.rows.slice(headerIndex + 1))
+  const headingsFit = table.rows.slice(headerIndex + 1).some((row) => row.length === headings.length)
 
   for (let position = headerIndex + 1; position < table.rows.length; position += 1) {
     const cells = table.rows[position]
@@ -116,7 +111,7 @@ export function parseCsv(input: string | CsvTable, options: ParseOptions = {}): 
     const paymentDateRaw = value('payment_date')
     const amountPaidRaw = value('amount_paid')
     const paymentDate = parseDate(paymentDateRaw, dateOrder)
-    const money = parseMoney(amountPaidRaw, options.amountStyle)
+    const money = parseMoney(amountPaidRaw, styleAt(table, position, columns.amount_paid, options.amountStyle))
     const amountInFile = money?.amount ?? null
 
     let vendor = value('vendor')
@@ -136,14 +131,14 @@ export function parseCsv(input: string | CsvTable, options: ParseOptions = {}): 
       }
     }
 
-    const split = splitAmount(cells, columns, headings.length, usualLength, nextIsText)
+    const split = splitAmount(cells, columns, headings.length, headingsFit, nextIsText)
     if (!vendor || !paymentDateRaw || !paymentDate || money === null || amountInFile === null || split) {
       skippedCount += 1
       rowResults.push({ rowNumber, status: 'rejected', reason: split ?? rejectionReason(vendor, paymentDateRaw, paymentDate, amountPaidRaw, amountInFile), raw })
       continue
     }
     const amountPaid = options.flipSign ? negate(amountInFile) : amountInFile
-    const invoiceMoney = parseMoney(value('invoice_amount'), options.amountStyle)
+    const invoiceMoney = parseMoney(value('invoice_amount'), styleAt(table, position, columns.invoice_amount, options.amountStyle))
     const flipInvoice = Boolean(options.flipSign) && invoiceMoney !== null && invoiceMoney.amount < 0
     const invoiceAmount = invoiceMoney === null ? null : flipInvoice ? negate(invoiceMoney.amount) : invoiceMoney.amount
     const invoiceDateRaw = value('invoice_date')

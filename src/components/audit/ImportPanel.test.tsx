@@ -233,6 +233,16 @@ describe('matching columns', () => {
     expect(imported(onImport).records[0].source).toMatchObject({ rowNumber: 2, raw: { payment_date: '2026-03-04', amount_paid: '1200.5' } })
   })
 
+  it('text amounts in a workbook are asked about, its numbers never are', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(new File([buildXlsx([{ name: 'P', rows: plainRows([['Vendor', 'Payment Date', 'Amount Paid'], ['Acme', '2026-03-04', '1.500'], ['Beta', '2026-03-05', 12.125]]) }]) as BlobPart], 'p.xlsx'))
+    await user.click(await screen.findByRole('radio', { name: /The point marks thousands.*1\.500 is 1,500\.00/ }))
+    await user.click(continueButton())
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records.map((r) => r.amountPaid)).toEqual([1500, 12.125])
+  })
+
   it('a workbook with several sheets asks which to read', async () => {
     const user = userEvent.setup()
     const { upload, onImport } = mount()

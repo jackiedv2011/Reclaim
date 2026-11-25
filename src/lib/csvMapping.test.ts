@@ -144,11 +144,14 @@ describe('the file itself', () => {
 
   it('however many optional columns follow', () => {
     for (const row of ['Acme,2026-01-05,1,234.56,INV-1,', 'Acme,2026-01-05,1,234.56,,']) expect(parseCsv(csv('vendor,payment_date,amount_paid,invoice_number,memo', row, row)).records, row).toHaveLength(0)
+    expect(parseCsv(csv('vendor,payment_date,amount_paid,invoice_number,memo', 'A,2026-01-05,1,234.56,INV-1', 'B,2026-01-05,9,INV-2,x')).records.map((r) => r.vendor)).toEqual(['B'])
+    expect(parseCsv(csv('vendor,payment_date,amount_paid,invoice_number,memo', 'A,2026-01-05,1,234,I1,x', 'C,2026-01-05,20,I3,x')).records.map((r) => r.vendor)).toEqual(['C'])
     expect(parseCsv(csv('vendor,payment_date,amount_paid,memo', 'A,2026-01-05,1,500,x', ...Array(5).fill('B,2026-01-05,5,x'))).records).toHaveLength(5)
   })
 
   it('does not see one in an unlabelled extra column or in .5 and -20', () => {
     expect(parseCsv(csv('vendor,payment_date,amount_paid,gl_code', 'Acme,2026-01-05,100,500,note', 'Beta,2026-01-05,90,500,note')).records).toHaveLength(2)
+    expect(parseCsv(csv('vendor,payment_date,amount_paid,gl_code,memo', 'A,2026-01-05,100,500', 'B,2026-01-05,90,500', 'C,2026-01-06,75,500,rent')).records).toHaveLength(3)
     for (const amount of ['.5', '-20']) expect(parseCsv(csv('vendor,payment_date,amount_paid,gl_code', `Acme,2026-01-05,${amount},500`)).records, amount).toHaveLength(1)
   })
 
