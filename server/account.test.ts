@@ -1,12 +1,15 @@
 // @vitest-environment node
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { TERMS_VERSION } from '../src/legal/terms.ts'
 import { createApp, type App } from './app.ts'
 import { loadConfig } from './config.ts'
 import { openDatabase } from './db.ts'
 import { DevMailer } from './mailer.ts'
+import { FakeStripe } from './fakeStripe.ts'
+import { ProjectStore } from './projectStore.ts'
 import type { QuickBooksClient } from './quickbooks.ts'
+import { authorizedProject } from './testProject.ts'
 
 const config = loadConfig({
   NODE_ENV: 'test', DATABASE_PATH: ':memory:', APP_ORIGIN: 'http://localhost:0', REQUIRE_EMAIL_VERIFICATION: 'false',
@@ -120,6 +123,35 @@ describe('GET /api/account/export', () => {
     expect(res.body.audits.map((a: { id: string }) => a.id).sort()).toEqual(['a1', 'a2'])
     expect(res.text).not.toContain('Bob Only Vendor')
     expect(res.text).not.toMatch(/SECRET|scrypt|password_hash|tokens_sealed/)
+  })
+
+  it('includes onboarding answers, billing, the case history and sends that were never confirmed', async () => {
+    const stripe = new FakeStripe()
+    await app.close()
+    const db = app.db
+    app = createApp({ config, db, mailer: new DevMailer(db), google: null, drafts: null, quickbooks, stripe })
+    base = `http://127.0.0.1:${await app.listen(0)}`
+    const alice = await signedUp('Alice', 'alice@example.com')
+    const bob = await signedUp('Bob', 'bob@example.com')
+    const userId = (await alice.get('/api/auth/me')).body.user.id as string
+    await alice.post('/api/account/onboarding', { goals: ['duplicates'], role: 'owner', purpose: 'Find refunds' })
+    await alice.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_visa' })
+    const { project, findingId } = authorizedProject('a1', { vendor: 'Acme Supply', invoice: 'INV-9', amount: 500, requested: 500 })
+    const revision = new ProjectStore(db, config.dataKeys).upsert(userId, project)
+    const held = await alice.post('/api/projects/a1/case-commands', { commandId: randomUUID(), expectedRevision: revision, findingId, type: 'contact_hold', input: { reason: 'Strategic supplier' } })
+    expect(held.status).toBe(200)
+    db.prepare("INSERT INTO gmail_sends (user_id, project_id, finding_id, generation, status, from_email, to_email, cc, amount_minor, created_at, payments) VALUES (?, 'a1', ?, 1, 'uncertain', 'alice@gmail.test', 'ap@acme.test', '', 50000, 1700000000000, '{\"vendor\":\"x\",\"payments\":[\"fingerprint-x\"]}')").run(userId, findingId)
+    for (const status of ['uncertain', 'failed']) db.prepare("INSERT INTO gmail_attempts (user_id, project_id, finding_id, kind, actor, status, at, resolved_at) VALUES (?, 'a1', ?, 'request', 'Alice Test', ?, 1700000000000, 1700000001000)").run(userId, findingId, status)
+
+    const res = await alice.get('/api/account/export')
+    expect(res.status).toBe(200)
+    expect(res.body.onboarding).toMatchObject({ answers: { goals: ['duplicates'], role: 'owner', purpose: 'Find refunds' }, seenAt: expect.any(String) })
+    expect(res.body.billing).toMatchObject({ plan: 'growth', subscription: { plan: 'growth', status: 'active', cancelAtPeriodEnd: false, currentPeriodEnd: expect.any(String) }, recordedReturns: [] })
+    expect(res.body.caseEvents).toMatchObject([{ auditId: 'a1', findingId, action: 'contact_hold', by: 'alice@example.com', at: expect.any(String), sourceRows: expect.any(Array) }])
+    expect(res.body.gmail).toMatchObject({ sent: [], unconfirmed: [{ kind: 'request', auditId: 'a1', status: 'uncertain', to: 'ap@acme.test' }], attempts: [{ status: 'uncertain' }, { status: 'failed', by: 'Alice Test' }] })
+    expect(res.text).not.toMatch(/SECRET|command_hash|fingerprint-x|cus_fake|sub_fake|scrypt/)
+    const other = (await bob.get('/api/account/export')).body
+    expect(other).toMatchObject({ onboarding: { answers: null, seenAt: null }, billing: { plan: 'free', subscription: null }, caseEvents: [], gmail: null })
   })
 
   it('needs a session', async () => {

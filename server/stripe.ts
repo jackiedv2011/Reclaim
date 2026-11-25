@@ -13,6 +13,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
  */
 export const STRIPE_API_VERSION = '2024-06-20'
 
+const STRIPE_TIMEOUT_MS = 30_000
+
 export interface StripePrice {
   id: string
   unitAmount: number | null
@@ -29,6 +31,12 @@ export interface StripeSubscription {
   currentPeriodEnd: number | null
   itemId: string | null
   priceId: string | null
+  /** The price's lookup key as it is now. Stripe moves the key when a price is replaced, so an older price may have none. */
+  priceLookupKey: string | null
+  /** The card this subscription charges, when it names one itself. */
+  defaultPaymentMethod: string | null
+  latestInvoiceId: string | null
+  metadata: Record<string, string>
   /** A plan switch that is waiting on a payment (payment_behavior=pending_if_incomplete). */
   pendingUpdate: boolean
   /** The first invoice's payment, when the subscription is still incomplete. */
@@ -39,8 +47,14 @@ export interface StripeApi {
   findPrice(lookupKey: string): Promise<StripePrice | null>
   createCustomer(input: { email: string; name: string; userId: string }, idempotencyKey: string): Promise<{ id: string }>
   attachPaymentMethod(paymentMethodId: string, customerId: string): Promise<void>
-  createSubscription(input: { customerId: string; priceId: string; paymentMethodId: string; userId: string }, idempotencyKey: string): Promise<StripeSubscription>
+  createSubscription(input: { customerId: string; priceId: string; paymentMethodId: string; userId: string; plan: string }, idempotencyKey: string): Promise<StripeSubscription>
   retrieveSubscription(id: string): Promise<StripeSubscription>
+  /** Every subscription the customer has, whatever its status. */
+  listSubscriptions(customerId: string): Promise<StripeSubscription[]>
+  /** Future charges on the subscription use this (already attached) card. */
+  setSubscriptionPaymentMethod(id: string, paymentMethodId: string): Promise<StripeSubscription>
+  /** Try an open invoice again with this card. Throws a card_error when it is declined or needs 3-D Secure. */
+  payInvoice(invoiceId: string, paymentMethodId: string): Promise<void>
   /** Prorated, charged now; if the charge fails the subscription keeps its old price. */
   changeSubscriptionPrice(id: string, itemId: string, priceId: string): Promise<StripeSubscription>
   setCancelAtPeriodEnd(id: string, cancel: boolean): Promise<StripeSubscription>
@@ -93,6 +107,7 @@ export function normalizeSubscription(raw: Json): StripeSubscription {
   const items = ((raw.items as Json | undefined)?.data as Json[] | undefined) ?? []
   const item = items[0]
   const price = item?.price as Json | string | undefined
+  const paymentMethod = raw.default_payment_method as Json | string | null | undefined
   const invoice = raw.latest_invoice as Json | string | null | undefined
   const intent = invoice && typeof invoice === 'object' ? (invoice.payment_intent as Json | string | null | undefined) : null
   const periodEnd = (raw.current_period_end as number | undefined) ?? (item?.current_period_end as number | undefined) ?? null
@@ -104,6 +119,10 @@ export function normalizeSubscription(raw: Json): StripeSubscription {
     currentPeriodEnd: typeof periodEnd === 'number' ? periodEnd : null,
     itemId: (item?.id as string | undefined) ?? null,
     priceId: typeof price === 'string' ? price : ((price?.id as string | undefined) ?? null),
+    priceLookupKey: price && typeof price === 'object' ? ((price.lookup_key as string | null | undefined) ?? null) : null,
+    defaultPaymentMethod: typeof paymentMethod === 'string' ? paymentMethod : ((paymentMethod?.id as string | undefined) ?? null),
+    latestInvoiceId: typeof invoice === 'string' ? invoice : ((invoice?.id as string | undefined) ?? null),
+    metadata: (raw.metadata as Record<string, string> | null | undefined) ?? {},
     pendingUpdate: Boolean(raw.pending_update),
     paymentIntent: intent && typeof intent === 'object' ? { status: intent.status as string, clientSecret: (intent.client_secret as string | null) ?? null } : null,
   }
@@ -116,7 +135,8 @@ export function createStripeClient(secretKey: string, fetchImpl: typeof fetch = 
     const headers: Record<string, string> = { Authorization: `Bearer ${secretKey}`, 'Stripe-Version': STRIPE_API_VERSION }
     if (method === 'POST') headers['Content-Type'] = 'application/x-www-form-urlencoded'
     if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey
-    const res = await fetchImpl(url, { method, headers, body: method === 'POST' ? body : undefined })
+    // A call that never answers would hold the account's billing lock; it fails instead and is retried.
+    const res = await fetchImpl(url, { method, headers, body: method === 'POST' ? body : undefined, signal: AbortSignal.timeout(STRIPE_TIMEOUT_MS) })
     const data = (await res.json().catch(() => ({}))) as Json
     if (!res.ok) {
       const err = (data.error as Json | undefined) ?? {}
@@ -141,7 +161,7 @@ export function createStripeClient(secretKey: string, fetchImpl: typeof fetch = 
       await call('POST', `/payment_methods/${encodeURIComponent(paymentMethodId)}/attach`, { customer: customerId })
       await call('POST', `/customers/${encodeURIComponent(customerId)}`, { invoice_settings: { default_payment_method: paymentMethodId } })
     },
-    async createSubscription({ customerId, priceId, paymentMethodId, userId }, idempotencyKey) {
+    async createSubscription({ customerId, priceId, paymentMethodId, userId, plan }, idempotencyKey) {
       const sub = await call(
         'POST',
         '/subscriptions',
@@ -152,7 +172,9 @@ export function createStripeClient(secretKey: string, fetchImpl: typeof fetch = 
           // Charge now; if the bank wants 3-D Secure the subscription stays
           // incomplete and the browser confirms the payment intent.
           payment_behavior: 'allow_incomplete',
-          metadata: { reclaim_user_id: userId },
+          // The price id is kept beside the plan: a later switch in the dashboard
+          // changes the price, and the plan is only trusted for the price it was written with.
+          metadata: { reclaim_user_id: userId, reclaim_plan: plan, reclaim_price_id: priceId },
           expand,
         },
         idempotencyKey
@@ -161,6 +183,23 @@ export function createStripeClient(secretKey: string, fetchImpl: typeof fetch = 
     },
     async retrieveSubscription(id) {
       return normalizeSubscription(await call('GET', `/subscriptions/${encodeURIComponent(id)}`, { expand }))
+    },
+    async listSubscriptions(customerId) {
+      const out: StripeSubscription[] = []
+      let after: string | undefined
+      for (;;) {
+        const page = await call('GET', '/subscriptions', { customer: customerId, status: 'all', limit: 100, starting_after: after, expand: ['data.latest_invoice.payment_intent'] })
+        const data = (page.data as Json[]) ?? []
+        out.push(...data.map(normalizeSubscription))
+        if (!page.has_more || !data.length) return out
+        after = data[data.length - 1].id as string
+      }
+    },
+    async setSubscriptionPaymentMethod(id, paymentMethodId) {
+      return normalizeSubscription(await call('POST', `/subscriptions/${encodeURIComponent(id)}`, { default_payment_method: paymentMethodId, expand }))
+    },
+    async payInvoice(invoiceId, paymentMethodId) {
+      await call('POST', `/invoices/${encodeURIComponent(invoiceId)}/pay`, { payment_method: paymentMethodId })
     },
     async changeSubscriptionPrice(id, itemId, priceId) {
       const sub = await call('POST', `/subscriptions/${encodeURIComponent(id)}`, {

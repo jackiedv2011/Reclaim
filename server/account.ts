@@ -4,7 +4,9 @@ import { normalizeEmail, type PublicUser } from './auth.ts'
 import type { UserRow } from './db.ts'
 import { HttpError, RateLimiter, json, type Request, type Response } from './http.ts'
 import { checkpointWal, type ProjectStore } from './projectStore.ts'
+import { exportBilling } from './billing.ts'
 import { exportGmail } from './gmail.ts'
+import { readProfile } from './onboarding.ts'
 
 /** An export decrypts every audit on the account: plenty for a person, not a loop. */
 const exportLimiter = new RateLimiter(10, 60 * 60 * 1000)
@@ -86,12 +88,37 @@ export function exportAccount(db: DatabaseSync, projects: ProjectStore, user: Us
       termsVersion: user.terms_version,
       termsAcceptedAt: user.terms_accepted_at ? new Date(user.terms_accepted_at).toISOString() : null,
     },
+    onboarding: { answers: readProfile(user.onboarding_profile), seenAt: iso(user.onboarding_seen_at) },
+    billing: exportBilling(db, user),
     quickbooks: qbo
       ? { companyName: qbo.company_name, connectedAt: new Date(qbo.connected_at).toISOString(), lastSyncAt: qbo.last_sync_at ? new Date(qbo.last_sync_at).toISOString() : null }
       : null,
     gmail: exportGmail(db, user.id),
-    audits: projects.list(user.id),
+    caseEvents: caseEvents(db, user.id),
+    ...stored(projects, user.id),
   }
+}
+
+const iso = (at: number | null | undefined) => (at ? new Date(at).toISOString() : null)
+
+/** Every decision recorded on the account's cases: what was done, by whom, when, and from which rows. */
+function caseEvents(db: DatabaseSync, userId: string) {
+  const rows = db.prepare('SELECT project_id, finding_id, action, actor, at, prior_revision, revision, source_refs FROM case_events WHERE user_id = ? ORDER BY at, revision').all(userId) as Array<{ project_id: string; finding_id: string; action: string; actor: string | null; at: number; prior_revision: number; revision: number; source_refs: string }>
+  return rows.map((r) => ({ auditId: r.project_id, findingId: r.finding_id, action: r.action, by: r.actor, at: iso(r.at), priorRevision: r.prior_revision, revision: r.revision, sourceRows: parsed(r.source_refs) }))
+}
+
+function parsed(json: string): unknown {
+  try {
+    return JSON.parse(json)
+  } catch {
+    return []
+  }
+}
+
+/** The audits, and the ids of any the server holds but can't open (they are kept, not dropped silently). */
+function stored(projects: ProjectStore, userId: string) {
+  const { projects: audits, unreadable } = projects.listAll(userId)
+  return { audits, ...(unreadable.length ? { unreadableAudits: unreadable.map((u) => ({ id: u.id, createdAt: new Date(u.createdAt).toISOString(), updatedAt: new Date(u.updatedAt).toISOString() })) } : {}) }
 }
 
 /**

@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createApp } from './app.ts'
+import { loadConfig } from './config.ts'
 import { openDatabase } from './db.ts'
 import { ProjectStore } from './projectStore.ts'
 
@@ -99,7 +101,11 @@ describe('ProjectStore with DATA_KEY', () => {
 
   it('refuses the wrong key rather than returning garbage', () => {
     new ProjectStore(db, { current: key, previous: null }).upsert('u1', project('p1'))
-    expect(() => new ProjectStore(db, { current: randomBytes(32), previous: null }).list('u1')).toThrow()
+    const wrong = new ProjectStore(db, { current: randomBytes(32), previous: null })
+    expect(() => wrong.get('u1', 'p1')).toThrow()
+    expect(() => wrong.migrate()).toThrow(/DATA_KEY is not the key/)
+    expect(wrong.list('u1')).toEqual([])
+    expect(wrong.unreadable('u1')).toMatchObject([{ id: 'p1' }])
   })
 })
 
@@ -127,5 +133,118 @@ describe('deleting', () => {
     store.delete('u1', 'p1')
     db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').run()
     expect(onDisk()).not.toContain(MARKER)
+  })
+})
+
+describe('the key check', () => {
+  const key = randomBytes(32)
+  const rows = () => (db.prepare('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n
+  const corrupt = (userId: string, id: string) => {
+    const [v, iv, tag, body] = rawPayload(userId, id).payload.split('.')
+    db.prepare('UPDATE projects SET payload = ? WHERE user_id = ? AND id = ?').run([v, iv, tag, `AAAA${body.slice(4)}`].join('.'), userId, id)
+  }
+
+  it('is written on the first start and refuses a different key, even before any audit exists', () => {
+    new ProjectStore(db, { current: key, previous: null }).migrate()
+    const wrong = new ProjectStore(db, { current: randomBytes(32), previous: null })
+    expect(() => wrong.migrate()).toThrow(/DATA_KEY is not the key/)
+    expect(new ProjectStore(db, { current: key, previous: null }).migrate()).toBe(0)
+  })
+
+  it('refuses a wrong key on a database from before the check existed', () => {
+    new ProjectStore(db, { current: key, previous: null }).upsert('u1', project('p1'))
+    db.exec('DELETE FROM data_key_check')
+    expect(() => new ProjectStore(db, { current: randomBytes(32), previous: null }).migrate()).toThrow(/DATA_KEY is not the key/)
+    expect(new ProjectStore(db, { current: key, previous: null }).migrate()).toBe(0)
+    expect(new ProjectStore(db, { current: key, previous: null }).get('u1', 'p1')).toEqual(project('p1'))
+  })
+
+  it('rotates with DATA_KEY_PREVIOUS, then accepts only the new key', () => {
+    const next = randomBytes(32)
+    const store = new ProjectStore(db, { current: key, previous: null })
+    store.migrate()
+    store.upsert('u1', project('p1'))
+    expect(() => new ProjectStore(db, { current: next, previous: randomBytes(32) }).migrate()).toThrow(/DATA_KEY/)
+    expect(new ProjectStore(db, { current: next, previous: key }).migrate()).toBe(1)
+    expect(new ProjectStore(db, { current: next, previous: null }).migrate()).toBe(0)
+    expect(() => new ProjectStore(db, { current: key, previous: null }).migrate()).toThrow(/DATA_KEY is not the key/)
+  })
+
+  it('never names or prints a key', () => {
+    new ProjectStore(db, { current: key, previous: null }).migrate()
+    const wrong = randomBytes(32)
+    try {
+      new ProjectStore(db, { current: wrong, previous: null }).migrate()
+      expect.unreachable()
+    } catch (err) {
+      expect(String(err)).not.toContain(wrong.toString('base64'))
+      expect(String(err)).toContain('DATA_KEY_PREVIOUS')
+    }
+  })
+
+  it('a damaged check value is repaired when the key still opens a stored audit', () => {
+    const store = new ProjectStore(db, { current: key, previous: null })
+    store.migrate()
+    store.upsert('u1', project('p1'))
+    db.exec("UPDATE data_key_check SET sealed = 'v1.x.y.z'")
+    expect(new ProjectStore(db, { current: key, previous: null }).migrate()).toBe(0)
+    expect(() => new ProjectStore(db, { current: randomBytes(32), previous: null }).migrate()).toThrow(/DATA_KEY/)
+  })
+
+  it('one unreadable audit is set apart, not deleted, and the rest still list and start', () => {
+    const store = new ProjectStore(db, { current: key, previous: null })
+    store.migrate()
+    for (const id of ['p1', 'p2', 'p3']) store.upsert('u1', project(id))
+    corrupt('u1', 'p2')
+    db.prepare("UPDATE projects SET payload = '{not json' WHERE id = 'p3'").run()
+    const before = rawPayload('u1', 'p2').payload
+
+    const restarted = new ProjectStore(db, { current: key, previous: null })
+    restarted.migrate()
+    expect(restarted.list('u1').map((p) => p.id)).toEqual(['p1'])
+    expect(restarted.unreadable('u1').map((u) => u.id).sort()).toEqual(['p2', 'p3'])
+    expect(() => restarted.get('u1', 'p2')).toThrow(/can’t be opened/)
+    expect(rows()).toBe(3)
+    expect(rawPayload('u1', 'p2').payload).toBe(before)
+    // Not even a rotation drops it.
+    const next = randomBytes(32)
+    new ProjectStore(db, { current: next, previous: key }).migrate()
+    expect(new ProjectStore(db, { current: next, previous: null }).list('u1').map((p) => p.id)).toEqual(['p1'])
+    expect(rawPayload('u1', 'p2').payload).toBe(before)
+  })
+})
+
+describe('a server with one unreadable audit', () => {
+  it('starts, lists and exports the rest, and refuses to write over it', async () => {
+    const config = loadConfig({ NODE_ENV: 'test', DATABASE_PATH: ':memory:', APP_ORIGIN: 'http://localhost:0', REQUIRE_EMAIL_VERIFICATION: 'false', DATA_KEY: randomBytes(32).toString('base64') })
+    const open = () => createApp({ config, db, google: null, drafts: null, quickbooks: null, stripe: null, gmail: null })
+    let app = open()
+    let base = `http://127.0.0.1:${await app.listen(0)}`
+    let cookie = ''
+    const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
+      const res = await fetch(base + path, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined })
+      const set = res.headers.getSetCookie()[0]
+      if (set) cookie = set.split(';')[0]
+      return { status: res.status, body: (await res.json()) as any }
+    }
+    await call('POST', '/api/auth/signup', { firstName: 'A', lastName: 'B', email: 'a@example.com', company: 'C', password: 'correct-horse-battery', confirmPassword: 'correct-horse-battery', acceptedTerms: true, termsVersion: 't' })
+    for (const id of ['good', 'bad']) expect((await call('PUT', `/api/projects/${id}`, project(id, `Vendor ${id}`))).status).toBe(200)
+    await app.close()
+    db.prepare("UPDATE projects SET payload = 'v1.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA.AAAA' WHERE id = 'bad'").run()
+
+    app = open()
+    base = `http://127.0.0.1:${await app.listen(0)}`
+    const list = await call('GET', '/api/projects')
+    expect(list.status).toBe(200)
+    expect(list.body.projects.map((p: { id: string }) => p.id)).toEqual(['good'])
+    expect(list.body.unreadable).toMatchObject([{ id: 'bad' }])
+    const exported = await call('GET', '/api/account/export')
+    expect(exported.status).toBe(200)
+    expect(exported.body.audits).toHaveLength(1)
+    expect(exported.body.unreadableAudits).toMatchObject([{ id: 'bad' }])
+    const write = await call('PUT', '/api/projects/bad', project('bad', 'Vendor bad'), { 'If-Match': '1' })
+    expect([write.status, write.body.code]).toEqual([409, 'audit_unreadable'])
+    expect((db.prepare("SELECT payload FROM projects WHERE id = 'bad'").get() as { payload: string }).payload).toMatch(/^v1\.AAAA/)
+    await app.close()
   })
 })

@@ -244,7 +244,15 @@ export class CaseCommands {
     for (const row of rows) {
       const already = this.db.prepare('SELECT 1 FROM case_events WHERE user_id = ? AND project_id = ? LIMIT 1').get(row.user_id, row.id)
       if (already) continue
-      const project = this.projects.get(row.user_id, row.id)
+      let project: Record<string, unknown> | null
+      try {
+        project = this.projects.get(row.user_id, row.id)
+      } catch {
+        // One audit that can't be opened must not stop the server for everyone.
+        // It can't be used either, so it is quarantined whenever it opens again.
+        console.error('a stored audit could not be opened during startup; it was left as it is')
+        continue
+      }
       const env = project?.environment as StoredEnvironment | undefined
       if (!project || !env || !Object.keys(env.caseStates ?? {}).length) continue
       this.db.exec('BEGIN IMMEDIATE')
@@ -265,7 +273,9 @@ export class CaseCommands {
       this.db.exec('COMMIT')
       } catch (error) {
         this.db.exec('ROLLBACK')
-        throw error
+        // The database refusing a write is everyone's problem; a malformed audit is only its own.
+        if ((error as { code?: unknown }).code === 'ERR_SQLITE_ERROR') throw error
+        console.error('a stored audit is malformed and could not be reviewed during startup; it was left as it is')
       }
     }
     return count

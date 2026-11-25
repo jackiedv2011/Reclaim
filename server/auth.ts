@@ -2,7 +2,8 @@ import type { DatabaseSync } from 'node:sqlite'
 import { hashPassword, hashToken, newId, newToken, verifyPassword } from './crypto.ts'
 import type { UserRow } from './db.ts'
 import { HttpError } from './http.ts'
-import type { Mailer } from './mailer.ts'
+import { KeyedLock } from './keyedLock.ts'
+import type { Mailer, OutgoingMail } from './mailer.ts'
 import { planOf, type Plan } from './plans.ts'
 import { readProfile, type OnboardingProfile } from './onboarding.ts'
 
@@ -47,6 +48,8 @@ export class AuthService {
   private readonly db: DatabaseSync
   private readonly mailer: Mailer
   private readonly options: AuthServiceOptions
+  /** One sign-up at a time per address, so a double click can't race itself. */
+  private readonly signUps = new KeyedLock()
 
   constructor(db: DatabaseSync, mailer: Mailer, options: AuthServiceOptions) {
     this.db = db
@@ -124,7 +127,9 @@ export class AuthService {
   /**
    * Creates the account and sends the verification mail. The response is the
    * same whether or not the address was already registered — the existing
-   * owner gets an email instead of the requester getting a hint.
+   * owner gets an email instead of the requester getting a hint. If that mail
+   * can't be sent, both cases fail the same way and no account is left behind,
+   * so trying again later starts from nothing.
    */
   async signUp(input: {
     firstName: string
@@ -134,31 +139,68 @@ export class AuthService {
     password: string
     termsVersion: string | null
   }): Promise<{ requiresVerification: boolean; user: PublicUser | null; sessionUserId: string | null }> {
+    return this.signUps.run(normalizeEmail(input.email), () => this.signUpLocked(input))
+  }
+
+  private async signUpLocked(input: Parameters<AuthService['signUp']>[0]): ReturnType<AuthService['signUp']> {
     const email = normalizeEmail(input.email)
     const existing = this.findUserByEmail(email)
     if (existing) {
-      await this.mailer.send({
+      // As much work as hashing a new password, so the answer takes as long either way.
+      const samePassword = await verifyPassword(input.password, existing.password_hash)
+      if (!this.options.requireEmailVerification) throw new HttpError(409, 'An account with this email already exists. Log in instead.', 'account_exists')
+      if (samePassword && existing.email_verified !== 1) {
+        // A double click, or the answer to the first sign-up was lost: the same person wants the same link.
+        await this.sendOrFail(() => this.sendVerification(existing))
+        return { requiresVerification: true, user: null, sessionUserId: null }
+      }
+      await this.sendOrFail(() => this.mailer.send({
         to: email,
         subject: 'You already have a Reclaim account',
         body: `Someone tried to create a Reclaim account with this address. You already have one — log in at ${this.options.appOrigin}/login, or reset your password at ${this.options.appOrigin}/forgot-password if you have forgotten it. If this wasn't you, you can ignore this email.`,
         link: `${this.options.appOrigin}/login`,
-      })
-      return { requiresVerification: this.options.requireEmailVerification, user: null, sessionUserId: null }
+      }))
+      return { requiresVerification: true, user: null, sessionUserId: null }
     }
     const id = newId('user')
     const now = Date.now()
+    const passwordHash = await hashPassword(input.password)
+    // Google sign-in may have made the account while the password was being hashed.
+    if (this.findUserByEmail(email)) return this.signUpLocked(input)
     this.db
       .prepare(
         `INSERT INTO users (id, email, email_verified, password_hash, first_name, last_name, company, created_at, terms_accepted_at, terms_version)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, email, this.options.requireEmailVerification ? 0 : 1, await hashPassword(input.password), input.firstName.trim(), input.lastName.trim(), input.company.trim(), now, now, input.termsVersion)
+      .run(id, email, this.options.requireEmailVerification ? 0 : 1, passwordHash, input.firstName.trim(), input.lastName.trim(), input.company.trim(), now, now, input.termsVersion)
     const user = this.findUserById(id)!
     if (this.options.requireEmailVerification) {
-      await this.sendVerification(user)
+      await this.sendOrFail(() => this.sendVerification(user)).catch((err) => {
+        // Nobody can have used it: the only way in was the email that didn't go out
+        // (unless Google proved the address meanwhile, which is a real account).
+        this.db.prepare("DELETE FROM users WHERE id = ? AND email_verified = 0 AND NOT EXISTS (SELECT 1 FROM identities WHERE user_id = users.id)").run(user.id)
+        throw err
+      })
       return { requiresVerification: true, user: null, sessionUserId: null }
     }
     return { requiresVerification: false, user: this.toPublic(user), sessionUserId: id }
+  }
+
+  private async sendOrFail(send: () => Promise<void>): Promise<void> {
+    try {
+      await send()
+    } catch (err) {
+      console.error('sign-up email failed:', err instanceof Error ? err.message : 'unknown error')
+      throw new HttpError(503, 'We couldn’t send the confirmation email just now. No account was created. Try again in a few minutes.', 'mail_unavailable')
+    }
+  }
+
+  /**
+   * Sent after the answer, and a failure is only logged: an answer that waits
+   * for (or fails with) the mail provider would say which addresses are registered.
+   */
+  private sendInBackground(mail: () => Promise<void>): void {
+    void mail().catch((err) => console.error('email failed:', err instanceof Error ? err.message : 'unknown error'))
   }
 
   async sendVerification(user: UserRow): Promise<void> {
@@ -177,7 +219,7 @@ export class AuthService {
   async resendVerification(email: string): Promise<void> {
     const user = this.findUserByEmail(email)
     if (!user || user.email_verified === 1) return
-    await this.sendVerification(user)
+    this.sendInBackground(() => this.sendVerification(user))
   }
 
   verifyEmail(token: string): UserRow {
@@ -239,12 +281,13 @@ export class AuthService {
     const now = Date.now()
     this.db.prepare('INSERT INTO tokens (id, user_id, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?)').run(hash, user.id, 'reset', now, now + RESET_TTL_MS)
     const link = `${this.options.appOrigin}/reset-password?token=${token}`
-    await this.mailer.send({
+    const mail: OutgoingMail = {
       to: user.email,
       subject: 'Reset your Reclaim password',
       body: `Hi ${user.first_name},\n\nUse this link to choose a new password:\n\n${link}\n\nIt works once, for one hour. If you did not ask for this, ignore this email — your password has not changed.`,
       link,
-    })
+    }
+    this.sendInBackground(() => this.mailer.send(mail))
   }
 
   async resetPassword(token: string, password: string, confirmPassword: string): Promise<UserRow> {

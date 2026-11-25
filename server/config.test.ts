@@ -5,7 +5,7 @@ import { loadConfig } from './config.ts'
 const tokenKey = Buffer.alloc(32, 7).toString('base64')
 /** The smallest environment a production server accepts. */
 const dataKey = Buffer.alloc(32, 9).toString('base64')
-const prod = { NODE_ENV: 'production', APP_ORIGIN: 'https://app.reclaim.example', RESEND_API_KEY: 're_test', EMAIL_FROM: 'Reclaim <no-reply@reclaim.example>', DATA_KEY: dataKey }
+const prod = { NODE_ENV: 'production', APP_ORIGIN: 'https://app.reclaim.example', RESEND_API_KEY: 're_test', EMAIL_FROM: 'Reclaim <no-reply@reclaim.example>', DATA_KEY: dataKey, TRUST_PROXY: '1' }
 
 describe('production startup checks', () => {
   it('starts with an https origin and a real email provider', () => {
@@ -137,5 +137,44 @@ describe('QuickBooks environment', () => {
 
   it('a production server may still read the sandbox (a staging box)', () => {
     expect(loadConfig({ ...prod, ...qbo }).quickbooks?.environment).toBe('sandbox')
+  })
+})
+
+describe('blank and malformed settings', () => {
+  const blank = { PORT: '', DATABASE_PATH: ' ', SESSION_DAYS: '', REMEMBER_ME_DAYS: '', CONTACT_EMAIL: '', ANTHROPIC_API_KEY: '', ANTHROPIC_MODEL: '', APP_ORIGIN: '', REQUIRE_EMAIL_VERIFICATION: '', TRUST_PROXY: '' }
+
+  it('a blank value is the same as an unset one', () => {
+    expect(loadConfig(blank)).toEqual(loadConfig({}))
+    expect(loadConfig(blank)).toMatchObject({ port: 8787, databasePath: './data/reclaim.sqlite', sessionDays: 1, rememberMeDays: 30, contactEmail: 'reclaimbusiness1@gmail.com', anthropicApiKey: null, appOrigin: 'http://localhost:8787' })
+  })
+
+  it.each([
+    ['REMEMBER_ME_DAYS', '30 days'],
+    ['SESSION_DAYS', 'one'],
+    ['SESSION_DAYS', '0'],
+    ['SESSION_DAYS', '-1'],
+    ['REMEMBER_ME_DAYS', 'Infinity'],
+    ['PORT', 'http'],
+    ['PORT', '70000'],
+    ['PORT', '87.5'],
+  ])('refuses %s=%s, naming the setting', (name, value) => {
+    expect(() => loadConfig({ [name]: value })).toThrow(new RegExp(`${name} must be`))
+    expect(() => loadConfig({ ...prod, [name]: value })).toThrow(new RegExp(`Refusing to start in production:[\\s\\S]*${name} must be`))
+  })
+
+  it('names a half-configured Google sign-in and a contact address that is not one, in production', () => {
+    expect(() => loadConfig({ ...prod, GOOGLE_CLIENT_ID: 'id.apps.googleusercontent.com' })).toThrow(/GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither/)
+    expect(() => loadConfig({ ...prod, GOOGLE_CLIENT_SECRET: 'super-secret', GOOGLE_CLIENT_ID: ' ' })).toThrow(/GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither/)
+    expect(() => loadConfig({ ...prod, CONTACT_EMAIL: 'nobody' })).toThrow(/CONTACT_EMAIL must be/)
+    expect(loadConfig({ GOOGLE_CLIENT_ID: 'id' }).google).toBeNull()
+  })
+
+  it('production needs TRUST_PROXY stated, even when the answer is none', () => {
+    const { TRUST_PROXY: _proxy, ...rest } = prod
+    expect(() => loadConfig(rest)).toThrow(/TRUST_PROXY is not set/)
+    expect(() => loadConfig({ ...rest, TRUST_PROXY: '  ' })).toThrow(/TRUST_PROXY is not set/)
+    expect(loadConfig({ ...rest, TRUST_PROXY: '0' }).trustProxy).toBe(0)
+    expect(loadConfig({ ...rest, TRUST_PROXY: '2' }).trustProxy).toBe(2)
+    expect(loadConfig({}).trustProxy).toBe(0)
   })
 })

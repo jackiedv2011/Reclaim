@@ -12,7 +12,7 @@ import { DevMailer } from './mailer.ts'
 const devConfig = (extra: Record<string, string> = {}) =>
   loadConfig({ NODE_ENV: 'test', DATABASE_PATH: ':memory:', APP_ORIGIN: 'http://localhost:0', REQUIRE_EMAIL_VERIFICATION: 'false', ...extra })
 const prodConfig = () =>
-  loadConfig({ NODE_ENV: 'production', DATABASE_PATH: ':memory:', APP_ORIGIN: 'https://app.reclaim.example', RESEND_API_KEY: 're_test', EMAIL_FROM: 'no-reply@reclaim.example', DATA_KEY: randomBytes(32).toString('base64') })
+  loadConfig({ NODE_ENV: 'production', DATABASE_PATH: ':memory:', APP_ORIGIN: 'https://app.reclaim.example', RESEND_API_KEY: 're_test', EMAIL_FROM: 'no-reply@reclaim.example', TRUST_PROXY: '1', DATA_KEY: randomBytes(32).toString('base64') })
 
 let googleIdentity: GoogleIdentity | null = null
 const fakeGoogle: GoogleClient = {

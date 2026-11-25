@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { nextAfterAuth } from '@/pages/authRedirect'
 import { useAuth } from '@/lib/auth/AuthContext'
+import { messageOf } from '@/lib/auth/apiAuthService'
 import { validateSignUp } from '@/lib/auth/localAuthService'
 import { AuthSplit, leavePage, SplitField } from '@/pages/AuthSplit'
 import { DevInbox } from '@/pages/DevInbox'
@@ -30,8 +31,15 @@ export function SignupPage() {
     if (Object.keys(errors).length > 0) return
 
     setSubmitting(true)
-    const result = await signUp(input)
-    setSubmitting(false)
+    let result: Awaited<ReturnType<typeof signUp>>
+    try {
+      result = await signUp(input)
+    } catch (err) {
+      setFormError(messageOf(err))
+      return
+    } finally {
+      setSubmitting(false)
+    }
     if (!result.ok) {
       setFieldErrors(result.fields ?? {})
       setFormError(result.fields ? null : result.message)

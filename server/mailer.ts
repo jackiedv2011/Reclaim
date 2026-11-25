@@ -1,6 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite'
 import nodemailer from 'nodemailer'
 
+/** A provider that doesn't answer is a failed send, not a request that hangs. */
+const MAIL_TIMEOUT_MS = 20_000
+
 export interface OutgoingMail {
   to: string
   subject: string
@@ -48,6 +51,7 @@ export class ResendMailer implements Mailer {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ from: this.from, to: [mail.to], subject: mail.subject, text: mail.body, ...(mail.replyTo ? { reply_to: mail.replyTo } : {}) }),
+      signal: AbortSignal.timeout(MAIL_TIMEOUT_MS),
     })
     if (!response.ok) throw new Error(`Email delivery failed (${response.status})`)
   }
@@ -64,7 +68,7 @@ export class GmailMailer implements Mailer {
   private readonly transport: ReturnType<typeof nodemailer.createTransport>
   constructor(user: string, appPassword: string) {
     this.user = user
-    this.transport = nodemailer.createTransport({ service: 'gmail', auth: { user, pass: appPassword.replace(/\s+/g, '') } })
+    this.transport = nodemailer.createTransport({ service: 'gmail', auth: { user, pass: appPassword.replace(/\s+/g, '') }, connectionTimeout: MAIL_TIMEOUT_MS, greetingTimeout: MAIL_TIMEOUT_MS, socketTimeout: MAIL_TIMEOUT_MS })
   }
   async send(mail: OutgoingMail): Promise<void> {
     try {
