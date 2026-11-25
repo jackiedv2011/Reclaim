@@ -18,6 +18,10 @@ import { createLegacyAuditSource, type LegacyAuditSource, type StoredAudit } fro
 import { attentionQueue, ATTENTION_CATEGORIES, type AttentionCategory } from '../src/intelligence/attention.ts'
 import { importCoverageSummary, IntelligenceQueryError, spendByCategory, spendByVendor, spendSummary, spendTrend, type SpendQuery } from '../src/intelligence/spend.ts'
 import { recoveryByVendor, recoveryOverview } from '../src/intelligence/recoveryVisibility.ts'
+import { vendorProfile, vendorProfiles } from '../src/intelligence/vendorProfiles.ts'
+import { vendorBaselines } from '../src/intelligence/baselines.ts'
+import { InMemoryFeedbackStore } from '../src/intelligence/memory.ts'
+import type { ReadModelEnvelope } from '../src/intelligence/contracts.ts'
 
 export const INTELLIGENCE_PREFIX = '/api/intelligence/'
 
@@ -45,10 +49,10 @@ type Handler = (input: RouteInput) => unknown
 const CURSOR = /^[\w.:-]{1,200}$/
 
 /** Bounded, validated query parameters. Anything malformed is a 400, never a silent default. */
-export function queryParam(query: URLSearchParams, name: string, pattern: RegExp): string | null {
+export function queryParam(query: URLSearchParams, name: string, pattern: RegExp, maxLength = 200): string | null {
   const value = query.get(name)
   if (value === null || value === '') return null
-  if (value.length > 200 || !pattern.test(value)) throw new HttpError(400, `Invalid ${name}.`, 'validation')
+  if (value.length > maxLength || !pattern.test(value)) throw new HttpError(400, `Invalid ${name}.`, 'validation')
   return value
 }
 
@@ -68,6 +72,18 @@ const page = (query: URLSearchParams) => ({ limit: limitParam(query), cursor: cu
 /** Saved audits the adapter could not read are a coverage limit on every answer. */
 const unreadable = (source: LegacyAuditSource) => ({ extraCoverageReasons: source.unreadableAuditIds.length ? ['unreadable_saved_audit'] : [] })
 
+/** Vendor cursors carry an encoded name; allow the percent and separator characters, longer. */
+const VENDOR_CURSOR = /^[\w.:%|~*'()!-]{1,800}$/
+const VENDOR_KEY = /^[\w.:-]{1,200}$/
+
+/**
+ * Business memory has no persistent store yet (interface request S-7), so the
+ * server reads profiles against an empty store and says so on the envelope.
+ */
+function withoutPersistedMemory<T>(env: ReadModelEnvelope<T>): ReadModelEnvelope<T> {
+  return { ...env, warnings: [...env.warnings, { code: 'business_memory_not_persisted', detail: 'Corrections and context notes are not stored on the server yet, so none influence this result.' }] }
+}
+
 const ROUTES: Array<{ method: 'GET' | 'POST'; pattern: RegExp; handler: Handler }> = [
   {
     method: 'GET',
@@ -85,6 +101,20 @@ const ROUTES: Array<{ method: 'GET' | 'POST'; pattern: RegExp; handler: Handler 
   { method: 'GET', pattern: /^spend\/trend$/, handler: ({ ctx, source, query, now }) => spendTrend(ctx, source.financial, spendQuery(query), now, { granularity: 'month' }, unreadable(source)) },
   { method: 'GET', pattern: /^coverage$/, handler: ({ ctx, source, now }) => importCoverageSummary(ctx, source.financial, now, unreadable(source)) },
   { method: 'GET', pattern: /^recovery$/, handler: ({ ctx, source, returns, now }) => recoveryOverview(ctx, source.cases, returns, now, unreadable(source)) },
+  {
+    method: 'GET',
+    pattern: /^vendors$/,
+    handler: ({ ctx, source, query, now }) => withoutPersistedMemory(vendorProfiles(ctx, source.financial, source.cases, new InMemoryFeedbackStore(), now, { limit: limitParam(query), cursor: queryParam(query, 'cursor', VENDOR_CURSOR, 800) })),
+  },
+  {
+    method: 'GET',
+    pattern: /^vendors\/([^/]+)$/,
+    handler: ({ ctx, source, now, param }) => {
+      if (!param || !VENDOR_KEY.test(param)) throw new HttpError(400, 'Invalid vendor.', 'validation')
+      return withoutPersistedMemory(vendorProfile(ctx, source.financial, source.cases, new InMemoryFeedbackStore(), param, now))
+    },
+  },
+  { method: 'GET', pattern: /^baselines$/, handler: ({ ctx, source, now }) => vendorBaselines(ctx, source.financial, now) },
   { method: 'GET', pattern: /^recovery\/vendors$/, handler: ({ ctx, source, returns, query, now }) => recoveryByVendor(ctx, source.cases, returns, now, page(query), unreadable(source)) },
 ]
 

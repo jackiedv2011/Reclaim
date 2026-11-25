@@ -149,4 +149,29 @@ describe('intelligence API', () => {
     expect((await client.get('/api/intelligence/spend/summary?from=2026-13-01')).status).toBe(400)
     expect((await client.get('/api/intelligence/spend/trend?from=2026-06-01&to=2026-01-01')).status).toBe(400)
   })
+
+  it('serves vendor profiles and baselines without leaking another tenant\'s same-named vendor', async () => {
+    const alice = await signedIn(person('Hal', 'hal@example.test'))
+    const bob = await signedIn(person('Ivy', 'ivy@example.test'))
+    const f = await fixtures()
+    for (const audit of f.tenantAAudits()) store.upsert(alice.userId, { ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: 1, updatedAt: 2 })
+    for (const audit of f.tenantBAudits()) store.upsert(bob.userId, { ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: 1, updatedAt: 2 })
+    const list = await alice.client.get('/api/intelligence/vendors?limit=2')
+    expect(list.status).toBe(200)
+    expect(list.body.warnings.map((w: { code: string }) => w.code)).toContain('business_memory_not_persisted')
+    expect(list.body.result.items).toHaveLength(2)
+    const next = await alice.client.get(`/api/intelligence/vendors?limit=2&cursor=${encodeURIComponent(list.body.result.nextCursor)}`)
+    expect(next.status).toBe(200)
+    const key = list.body.result.items.find((p: { displayNames?: string[]; vendorKey: string }) => JSON.stringify(p).includes('Fixture Coffee Co'))?.vendorKey
+      ?? next.body.result.items.find((p: { vendorKey: string }) => JSON.stringify(p).includes('Fixture Coffee Co')).vendorKey
+    const mine = await alice.client.get(`/api/intelligence/vendors/${encodeURIComponent(key)}`)
+    expect(mine.status).toBe(200)
+    expect(JSON.stringify(mine.body)).not.toContain('99999') // tenant B's 999.99 payment
+    // Bob's vendor of the same name is his own profile, computed from his rows only.
+    const theirs = await bob.client.get(`/api/intelligence/vendors/${encodeURIComponent(key)}`)
+    expect(theirs.status).toBe(200)
+    expect(JSON.stringify(theirs.body.result)).not.toContain('INV-1003')
+    expect((await alice.client.get('/api/intelligence/vendors/not%20a%20key')).status).toBe(400)
+    expect((await alice.client.get('/api/intelligence/baselines')).status).toBe(200)
+  })
 })
