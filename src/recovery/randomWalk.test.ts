@@ -20,7 +20,7 @@ import {
   verifyRecovery,
 } from '@/recovery/model'
 import { ladder, vendors } from '@/workspace/selectors'
-import { authorizedOutstanding, eligiblePotential, verifiedReturned } from '@/recovery/financials'
+import { activeReturned, authorizedOutstanding, eligiblePotential, verifiedReturned } from '@/recovery/financials'
 import { attestDuplicate } from '@/recovery/testEvidence'
 
 function rng(seed: number) {
@@ -63,6 +63,10 @@ function checkInvariants(env: LedgerEnvironment, where: string) {
     else unknownRecovered += cents(verifiedReturned(s))
     const open = s.decision !== 'expected' && s.recoveryStage !== 'recovered' && s.recoveryStage !== 'not_recovered'
     const supported = eligiblePotential(f, env.result.findings)
+    // A request for less than the records support, paid in full, leaves the rest still claimable.
+    if (s.recoveryStage === 'recovered' && supported !== null && cents(s.requestedAmount) > 0 && cents(activeReturned(s)) >= cents(s.requestedAmount)) {
+      potential += Math.max(0, cents(supported) - cents(verifiedReturned(s)))
+    }
     if (open && supported !== null) {
       potential += Math.max(0, cents(supported) - cents(verifiedReturned(s)))
       if (s.approvedAt && (s.recoveryStage === 'confirmed' || s.recoveryStage === 'requested')) outstanding += cents(authorizedOutstanding(s))

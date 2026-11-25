@@ -1,15 +1,18 @@
 import { REDACTED_MONEY, REDACTED_VENDOR } from '../planGates'
 import { useEffect, useState } from 'react'
 import { ArrowRight, Download, Lock, Search, SlidersHorizontal } from 'lucide-react'
-import { formatCurrency, formatDate, plural } from '@/lib/format'
-import { DECISION_LABEL, type DecisionValue } from '@/ledger/caseState'
+import { formatCurrency, plural } from '@/lib/format'
+import type { DecisionValue } from '@/ledger/caseState'
 import { evaluateEligibility, type EvidenceState } from '@/recovery/eligibility'
 import { nextActionLabel } from './findingText'
-import { recoveryStatusLabel } from '@/recovery/model'
 import type { LedgerEnvironment } from '@/ledger/store'
 import { useEntitlements } from '@/lib/auth/AuthContext'
 import { UpgradeDialog } from '@/components/plan/UpgradeDialog'
-import { EVIDENCE_LABEL, ladder, opportunities, type Opportunity } from '../selectors'
+import { checkCoverage, figuresOf, ladder, opportunities, type Opportunity } from '../selectors'
+import { findingMoney, otherCurrencies } from '../money'
+import { downloadCsv } from '../csvExport'
+import { categoryOf, FINDING_CATEGORY_LABEL, findingsExportRows, type FindingCategory } from '../findingsExport'
+import { CoverageNote } from './CoverageNote'
 import { KindChip } from './KindChip'
 import { StatusChip } from './StatusChip'
 import { Strength } from './Strength'
@@ -20,62 +23,17 @@ interface FindingsProps {
   visible: Set<string>
   onOpenCase: (findingId: string) => void
 }
-type Category = 'all' | 'recoverable' | 'review' | 'security' | 'opportunity'
+type Category = 'all' | FindingCategory
 type Status = 'all' | 'unreviewed' | DecisionValue
 type Sort = 'priority' | 'amount-desc' | 'amount-asc' | 'vendor'
-const categories: Array<{ id: Category; label: string }> = [
-  { id: 'all', label: 'All' },
-  { id: 'recoverable', label: 'Recovery candidates' },
-  { id: 'review', label: 'Flagged for review' },
-  { id: 'security', label: 'Security alerts' },
-  { id: 'opportunity', label: 'Future savings' },
-]
 const categoryValues: Category[] = ['all', 'recoverable', 'review', 'security', 'opportunity']
-const CATEGORY_LABEL = Object.fromEntries(categories.map(({ id, label }) => [id, label])) as Record<Category, string>
-
-/** Tabs follow the finding's classification; `class` is a deprecated mirror of it. */
-function categoryOf(finding: Opportunity['finding']): Exclude<Category, 'all'> {
-  if (finding.classification === 'recovery_candidate') return 'recoverable'
-  if (finding.classification === 'preventive_security') return 'security'
-  if (finding.classification === 'future_savings') return 'opportunity'
-  return 'review'
-}
-
+const categories = categoryValues.map((id) => ({ id, label: id === 'all' ? 'All' : FINDING_CATEGORY_LABEL[id] }))
 
 const statusValues: Status[] = ['all', 'unreviewed', 'confirmed', 'needs_info', 'expected']
 const sortValues: Sort[] = ['priority', 'amount-desc', 'amount-asc', 'vendor']
 function initial<T extends string>(key: string, allowed: T[], fallback: T): T {
   const value = new URLSearchParams(window.location.search).get(key) as T | null
   return value && allowed.includes(value) ? value : fallback
-}
-
-function csvCell(value: string | number): string {
-  const text = String(value)
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
-}
-
-/** The rows this plan can see, as a spreadsheet a controller can file or forward. */
-function exportCsv(rows: Opportunity[]) {
-  const header = ['Vendor', 'Finding', 'Category', 'Rule', 'Invoices', 'Payment dates', 'Evidence', 'Decision', 'Recovery', 'Flagged amount']
-  const lines = rows.map((o) => [
-    o.finding.vendor,
-    o.typeLabel,
-    CATEGORY_LABEL[categoryOf(o.finding)],
-    `${o.finding.ruleId ?? o.finding.type} v${o.finding.ruleVersion ?? 1}`,
-    [...new Set(o.finding.relatedRecords.map((r) => r.invoiceNumber).filter(Boolean))].join('; '),
-    o.finding.relatedRecords.map((r) => formatDate(r.paymentDate)).join('; '),
-    (o.finding.evidenceState ?? EVIDENCE_LABEL[o.evidence]).replaceAll('_', ' '),
-    o.state.decision ? DECISION_LABEL[o.state.decision] : 'Not reviewed',
-    o.state.recoveryStage ? recoveryStatusLabel(o.state, o.finding.class !== 'recoverable') : '',
-    (o.finding.flaggedAmount ?? o.finding.dollarImpact).toFixed(2),
-  ])
-  const csv = [header, ...lines].map((line) => line.map(csvCell).join(',')).join('\n')
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
-  const link = document.createElement('a')
-  link.href = url
-  link.download = 'reclaim-findings.csv'
-  link.click()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 /** One plain status for where a finding stands, instead of the engine's evidence states. */
@@ -96,6 +54,15 @@ function EvidenceCell({ finding, findings }: { finding: Opportunity['finding']; 
     <strong>{evidenceStatus(finding, gate.evidenceState)}</strong>
     <small>{reason ?? `Next: ${nextActionLabel(finding, gate.eligible)}`}</small>
   </span>
+}
+
+/** The line under a finding's amount: what can still be claimed, what is out, or what came back. */
+function amountNote(o: Opportunity, findings: Opportunity['finding'][]): string {
+  const { potential, inRecovery, returned } = figuresOf(o, findings)
+  if (inRecovery !== null && inRecovery > 0) return `${findingMoney(o.finding, inRecovery)} ${o.state.recoveryStage === 'requested' ? 'outstanding' : 'approved, not sent'}`
+  if (potential !== null && potential > 0) return `Potential ${findingMoney(o.finding, potential)}`
+  if (returned > 0) return `${findingMoney(o.finding, returned)} returned`
+  return 'Flagged amount'
 }
 
 function decisionChip(o: Opportunity) {
@@ -136,7 +103,9 @@ export function Findings({ env, visible, onOpenCase }: FindingsProps) {
   const lockedCount = ordered.filter((o) => !visible.has(o.finding.id)).length
   const decided = all.filter((o) => o.state.decision !== null).length
 
-  if (!all.length) return <div className="wk-empty"><span className="wk-label">Nothing flagged</span><p>Every check ran against this ledger and found nothing worth your time.</p></div>
+  const coverage = checkCoverage(env)
+  const flaggedElsewhere = otherCurrencies(l.flaggedByCurrency)
+  if (!all.length) return <div className="wk-empty"><span className="wk-label">Nothing flagged</span><p>{coverage.complete ? 'Every check ran against this ledger and found nothing worth your time.' : `${coverage.summary} on this file. They found nothing worth your time; the rest could not look.`}</p><CoverageNote coverage={coverage} /></div>
 
   return <>
     <div className="wk-toolbar">
@@ -147,7 +116,7 @@ export function Findings({ env, visible, onOpenCase }: FindingsProps) {
       <label className="wk-select" data-tour="findings-filter"><SlidersHorizontal aria-hidden="true" /><span className="wk-sr-only">Filter by decision</span><select value={status} onChange={(event) => setStatus(event.target.value as Status)}><option value="all">Any decision</option><option value="unreviewed">Not reviewed</option><option value="confirmed">Confirmed</option><option value="needs_info">Needs information</option><option value="expected">Expected</option></select></label>
       <label className="wk-select" data-tour="findings-sort"><span className="wk-sr-only">Sort findings</span><select value={sort} onChange={(event) => setSort(event.target.value as Sort)}><option value="priority">Sort: priority</option><option value="amount-desc">Sort: largest first</option><option value="amount-asc">Sort: smallest first</option><option value="vendor">Sort: vendor A–Z</option></select></label>
       <span className="wk-toolbar-spacer" />
-      <button type="button" className="wk-btn" data-variant="outline" data-tour="findings-export" onClick={() => exportCsv(ordered.filter((o) => visible.has(o.finding.id)))}><Download aria-hidden="true" />Export CSV</button>
+      <button type="button" className="wk-btn" data-variant="outline" data-tour="findings-export" onClick={() => downloadCsv('reclaim-findings.csv', findingsExportRows(ordered.filter((o) => visible.has(o.finding.id)), env.result.findings))}><Download aria-hidden="true" />Export CSV</button>
     </div>
 
     <div className="wk-grid-table" aria-label="Finding results">
@@ -155,19 +124,19 @@ export function Findings({ env, visible, onOpenCase }: FindingsProps) {
       {ordered.map((o) => {
         // A locked row carries no vendor, invoice or amount: hiding them with CSS is not access control.
         const locked = !visible.has(o.finding.id)
-        return <button type="button" className="wk-grid-row wk-finding-row" key={o.finding.id} data-amount={locked ? undefined : o.finding.dollarImpact} data-locked={locked || undefined} onClick={() => (locked ? setUpgradeOpen(true) : onOpenCase(o.finding.id))} aria-label={locked ? `${o.typeLabel}, part of Growth and Flat` : `${o.typeLabel}, ${o.finding.vendor}, ${formatCurrency(o.finding.dollarImpact)}`}>
+        return <button type="button" className="wk-grid-row wk-finding-row" key={o.finding.id} data-amount={locked ? undefined : o.finding.dollarImpact} data-locked={locked || undefined} onClick={() => (locked ? setUpgradeOpen(true) : onOpenCase(o.finding.id))} aria-label={locked ? `${o.typeLabel}, part of Growth and Flat` : `${o.typeLabel}, ${o.finding.vendor}, ${findingMoney(o.finding, o.finding.dollarImpact)}`}>
           <span className="wk-cell-main">{locked ? <strong style={{ color: 'var(--text-muted)' }}>{REDACTED_VENDOR}</strong> : <><strong>{o.finding.vendor}</strong><small>{findingReference(o.finding)}</small></>}<span className="wk-mobile-meta" aria-hidden="true"><KindChip finding={o.finding} label={o.typeLabel} />{decisionChip(o)}</span></span>
           <span><KindChip finding={o.finding} label={o.typeLabel} /></span>
           <span className="wk-finding-state">{locked ? <Strength level={o.evidence} /> : <EvidenceCell finding={o.finding} findings={all.map((x) => x.finding)} />}</span>
           <span>{decisionChip(o)}</span>
-          <span className="wk-cell-money wk-finding-amount">{locked ? REDACTED_MONEY : <>{formatCurrency(o.finding.flaggedAmount ?? o.finding.dollarImpact)}<small>{o.finding.classification === 'recovery_candidate' && o.finding.potentialAmountMinor != null ? `Potential ${formatCurrency(o.finding.potentialAmountMinor / 100)}` : 'Flagged amount'}</small></>}</span>
+          <span className="wk-cell-money wk-finding-amount">{locked ? REDACTED_MONEY : <>{findingMoney(o.finding, o.finding.flaggedAmount ?? o.finding.dollarImpact)}<small>{amountNote(o, env.result.findings)}</small></>}</span>
           {locked ? <Lock aria-hidden="true" /> : <ArrowRight aria-hidden="true" />}
         </button>
       })}
       {ordered.length === 0 ? <div className="wk-grid-empty">No findings match. <button type="button" className="wk-link" onClick={() => { setCategory('all'); setQuery(''); setStatus('all') }}>Clear filters</button></div> : null}
       {lockedCount > 0 ? <div className="wk-upsell"><p><Lock aria-hidden="true" style={{ display: 'inline', verticalAlign: '-2px', marginRight: 8 }} /><strong>{lockedCount} of {ordered.length}</strong> are shown in full on Growth and Flat. Free shows the {entitlements.limits.findingsVisible} lowest-value findings.</p><button type="button" className="wk-btn" data-variant="primary" data-size="sm" onClick={() => setUpgradeOpen(true)}>See plans</button></div> : null}
     </div>
-    <div className="wk-grid-foot"><span>{matching.length} of {all.length} {plural(all.length, 'finding')}</span><span>{decided} reviewed · {formatCurrency(l.flagged)} flagged for review · {formatCurrency(l.awaitingDecision)} eligible and waiting on you</span></div>
+    <div className="wk-grid-foot"><span>{matching.length} of {all.length} {plural(all.length, 'finding')}</span><span>{decided} reviewed · {formatCurrency(l.flagged)} flagged for review{flaggedElsewhere ? `, plus ${flaggedElsewhere}` : ''} · {formatCurrency(l.awaitingDecision)} eligible and waiting on you</span></div>
     <UpgradeDialog open={upgradeOpen} onOpenChange={setUpgradeOpen} reason="Growth and Flat show every finding in full, with its vendor and invoices." />
   </>
 }

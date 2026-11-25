@@ -448,7 +448,7 @@ export function AuditApp() {
           ? { ...decided, activeRequestGeneration: current.activeRequestGeneration, archivedRequests: current.archivedRequests, recoverySettlements: current.recoverySettlements, recoveredAmount: verifiedReturned(current), legacyRecoveredAmount: current.legacyRecoveredAmount, requiresRevalidation: current.requiresRevalidation, history: current.history }
           : decided
       },
-        { type: 'decision', input: { decision: value, reason } }
+        { type: 'decision', input: { decision: value, reason, dismissalTag } }
       )
     },
     [persistCaseState]

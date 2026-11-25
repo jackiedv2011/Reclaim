@@ -1,7 +1,8 @@
 import { formatCurrency } from '@/lib/format'
+import { billName } from '@/lib/letters'
 import type { SenderProfile } from '@/lib/senderProfile'
 import type { CaseState, RecoveryMethod } from '@/ledger/caseState'
-import { verifiedReturned } from '@/recovery/financials'
+import { activeReturned } from '@/recovery/financials'
 import type { Finding } from '@/types'
 
 const longDate = (ts: number) => new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(ts))
@@ -12,6 +13,14 @@ const ASK: Record<RecoveryMethod, string> = {
   offset: 'whether we can apply the credit against our next payment to you',
 }
 
+/** What the request was about, in the vendor's terms: the bill number, or the payments when there is none. */
+function aboutPayment(finding: Finding): string {
+  const bill = billName(finding)
+  if (bill) return `a duplicate payment on ${bill}`
+  const amounts = new Set(finding.relatedRecords.map((r) => Math.round(r.amountPaid * 100)))
+  return amounts.size === 1 ? `a payment of ${formatCurrency([...amounts][0] / 100)} that went to you more than once` : 'payments that went to you more than once for the same bill'
+}
+
 /**
  * A short, polite follow-up on a request that has had no reply: what was
  * asked, when, and one question. It states only facts already on the case
@@ -20,10 +29,11 @@ const ASK: Record<RecoveryMethod, string> = {
  * reads and edits it before anything is sent.
  */
 export function generateFollowUp(finding: Finding, state: CaseState, sender: SenderProfile, lastOutreachAt: number): { subject: string; body: string } {
-  const originalSubject = state.recoverySubject?.trim() || finding.title
+  const bill = billName(finding)
+  const originalSubject = state.recoverySubject?.trim() || `Duplicate payment${bill ? ` on ${bill}` : ` to ${finding.vendor}`}`
   const subject = /^re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`
   const requested = state.requestedAmount ?? finding.dollarImpact
-  const open = Math.max(0, Math.round(requested * 100) - Math.round(verifiedReturned(state) * 100)) / 100
+  const open = Math.max(0, Math.round(requested * 100) - Math.round(activeReturned(state) * 100)) / 100
   const method = state.requestedResolution ?? 'refund'
   const followUps = state.recoveryFollowUps?.length ?? 0
   const amountLine = open < requested
@@ -33,7 +43,7 @@ export function generateFollowUp(finding: Finding, state: CaseState, sender: Sen
   const lines = [
     'Hello,',
     '',
-    `I'm following up on my email of ${longDate(lastOutreachAt)} about ${finding.title.charAt(0).toLowerCase()}${finding.title.slice(1)}. ${amountLine}`,
+    `I'm following up on my email of ${longDate(lastOutreachAt)} about ${aboutPayment(finding)}. ${amountLine}`,
     '',
     followUps === 0
       ? `Could you let me know ${ASK[method]}, or whether you need anything else from us to process it?`

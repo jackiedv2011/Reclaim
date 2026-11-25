@@ -5,7 +5,8 @@ import { computeAuditStats, summarizeFindingClasses } from '@/audit/deriveStats'
 import { assessRecordReadiness, type WeakerCheck } from '@/audit/dataReadiness'
 import { FINDING_TYPE_ORDER } from '@/lib/labels'
 import type { LedgerEnvironment } from '@/ledger/store'
-import { getCaseState } from '@/ledger/store'
+import { claimContext, type CarriedState, type ClaimContext } from '@/recovery/claimLinks'
+import type { ClaimFinding } from '@/recovery/eligibility'
 import {
   QUEUE_GROUP_LABEL,
   RECOVERY_STAGE_LABEL,
@@ -18,18 +19,22 @@ import {
 } from '@/ledger/caseState'
 
 export interface CaseView {
-  finding: Finding
-  state: CaseState
+  /** Carries what an earlier case on the same payments already has out or back. */
+  finding: ClaimFinding
+  /** Includes a dismissal carried over from a finding this one replaced. */
+  state: CarriedState
   isNew: boolean
 }
 
-function toCaseView(env: LedgerEnvironment, finding: Finding): CaseView {
-  return { finding, state: getCaseState(env, finding.id), isNew: env.newFindingIds.includes(finding.id) }
+const contextOf = (env: LedgerEnvironment) => claimContext(env.result.findings, env.caseStates)
+
+function toCaseView(env: LedgerEnvironment, context: ClaimContext, finding: Finding): CaseView {
+  return { finding: context.finding(finding), state: context.state(finding), isNew: env.newFindingIds.includes(finding.id) }
 }
 
 export function findCaseView(env: LedgerEnvironment, findingId: string): CaseView | null {
   const finding = env.result.findings.find((f) => f.id === findingId)
-  return finding ? toCaseView(env, finding) : null
+  return finding ? toCaseView(env, contextOf(env), finding) : null
 }
 
 const CLASS_PRIORITY: FindingClass[] = ['recoverable', 'review', 'opportunity']
@@ -127,14 +132,16 @@ export function lastScanReceipt(env: LedgerEnvironment): ScanReceiptSummary | nu
 export function overviewSummary(env: LedgerEnvironment): OverviewSummary {
   const skippedCount = env.imports.reduce((sum, batch) => sum + batch.skippedCount, 0)
   const stats = computeAuditStats(env.records, skippedCount, env.result)
+  const context = contextOf(env)
   const findings = env.result.findings
+  const stateOf = (f: Finding): CaseState => context.state(f)
 
-  const active = findings.filter((f) => isInFindingsQueue(getCaseState(env, f.id)))
+  const active = findings.filter((f) => isInFindingsQueue(stateOf(f)))
   const groupCounts: Record<QueueGroup, number> = { claim: 0, check: 0, prevent: 0 }
   const groupValue: Record<QueueGroup, number> = { claim: 0, check: 0, prevent: 0 }
   const exposureByType = new Map<Finding['type'], { count: number; dollarImpact: number }>()
   for (const f of active) {
-    const group = queueGroupFor(f, getCaseState(env, f.id))
+    const group = queueGroupFor(f, stateOf(f))
     groupCounts[group] += 1
     groupValue[group] += f.dollarImpact
     const current = exposureByType.get(f.type) ?? { count: 0, dollarImpact: 0 }
@@ -143,13 +150,13 @@ export function overviewSummary(env: LedgerEnvironment): OverviewSummary {
 
   const worthInvestigatingTotal = active.reduce((sum, f) => sum + f.dollarImpact, 0)
   const recoveryActive = findings.filter((f) => {
-    const state = getCaseState(env, f.id)
-    return eligiblePotential(f, findings) !== null && Boolean(state.approvedAt) && (state.recoveryStage === 'confirmed' || state.recoveryStage === 'requested')
+    const state = stateOf(f)
+    return eligiblePotential(context.finding(f), findings) !== null && Boolean(state.approvedAt) && (state.recoveryStage === 'confirmed' || state.recoveryStage === 'requested')
   })
   const totals = ladder(env)
   const recoveryActiveCount = totals.counts.inRecovery
   const recoveryActiveValue = totals.inRecovery
-  const recovered = findings.filter((finding) => verifiedReturned(getCaseState(env, finding.id)) > 0)
+  const recovered = findings.filter((finding) => verifiedReturned(stateOf(finding)) > 0)
   const recoveredCount = totals.counts.recovered
   const recoveredValue = totals.recovered
   // What Reclaim originally estimated for the cases that have since closed as
@@ -160,8 +167,8 @@ export function overviewSummary(env: LedgerEnvironment): OverviewSummary {
   const nextRecommended = pickNextRecommended(active)
   const nextRecovery = recoveryActive
     .toSorted((a, b) => {
-      const aStage = getCaseState(env, a.id).recoveryStage === 'confirmed' ? 0 : 1
-      const bStage = getCaseState(env, b.id).recoveryStage === 'confirmed' ? 0 : 1
+      const aStage = stateOf(a).recoveryStage === 'confirmed' ? 0 : 1
+      const bStage = stateOf(b).recoveryStage === 'confirmed' ? 0 : 1
       return aStage - bStage || b.dollarImpact - a.dollarImpact
     })[0]
 
@@ -195,8 +202,8 @@ export function overviewSummary(env: LedgerEnvironment): OverviewSummary {
     recoveredValue,
     recoveredEstimate,
     newSinceLastVisitCount: env.newFindingIds.length,
-    nextRecommendedCase: nextRecommended ? toCaseView(env, nextRecommended) : null,
-    nextRecoveryCase: nextRecovery ? toCaseView(env, nextRecovery) : null,
+    nextRecommendedCase: nextRecommended ? toCaseView(env, context, nextRecommended) : null,
+    nextRecoveryCase: nextRecovery ? toCaseView(env, context, nextRecovery) : null,
   }
 }
 
@@ -210,12 +217,13 @@ const QUEUE_GROUP_ORDER: QueueGroup[] = ['claim', 'check', 'prevent']
 
 /** Findings lens — every undecided (or needs-info) case, grouped by decision readiness. */
 export function findingsQueue(env: LedgerEnvironment): FindingsQueueGroup[] {
-  const active = env.result.findings.filter((f) => isInFindingsQueue(getCaseState(env, f.id)))
+  const context = contextOf(env)
+  const active = env.result.findings.filter((f) => isInFindingsQueue(context.state(f)))
   return QUEUE_GROUP_ORDER.map((group) => {
     const cases = active
-      .filter((f) => queueGroupFor(f, getCaseState(env, f.id)) === group)
+      .filter((f) => queueGroupFor(f, context.state(f)) === group)
       .sort((a, b) => b.dollarImpact - a.dollarImpact)
-      .map((f) => toCaseView(env, f))
+      .map((f) => toCaseView(env, context, f))
     return { group, label: QUEUE_GROUP_LABEL[group], cases }
   })
 }
@@ -230,12 +238,16 @@ const RECOVERY_STAGE_ORDER: RecoveryStage[] = ['confirmed', 'requested', 'recove
 
 /** Vendor recovery cases grouped by their explicit money outcome. */
 export function recoveryQueue(env: LedgerEnvironment): RecoveryQueueGroup[] {
-  const inRecovery = env.result.findings.filter((f) => (eligiblePotential(f, env.result.findings) !== null || verifiedReturned(getCaseState(env, f.id)) > 0 || Boolean(getCaseState(env, f.id).approvedAt)) && isInRecoveryQueue(getCaseState(env, f.id)))
+  const context = contextOf(env)
+  const inRecovery = env.result.findings.filter((f) => {
+    const state = context.state(f)
+    return isInRecoveryQueue(state) && (eligiblePotential(context.finding(f), env.result.findings) !== null || verifiedReturned(state) > 0 || Boolean(state.approvedAt))
+  })
   return RECOVERY_STAGE_ORDER.map((stage) => {
     const cases = inRecovery
-      .filter((f) => getCaseState(env, f.id).recoveryStage === stage)
+      .filter((f) => context.state(f).recoveryStage === stage)
       .sort((a, b) => b.dollarImpact - a.dollarImpact)
-      .map((f) => toCaseView(env, f))
+      .map((f) => toCaseView(env, context, f))
     return { stage, label: RECOVERY_STAGE_LABEL[stage], cases }
   })
 }

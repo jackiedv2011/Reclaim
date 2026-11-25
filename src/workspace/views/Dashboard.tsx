@@ -5,9 +5,9 @@ import { getCaseState, type LedgerEnvironment } from '@/ledger/store'
 import type { CaseEvent, VendorUpdateStatus } from '@/ledger/caseState'
 import { useEntitlements } from '@/lib/auth/AuthContext'
 import { Locked } from '@/components/plan/Locked'
-import { internalReviews, ladder, opportunities, recentReturns, recordedRootCauses, recoveries, recoveryAging, rootCauses, vendorCommitments, vendors, type Opportunity } from '../selectors'
+import { caseAmount, checkCoverage, internalReviews, ladder, opportunities, recentReturns, recordedRootCauses, recoveries, recoveryAging, requestsNote, rootCauses, vendorCommitments, vendors, type Opportunity } from '../selectors'
+import { exposureCurrencyOf, otherCurrencies } from '../money'
 import { recoveryNextAction, requiresCustomerAction } from '@/recovery/model'
-import { activeReturned } from '@/recovery/financials'
 import { dueStatus, vendorTone, type StatusTone } from '@/recovery/status'
 import { usePreferences, useHeadlineMoney, type OverviewSectionId } from '../preferences'
 import type { WorkspaceMode } from '../WorkspaceShell'
@@ -16,6 +16,7 @@ import { StatusChip } from './StatusChip'
 import { CountUp } from './CountUp'
 import { findingReference } from './findingText'
 import { formatCauseValue } from './amounts'
+import { CoverageNote } from './CoverageNote'
 
 interface DashboardProps {
   env: LedgerEnvironment
@@ -59,10 +60,13 @@ function eventIcon(event: CaseEvent): { icon: typeof Clock; tone: StatusTone } {
 export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindings, onSeeFindingsKind, onSearchFindings, onNavigate }: DashboardProps) {
   const { prefs } = usePreferences()
   const money = useHeadlineMoney()
+  const moneyOf = (o: Pick<Opportunity, 'finding'>, value: number) => money(value, exposureCurrencyOf(o.finding))
   const entitlements = useEntitlements()
   const now = Date.now()
 
   const l = ladder(env)
+  const coverage = checkCoverage(env)
+  const flaggedElsewhere = otherCurrencies(l.flaggedByCurrency)
   const all = opportunities(env)
   const inPlay = (o: Opportunity) => o.state.decision !== 'expected' && o.state.recoveryStage !== 'recovered' && o.state.recoveryStage !== 'not_recovered'
   // Undecided, or parked as "needs more detail": both are waiting on a person.
@@ -93,7 +97,8 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
   const stageCounts = {
     found: all.filter((o) => o.finding.class === 'recoverable' && o.state.decision === null && inPlay(o)).length,
     confirmed: all.filter((o) => o.finding.class === 'recoverable' && o.state.recoveryStage === 'confirmed').length,
-    requested: l.counts.inRecovery,
+    // An approval is not a request until it goes out; approved cases are still in the stage before.
+    requested: l.requestsSent,
     recovered: l.counts.recovered,
   }
   const notRecovered = all.filter((o) => o.finding.class === 'recoverable' && o.state.recoveryStage === 'not_recovered').length
@@ -131,12 +136,12 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
         <button type="button" className="wk-total" data-total="review" data-amount={needsContextValue} onClick={() => onSeeFindingsKind('review')}>
           <span className="wk-total-label"><span className="wk-label">Payments involved in checks</span><ArrowRight aria-hidden="true" /></span>
           <strong className="wk-total-value"><CountUp value={needsContextValue} format={money} /></strong>
-          <span className="wk-total-note">{l.flaggedCount} {plural(l.flaggedCount, 'finding')} to check · this is not an amount owed</span>
+          <span className="wk-total-note">{l.flaggedCount} {plural(l.flaggedCount, 'finding')} to check{flaggedElsewhere ? `, plus ${flaggedElsewhere}` : ''} · this is not an amount owed</span>
         </button>
         <button type="button" className="wk-total" data-total="inRecovery" data-amount={l.inRecovery} data-empty={l.inRecovery === 0 || undefined} onClick={() => onNavigate('recoveries')}>
           <span className="wk-total-label"><span className="wk-label">Approved outstanding requests</span><ArrowRight aria-hidden="true" /></span>
           <strong className="wk-total-value"><CountUp value={l.inRecovery} format={money} /></strong>
-          <span className="wk-total-note">{l.counts.inRecovery === 0 ? 'No requests out yet' : `${l.counts.inRecovery} ${plural(l.counts.inRecovery, 'request')} out with vendors`}</span>
+          <span className="wk-total-note">{requestsNote(l)}</span>
         </button>
         <button type="button" className="wk-total" data-total="recovered" data-amount={l.recovered} data-empty={l.recovered === 0 || undefined} data-accent={l.recovered > 0 || undefined} onClick={() => onNavigate('recoveries')}>
           <span className="wk-total-label"><span className="wk-label">Returns recorded by your team</span><ArrowRight aria-hidden="true" /></span>
@@ -160,7 +165,7 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
           <div className="wk-queue">
             {tasks.slice(0, 5).map(({ o, action, internal }) => {
               const due = dueStatus(action.dueAt, now, shortDate.format)
-              const outstanding = o.state.recoveryStage === 'requested' ? Math.max(0, (o.state.requestedAmount ?? o.finding.dollarImpact) - activeReturned(o.state)) : o.finding.dollarImpact
+              const outstanding = caseAmount(o, env.result.findings).amount
               return (
                 <button key={o.finding.id} type="button" className="wk-queue-row" data-amount={outstanding} onClick={() => onOpenCase(o.finding.id)}>
                   <span className="wk-queue-main">
@@ -171,7 +176,7 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
                       {internal ? <em>Internal review</em> : null}
                     </span>
                   </span>
-                  <span className="wk-queue-amount">{money(outstanding)}</span>
+                  <span className="wk-queue-amount">{moneyOf(o, outstanding)}</span>
                   <span className="wk-queue-go">Open<ArrowRight aria-hidden="true" /></span>
                 </button>
               )
@@ -198,12 +203,12 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
               {next.map((o) => {
                 const locked = !visible.has(o.finding.id)
                 return (
-                  <button key={o.finding.id} type="button" className="wk-queue-row" data-amount={locked ? undefined : o.finding.dollarImpact} data-locked={locked || undefined} onClick={() => onOpenCase(o.finding.id)} aria-label={locked ? `${o.typeLabel}, part of Growth and Flat` : `${o.finding.vendor}, ${o.typeLabel}, ${money(o.finding.dollarImpact)}`}>
+                  <button key={o.finding.id} type="button" className="wk-queue-row" data-amount={locked ? undefined : o.finding.dollarImpact} data-locked={locked || undefined} onClick={() => onOpenCase(o.finding.id)} aria-label={locked ? `${o.typeLabel}, part of Growth and Flat` : `${o.finding.vendor}, ${o.typeLabel}, ${moneyOf(o, o.finding.dollarImpact)}`}>
                     <span className="wk-queue-main">
                       <strong>{locked ? o.typeLabel : o.finding.vendor}</strong>
                       {locked ? null : <span><KindChip finding={o.finding} label={o.typeLabel} />{o.state.decision === 'needs_info' ? <StatusChip state={o.state} /> : null}<em>{findingReference(o.finding)}</em></span>}
                     </span>
-                    <span className="wk-queue-amount">{locked ? REDACTED_MONEY : money(o.finding.dollarImpact)}</span>
+                    <span className="wk-queue-amount">{locked ? REDACTED_MONEY : moneyOf(o, o.finding.dollarImpact)}</span>
                     <span className="wk-queue-go">{locked ? <Lock aria-hidden="true" /> : <>Review<ArrowRight aria-hidden="true" /></>}</span>
                   </button>
                 )
@@ -212,7 +217,7 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
           ) : (
             <div className="wk-queue-empty">
               {all.length === 0 ? (
-                <p>No duplicate payments, overpayments or other problems turned up in these payments. Upload another export any time with Start an audit.</p>
+                <p>{coverage.complete ? 'No duplicate payments, overpayments or other problems turned up in these payments.' : 'The checks that could run found no problems in these payments.'} Upload another export any time with Start an audit.</p>
               ) : (
                 <>
                   <p>Nothing is waiting on you. Confirmed findings move to Recoveries.</p>
@@ -280,7 +285,7 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
                     <li key={row.id}>
                       <button type="button" onClick={() => onOpenCase(row.findingId)}>
                         <span><strong>{row.vendor}</strong><small>{formatDate(new Date(row.settledAt))}{row.partial ? ' · part of the claim' : ''}</small></span>
-                        <b>{money(row.amount)}</b>
+                        <b>{money(row.amount, row.currency)}</b>
                       </button>
                     </li>
                   ))}
@@ -301,7 +306,7 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
           <div className="wk-panelcard-head">
             <div>
               <h2 id="ov-types">By finding type</h2>
-              <p>{noCurrency ? 'Which checks caught the money · no currency column in this file' : 'Which checks caught the money'}</p>
+              <p>{noCurrency ? 'Open findings by the check that raised them · amounts whose rows disagree on currency have no symbol' : 'Open findings by the check that raised them'}</p>
             </div>
             <button type="button" className="wk-more" onClick={() => onNavigate('reports')}>Report <ArrowRight aria-hidden="true" /></button>
           </div>
@@ -375,7 +380,7 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
                     <span className="wk-feed-icon" data-status-tone={tone}><Icon aria-hidden="true" /></span>
                     <span className="wk-feed-text">
                       <button type="button" onClick={() => onOpenCase(finding.id)}>{finding.vendor}</button> · {event.summary}
-                      {event.amount != null ? ` · ${money(event.amount)}` : ''}
+                      {event.amount != null ? ` · ${moneyOf({ finding }, event.amount)}` : ''}
                       <small>{event.actor ? `By ${event.actor}` : 'In this browser'}{event.note ? ` · ${event.note}` : ''}</small>
                     </span>
                     <time dateTime={new Date(event.at).toISOString()}>{ago(event.at, now)}</time>
@@ -411,12 +416,13 @@ export function Dashboard({ env, visible, auditLabel, onOpenCase, onSeeAllFindin
           <p>
             {l.counts.potential === 0
               ? undecided.length
-                ? `Every check ran against ${auditLabel}. ${undecided.length} ${plural(undecided.length, 'finding')} ${undecided.length === 1 ? 'is' : 'are'} waiting on your review; none is a confirmed recovery candidate yet.`
+                ? `${coverage.summary} against ${auditLabel}. ${undecided.length} ${plural(undecided.length, 'finding')} ${undecided.length === 1 ? 'is' : 'are'} waiting on your review; none is a confirmed recovery candidate yet.`
                 : all.length === 0
-                  ? `Every check ran against ${auditLabel} and found nothing wrong.`
-                  : `Every check ran against ${auditLabel}, and every finding has a decision.`
+                  ? coverage.complete ? `Every check ran against ${auditLabel} and found nothing wrong.` : `${coverage.summary} against ${auditLabel}. They found nothing; the rest could not look.`
+                  : `${coverage.summary} against ${auditLabel}. Every finding has a decision.`
               : <>{l.counts.potential} recovery {plural(l.counts.potential, 'candidate')} worth {money(l.potential)} in {auditLabel}. {l.verified > 0 ? <>{money(l.verified)} of it has confirmed evidence and is waiting for your approval.</> : null}</>}
           </p>
+          <CoverageNote coverage={coverage} />
         </div>
         <div className="wk-head-actions">
           {leadTask ? (
