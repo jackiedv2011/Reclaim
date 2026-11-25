@@ -10,11 +10,11 @@ import { createGoogleClient, type GoogleClient } from './google.ts'
 import { createDraftService, DraftError, DraftRequestSchema, unsupportedAmounts, type DraftService } from './ai.ts'
 import { answerCaseQuestion } from './assistant.ts'
 import type { ServerConfig } from './config.ts'
-import { HttpError, RateLimiter, isCrossSiteWrite, json, redirect, serializeCookie, toRequest, writeResponse, type Request, type Response } from './http.ts'
+import { HttpError, RateLimiter, compressed, isCrossSiteWrite, json, redirect, serializeCookie, toRequest, writeResponse, type Request, type Response } from './http.ts'
 import { newToken, openSecret, sealSecret } from './crypto.ts'
 import { createQuickBooksClient, migrateQuickBooksLink, syncLedger, QuickBooksReconnectError, QuickBooksUnauthorizedError, type QuickBooksClient, type QuickBooksTokens } from './quickbooks.ts'
 import { entitlementsFor, isPlan, monthStart, planOf, PLAN_LIMITS, type Plan } from './plans.ts'
-import { checkRepeat, repeatMessage, rowFingerprint } from './uploads.ts'
+import { AUDIT_TOO_LARGE, MAX_AUDIT_BYTES, checkRepeat, repeatMessage, rowFingerprint } from './uploads.ts'
 import { authorizedDraftFacts } from './caseFacts.ts'
 import { createBilling } from './billing.ts'
 import { createStripeClient, type StripeApi } from './stripe.ts'
@@ -123,6 +123,24 @@ export function createApp(deps: AppDependencies): App {
   }
   const recordAuditStart = (userId: string, projectId: string) =>
     db.prepare('INSERT INTO audit_starts (user_id, project_id, started_at) VALUES (?, ?, ?)').run(userId, projectId, Date.now())
+  /** An audit on the wire may be gzipped, up to the size the browser promises to stay under. */
+  const auditBody = { maxDecompressed: MAX_AUDIT_BYTES, tooLarge: AUDIT_TOO_LARGE }
+  /** The client already holds what it sent, and an audit can be 100 MB: it may ask not to have it echoed. */
+  const wantsMinimal = (req: Request) => /\breturn=minimal\b/.test(String(req.headers.prefer ?? ''))
+  /** The audit, its place in the plan's count and its row fingerprints, together or not at all. */
+  const storeUpload = (userId: string, projectId: string, fingerprints: string[], project: Record<string, unknown>, isNew: boolean): number => {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      if (isNew) recordAuditStart(userId, projectId)
+      const revision = projects.upsert(userId, project)
+      rememberUpload(userId, projectId, fingerprints)
+      db.exec('COMMIT')
+      return revision
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
+  }
   const requireJson = (req: Request) => {
     if (!(req.headers['content-type'] ?? '').includes('application/json')) throw new HttpError(415, 'Send JSON.')
   }
@@ -486,8 +504,11 @@ export function createApp(deps: AppDependencies): App {
     // ---------- account data ----------
     if (path === '/api/projects' && method === 'GET') {
       const user = requireUser(req)
+      // The index: enough for a browser to tell which of its copies are current, then fetch the others one at a time.
+      if (req.url.searchParams.get('index') === '1') return json(200, { revisions: projects.revisions(user.id) })
       const { projects: saved, unreadable } = projects.listAll(user.id)
-      return json(200, { projects: saved, unreadable, revisions: Object.fromEntries(saved.map((project) => [project.id, projects.revision(user.id, project.id as string)])) })
+      const revisions = projects.revisions(user.id)
+      return json(200, { projects: saved, revisions: Object.fromEntries(saved.map((project) => [project.id, revisions[project.id as string]])), unreadable })
     }
 
     const commandMatch = path.match(/^\/api\/projects\/([\w-]+)\/case-commands$/)
@@ -496,14 +517,21 @@ export function createApp(deps: AppDependencies): App {
       requireJson(req)
       const result = caseCommands.execute(user.id, user.email, commandMatch[1], await req.json())
       billing.recordRecoveries(user.id, result.project)
+      if (wantsMinimal(req)) return json(200, { revision: result.revision, replayed: result.replayed, ...changedCase(result.project, await req.json()) })
       return json(200, result)
     }
 
     const projectMatch = path.match(/^\/api\/projects\/([\w-]+)$/)
+    if (projectMatch && method === 'GET') {
+      const user = requireUser(req)
+      const revision = projects.revision(user.id, projectMatch[1])
+      if (revision === null) throw new HttpError(404, 'That audit is not in this account.', 'project_not_found')
+      return json(200, { project: projects.get(user.id, projectMatch[1]), revision })
+    }
     if (projectMatch && method === 'PUT') {
       const user = requireUser(req)
       requireJson(req)
-      const project = await req.json<Record<string, unknown>>()
+      const project = await req.json<Record<string, unknown>>(auditBody)
       if (project.id !== projectMatch[1] || !isProjectShape(project)) throw new HttpError(400, 'Malformed project.')
       const existing = projects.get(user.id, project.id as string)
       const currentRevision = projects.revision(user.id, project.id as string)
@@ -513,7 +541,10 @@ export function createApp(deps: AppDependencies): App {
         }
         const expected = Number(req.headers['if-match'])
         if (!Number.isSafeInteger(expected) || expected !== currentRevision) throw new HttpError(409, 'This project changed on another device. Reload and review before saving.', 'revision_conflict', { revision: String(currentRevision) })
-        if (caseContentChanged(existing, project)) throw new HttpError(409, 'Case decisions and evidence must use case commands.', 'case_command_required')
+        if (caseContentChanged(existing, project)) throw new HttpError(409, 'This version would change a finding that already has a decision or evidence, so it was not saved over the audit in your account.', 'case_command_required')
+      } else if (req.headers['if-match'] !== undefined && db.prepare('SELECT 1 FROM audit_starts WHERE user_id = ? AND project_id = ?').get(user.id, project.id as string)) {
+        // The client last saw it on the server: a stale save must not bring back a deleted audit.
+        throw new HttpError(404, 'This audit was deleted on another device.', 'project_deleted')
       } else if (caseContentChanged(null, project)) {
         throw new HttpError(400, 'New projects cannot carry pre-approved cases or evidence. Import historical projects through the account import flow.', 'case_command_required')
       }
@@ -526,11 +557,9 @@ export function createApp(deps: AppDependencies): App {
       }
       const fingerprints = projectFingerprints(project)
       assertNotRepeat(user, project.id as string, fingerprints)
-      if (isNew) recordAuditStart(user.id, project.id as string)
-      const revision = projects.upsert(user.id, project)
-      rememberUpload(user.id, project.id as string, fingerprints)
+      const revision = storeUpload(user.id, project.id as string, fingerprints, project, isNew)
       billing.recordRecoveries(user.id, project)
-      return json(200, { ok: true, revision, project })
+      return json(200, wantsMinimal(req) ? { ok: true, revision } : { ok: true, revision, project })
     }
     if (projectMatch && method === 'DELETE') {
       const user = requireUser(req)
@@ -541,7 +570,7 @@ export function createApp(deps: AppDependencies): App {
     if (path === '/api/projects/import' && method === 'POST') {
       const user = requireUser(req)
       requireJson(req)
-      const { projects: incoming } = await req.json<{ projects?: Array<Record<string, unknown>> }>()
+      const { projects: incoming } = await req.json<{ projects?: Array<Record<string, unknown>> }>(auditBody)
       if (!Array.isArray(incoming)) throw new HttpError(400, 'Send projects to import.')
       const imported: string[] = []
       const skipped: string[] = []
@@ -569,9 +598,7 @@ export function createApp(deps: AppDependencies): App {
           blocked.push(id)
           continue
         }
-        recordAuditStart(user.id, id)
-        projects.upsert(user.id, quarantineLegacyProject(project))
-        rememberUpload(user.id, id, fingerprints)
+        storeUpload(user.id, id, fingerprints, quarantineLegacyProject(project), true)
         billing.recordRecoveries(user.id, project, { imported: true })
         imported.push(id)
       }
@@ -639,13 +666,13 @@ export function createApp(deps: AppDependencies): App {
       const req = await toRequest(rawReq, { trustProxy: config.trustProxy })
       // Every route reads its body as an object; `null`, a list or a bare value is the caller's mistake, not a crash.
       const readJson = req.json
-      req.json = async <T>() => {
-        const body: unknown = await readJson()
+      req.json = async <T>(...limits: Parameters<typeof readJson>) => {
+        const body: unknown = await readJson(...limits)
         if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Body must be a JSON object.', 'validation')
         return body as T
       }
       const response = await route(req)
-      writeResponse(rawRes, response, options)
+      writeResponse(rawRes, await compressed(response, rawReq.headers['accept-encoding']), options)
     } catch (err) {
       if (err instanceof HttpError) {
         writeResponse(rawRes, json(err.status, { message: err.message, code: err.code, fields: err.fields }), options)
@@ -710,6 +737,13 @@ function caseContentChanged(previous: Record<string, unknown> | null, incoming: 
     }
   }
   return (env.result?.findings ?? []).some((finding) => JSON.stringify(finding.evidence ?? null) !== JSON.stringify(oldFindings.get(finding.id)?.evidence ?? null))
+}
+
+/** Just the case a command changed, for a client that already holds the rest of the audit. */
+function changedCase(project: Record<string, unknown>, command: unknown) {
+  const findingId = (command as { findingId: string }).findingId
+  const env = project.environment as { caseStates?: Record<string, unknown>; result?: { findings?: Array<{ id: string }> } }
+  return { updatedAt: project.updatedAt, case: { findingId, state: env.caseStates?.[findingId] ?? null, finding: env.result?.findings?.find((f) => f.id === findingId) ?? null } }
 }
 
 /** Historical browser data remains visible, but its approvals are assertions. */

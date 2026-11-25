@@ -12,6 +12,16 @@ import { storedDay } from '../src/lib/format.ts'
  */
 export const REPEAT_UPLOAD_SHARE = 0.5
 
+/** The most payments one audit may hold. The browser says so before it starts; larger files are split by date. */
+export const MAX_AUDIT_ROWS = 50_000
+/**
+ * The most an audit may come to as JSON (characters, about 2.2 KB a row with
+ * the usual columns, more with many extra ones). The server's limit on a
+ * decompressed save; the browser checks it before saving anything.
+ */
+export const MAX_AUDIT_BYTES = 128 * 1024 * 1024
+export const AUDIT_TOO_LARGE = 'This audit is too large to save to your account. Split the file by date and start an audit for each part.'
+
 export interface FingerprintRow {
   vendor: string
   invoiceNumber: string | null

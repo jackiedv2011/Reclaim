@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import { openSecret, passesKeyCheck, sealKeyCheck, sealSecret } from './crypto.ts'
 import { HttpError } from './http.ts'
 
@@ -65,6 +66,12 @@ export class ProjectStore {
     }
     if (unreadable.length) console.error(`${unreadable.length} of ${rows.length} stored audits on one account could not be opened; they were left as they are`)
     return { projects, unreadable }
+  }
+
+  /** The account's audits and the revision each is at, without reading their contents. */
+  revisions(userId: string): Record<string, number> {
+    const rows = this.db.prepare('SELECT id, revision FROM projects WHERE user_id = ? ORDER BY updated_at DESC').all(userId) as Array<{ id: string; revision: number }>
+    return Object.fromEntries(rows.map((row) => [row.id, row.revision]))
   }
 
   /** Throws when the audit is stored but can't be opened, so nothing is ever saved over it. */
@@ -201,18 +208,19 @@ export class ProjectStore {
   }
 
   private encode(userId: string, projectId: string, json: string): string {
-    return this.keys ? sealSecret(json, this.keys.current, context(userId, projectId)) : json
+    const plain = pack(json)
+    return this.keys ? sealSecret(plain, this.keys.current, context(userId, projectId)) : plain
   }
 
   private decode(userId: string, projectId: string, payload: string): Project {
-    if (!isSealed(payload)) return JSON.parse(payload) as Project
+    if (!isSealed(payload)) return JSON.parse(unpack(payload)) as Project
     if (!this.keys) throw new Error('This audit is encrypted and DATA_KEY is not set.')
     const ctx = context(userId, projectId)
     try {
-      return JSON.parse(openSecret(payload, this.keys.current, ctx)) as Project
+      return JSON.parse(unpack(openSecret(payload, this.keys.current, ctx))) as Project
     } catch (err) {
       // Mid-rotation, before migrate() has re-sealed this row.
-      if (this.keys.previous) return JSON.parse(openSecret(payload, this.keys.previous, ctx)) as Project
+      if (this.keys.previous) return JSON.parse(unpack(openSecret(payload, this.keys.previous, ctx))) as Project
       throw err
     }
   }
@@ -240,6 +248,16 @@ export function scrub(db: DatabaseSync): void {
 export function checkpointWal(db: DatabaseSync): void {
   db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
 }
+
+/**
+ * A very large audit (over 4 MB of JSON) is compressed before it is sealed and
+ * stored: every decision rewrites the whole payload, and 50,000 rows is over
+ * 100 MB of mostly repeated text. Smaller ones stay as they were.
+ */
+const PACK_ABOVE = 4 * 1024 * 1024
+const PACKED = 'gz1.'
+const pack = (json: string) => (json.length > PACK_ABOVE ? PACKED + gzipSync(json, { level: 1 }).toString('base64') : json)
+const unpack = (stored: string) => (stored.startsWith(PACKED) ? gunzipSync(Buffer.from(stored.slice(PACKED.length), 'base64')).toString('utf8') : stored)
 
 const isSealed = (payload: string) => payload.startsWith('v1.')
 const context = (userId: string, projectId: string) => `project:${userId}:${projectId}`
