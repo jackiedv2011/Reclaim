@@ -307,12 +307,26 @@ export function mergeImport(env: LedgerEnvironment | null, input: MergeImportInp
   const batchId = `batch_${inspection.fileChecksum}${timesRemoved > 0 ? `_${timesRemoved + 1}` : ''}`
   let seq = base.nextRecordSeq
 
+  // A payment that comes back after its file was removed is the same payment: it keeps its id, so the
+  // findings and requests made on it attach to it again instead of opening a second claim on the same money.
+  const retiredByKey = new Map<string, APRecord[]>()
+  for (const r of base.retiredRecords ?? []) {
+    const key = r.identityKey ?? recordIdentity(r)
+    retiredByKey.set(key, [...(retiredByKey.get(key) ?? []), r])
+  }
+  const revived = new Set<string>()
+  const comeBack = (r: APRecord) => {
+    const match = (retiredByKey.get(r.identityKey ?? recordIdentity(r)) ?? []).find((old) => !revived.has(old.id))
+    if (match) revived.add(match.id)
+    return match?.id
+  }
+
   const qbo = input.quickbooks
   const newRecords: APRecord[] = inspection.accepted.map((r) => {
     const fact = qbo && r.externalTransactionId ? qbo.payments[r.externalTransactionId] : undefined
     return {
       ...r,
-      id: `rec_${seq++}`,
+      id: comeBack(r) ?? `rec_${seq++}`,
       importBatchId: batchId,
       ...(r.source ? {source:{...r.source,filename:input.sourceLabel,batchId}} : {}),
       ...(fact ? { quickbooks: fact } : {}),
@@ -351,7 +365,8 @@ export function mergeImport(env: LedgerEnvironment | null, input: MergeImportInp
     record.rowFingerprint = checksum(record.identityKey)
     identified.set(record.id, record)
   }
-  return rebuildLedger(base, [...base.records.map((r) => identified.get(r.id) ?? r), ...newRecords], batch, seq)
+  const kept = revived.size ? { ...base, retiredRecords: (base.retiredRecords ?? []).filter((r) => !revived.has(r.id)) } : base
+  return rebuildLedger(kept, [...base.records.map((r) => identified.get(r.id) ?? r), ...newRecords], batch, seq)
 }
 
 /**
@@ -393,6 +408,7 @@ export function removeImport(env: LedgerEnvironment, batchId: string): LedgerEnv
  */
 export function rebuildLedger(base: LedgerEnvironment, allRecords: APRecord[], batch: Omit<ImportBatch, 'findingIds'>, nextRecordSeq: number, changedRecordIds: ReadonlySet<string> = new Set(), retired: APRecord[] = []): LedgerEnvironment {
   const result = detectFindings(allRecords)
+  const liveIds = new Set(allRecords.map((r) => r.id))
   const oldById = new Map(base.result.findings.map(f=>[f.id,f]))
   const revised: Finding[] = []
   const caseStates = { ...base.caseStates }
@@ -405,8 +421,15 @@ export function rebuildLedger(base: LedgerEnvironment, allRecords: APRecord[], b
       const state=caseStates[f.id]
       if(state) caseStates[f.id]={...state,requiresRevalidation:true,approvedAt:null}
     }
-    // Nothing about a decided finding changed, so nothing about it is rewritten: the account compares it with what was decided.
-    if (!changed && (base.caseStates[f.id] || previous.evidence)) return { ...previous, relatedRecords: previous.relatedRecords.map((r) => f.relatedRecords.find((now) => now.id === r.id) ?? r) }
+    const rows = previous.relatedRecords.map((r) => f.relatedRecords.find((now) => now.id === r.id) ?? r)
+    if (base.caseStates[f.id] || previous.evidence) {
+      // A decided finding is never rewritten: the account compares it with what was decided. Its payments changing in
+      // the source only marks it to be checked again. Raised again from the same payments, it is no longer replaced,
+      // but it stays to be checked: new evidence is what makes it a claim again.
+      if (changed) return { ...previous, ...TO_CHECK_AGAIN, suppressionReason: 'Its payments changed in the source after this was decided. Check the evidence against them again.', relatedRecords: rows }
+      if (previous.suppressionReason && rows.every((r) => liveIds.has(r.id))) return { ...previous, ...TO_CHECK_AGAIN, suppressionReason: null, relatedRecords: rows }
+      return { ...previous, relatedRecords: rows }
+    }
     const current={ ...f, createdAt: previous.createdAt, evidence: previous.evidence, customerDecision: previous.customerDecision }
     const gate=evaluateEligibility(current,current.evidence,base.result.findings)
     return gate.eligible ? {...current,...gate,classification:'recovery_candidate',class:'recoverable'} : {...current,...gate,requiresRevalidation:changed||previous.requiresRevalidation}
@@ -416,7 +439,13 @@ export function rebuildLedger(base: LedgerEnvironment, allRecords: APRecord[], b
   const superseded=base.result.findings.filter(f=>!currentIds.has(f.id))
   for(const old of superseded) if(base.caseStates[old.id]) {
     caseStates[old.id] = { ...base.caseStates[old.id], requiresRevalidation: true }
-    result.findings.push({ ...old, requiresRevalidation:true, potentialAmountMinor:null, classification:'review_needed', class:'review', suppressionReason:'Source records changed after this finding. Revalidate the evidence against the current ledger.' })
+    const rowsOf = new Set(old.relatedRecords.map((r) => r.id))
+    const replacedBy = result.findings.some((f) => f.relatedRecords.filter((r) => rowsOf.has(r.id)).length >= 2)
+    const stillHere = !replacedBy && old.relatedRecords.every((r) => liveIds.has(r.id) && !changedRecordIds.has(r.id))
+    const reason = old.suppressionReason ?? (stillHere
+      ? 'Reclaim’s checks no longer raise this from its payments. Review it again before acting on it.'
+      : 'Source records changed after this finding. Revalidate the evidence against the current ledger.')
+    result.findings.push({ ...old, ...TO_CHECK_AGAIN, suppressionReason: reason })
   }
 
   const previousFindingIds = new Set(base.result.findings.map((f) => f.id))
@@ -440,10 +469,16 @@ export function rebuildLedger(base: LedgerEnvironment, allRecords: APRecord[], b
   }
 }
 
+/** What a decided finding becomes when its payments change: up for checking, claiming nothing until it is. */
+export const TO_CHECK_AGAIN = { requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review' } as const
+
 export function recordEvidence(env: LedgerEnvironment, findingId: string, evidence: RecoveryEvidence): LedgerEnvironment {
   const original = env.result.findings.find(f=>f.id===findingId)
   if (!original) throw new Error('Finding no longer exists.')
-  const finding = { ...original, evidence, contradictoryEvidence: [] }
+  const live = new Set(env.records.map((r) => r.id))
+  const claimedElsewhere = env.result.findings.some((other) => other.id !== findingId && !other.suppressionReason && other.relatedRecords.filter((r) => original.relatedRecords.some((mine) => mine.id === r.id)).length >= 2)
+  const clear = Boolean(original.suppressionReason) && !claimedElsewhere && original.relatedRecords.every((r) => live.has(r.id))
+  const finding = { ...original, evidence, contradictoryEvidence: [], ...(clear ? { suppressionReason: null } : {}) }
   const gate = evaluateEligibility(finding,evidence,env.result.findings)
   const classification = gate.eligible ? 'recovery_candidate' : original.type==='bank_account_change' ? 'preventive_security' : ['unclaimed_discount','missed_discount'].includes(original.type) ? 'future_savings' : 'review_needed'
   const updated: Finding = { ...finding, ...gate, classification, class: gate.eligible ? 'recoverable' : classification==='future_savings' ? 'opportunity' : 'review', requiresRevalidation:!gate.eligible }

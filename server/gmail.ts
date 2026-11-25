@@ -244,10 +244,10 @@ interface CasePayments {
 }
 
 function casePayments(project: Record<string, unknown> | null, findingId: string): CasePayments | null {
-  const env = project?.environment as { records?: Array<Record<string, unknown>>; result?: { findings?: Array<Record<string, unknown>> } } | undefined
+  const env = project?.environment as { records?: Array<Record<string, unknown>>; retiredRecords?: Array<Record<string, unknown>>; result?: { findings?: Array<Record<string, unknown>> } } | undefined
   const finding = env?.result?.findings?.find((f) => f.id === findingId)
   if (!finding) return null
-  const records = new Map((env?.records ?? []).map((r) => [r.id, r]))
+  const records = new Map([...(env?.retiredRecords ?? []), ...(env?.records ?? [])].map((r) => [r.id, r]))
   const payments: string[] = []
   for (const ref of (finding.relatedRecords as Array<{ id: string }> | undefined) ?? []) {
     const r = records.get(ref.id) ?? (ref as unknown as Record<string, unknown>)

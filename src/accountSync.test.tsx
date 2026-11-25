@@ -8,7 +8,8 @@ import { AuditApp } from '@/AuditApp'
 import { AuthProvider, useAuth } from '@/lib/auth/AuthContext'
 import { getSampleLedger, sampleLedgerCsv } from '@/data/sampleLedger'
 import { parseCsv } from '@/lib/csv'
-import { mergeImport, recordEvidence, removeImport, serializeEnvironment, setCaseState, type LedgerEnvironment } from '@/ledger/store'
+import { deserializeEnvironment, mergeImport, recordEvidence, removeImport, serializeEnvironment, setCaseState, type LedgerEnvironment } from '@/ledger/store'
+const deserializeOld = (raw: unknown) => deserializeEnvironment(JSON.stringify(raw))
 import { attestDuplicate } from '@/recovery/testEvidence'
 import { confirmCase } from '@/ledger/caseState'
 import { createProject, deleteProject, hasMemoryOnlyProjects, listLegacyProjects, listProjects, loadAccountProjects, loadProject, overflowSettled, saveProject } from '@/ledger/projects'
@@ -563,5 +564,83 @@ describe('files added and removed around decisions', () => {
       const res = await live.api(`/api/projects/${id}`, { method: 'PUT', headers: { 'If-Match': String(revision) }, json: { ...stored, environment: env } })
       expect([res.status, res.body.code], String(tamper)).toEqual([409, 'case_command_required'])
     }
+  })
+
+  const caseOf = async (id: string, finding: string) => {
+    const stored = (await onServer()).find((p) => p.id === id)!
+    return { finding: stored.environment.result.findings.find((f: { id: string }) => f.id === finding), state: stored.environment.caseStates[finding] }
+  }
+
+  it('a removed file uploaded again brings its decided finding back, not a second claim', async () => {
+    const { id, finding } = await decided(true)
+    await save(id, (env) => removeImport(env, env.imports[0].id))
+    const back = await save(id, (env) => mergeImport(env, rows(...pair)))
+    expect(back.environment.result.findings.filter((f: { relatedRecords: unknown[] }) => f.relatedRecords.length === 2)).toHaveLength(1)
+    expect(back.environment.result.findings[0].id).toBe(finding)
+    expect((await caseOf(id, finding)).state).toMatchObject({ decision: 'confirmed', requiresRevalidation: true })
+    expect((await caseOf(id, finding)).finding.suppressionReason ?? null).toBeNull()
+  })
+
+  it('a wrong file added and taken out again leaves the decided finding to be checked, and new evidence makes it a claim again', async () => {
+    const { id, finding } = await decided(true)
+    await save(id, (env) => mergeImport(env, rows('Acme,INV-1,2025-01-25,500')))
+    expect((await caseOf(id, finding)).finding.suppressionReason).toMatch(/Source records changed/)
+    await save(id, (env) => removeImport(env, env.imports[1].id))
+    const after = await caseOf(id, finding)
+    expect(after.finding).toMatchObject({ requiresRevalidation: true, potentialAmountMinor: null })
+    expect(after.finding.suppressionReason ?? null).toBeNull()
+    const project = loadProject(id)!
+    const facts = attestDuplicate(project.environment.result.findings.find((f) => f.id === finding)!).evidence!
+    saveProject({ ...project, environment: recordEvidence(project.environment, finding, facts) }, { sync: false })
+    projectSync.command(id, finding, 'evidence', facts)
+    await projectSync.flush()
+    expect(projectSync.issues).toEqual([])
+    expect((await caseOf(id, finding)).finding).toMatchObject({ classification: 'recovery_candidate' })
+  })
+
+  it('a decision still on its way does not bring back a finding that was replaced', async () => {
+    await signedIn()
+    const project = create('racing', mergeImport(null, rows(...pair)))
+    await projectSync.flush()
+    const finding = project.environment.result.findings[0].id
+    const decidedHere = setCaseState(project.environment, finding, confirmCase('Seen'))
+    saveProject({ ...project, environment: decidedHere }, { sync: false })
+    projectSync.command(project.id, finding, 'decision', { decision: 'confirmed', reason: 'Seen' })
+    const later = loadProject(project.id)!
+    saveProject({ ...later, environment: mergeImport(later.environment, rows('Acme,INV-1,2025-01-25,500')) })
+    await projectSync.flush()
+    await projectSync.flush()
+    expect(projectSync.issues).toEqual([])
+    const { finding: there, state } = await caseOf(project.id, finding)
+    expect(there.suppressionReason).toMatch(/Source records changed/)
+    expect(state).toMatchObject({ decision: 'confirmed', requiresRevalidation: true })
+    expect(loadProject(project.id)!.environment.result.findings.find((f) => f.id === finding)?.suppressionReason).toMatch(/Source records changed/)
+  })
+
+  it('a save can neither blank the reason a finding was replaced nor bring it back while a newer one holds its payments', async () => {
+    const { id, finding } = await decided()
+    await save(id, (env) => mergeImport(env, rows('Acme,INV-1,2025-01-25,500')))
+    for (const reason of ['', undefined, 'Something else']) {
+      const [stored] = await onServer()
+      const revision = (await live.api('/api/projects')).body.revisions[id]
+      const env = JSON.parse(serializeEnvironment(loadProject(id)!.environment))
+      const replaced = env.result.findings.find((f: { id: string }) => f.id === finding)
+      if (reason === undefined) delete replaced.suppressionReason
+      else replaced.suppressionReason = reason
+      const res = await live.api(`/api/projects/${id}`, { method: 'PUT', headers: { 'If-Match': String(revision) }, json: { ...stored, environment: env } })
+      expect([res.status, res.body.code], String(reason)).toEqual([409, 'case_command_required'])
+    }
+  })
+
+  it('a file removed on another device is not brought back by an older copy', async () => {
+    await signedIn()
+    const project = create('two-devices', mergeImport(mergeImport(null, rows('Acme,INV-1,2025-01-10,500')), rows('Wrong,W-1,2025-01-11,5')))
+    await projectSync.flush()
+    const [stored] = await onServer()
+    const revision = (await live.api('/api/projects')).body.revisions[project.id]
+    const old = JSON.parse(serializeEnvironment(loadProject(project.id)!.environment))
+    await save(project.id, (env) => removeImport(env, env.imports[1].id))
+    const res = await live.api(`/api/projects/${project.id}`, { method: 'PUT', headers: { 'If-Match': String(revision + 1) }, json: { ...stored, environment: mergeImport(deserializeOld(old), rows('Beta,B-1,2025-02-01,9')) } })
+    expect([res.status, res.body.code]).toEqual([409, 'import_removed'])
   })
 })

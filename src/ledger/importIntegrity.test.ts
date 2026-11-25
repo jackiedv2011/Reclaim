@@ -237,6 +237,16 @@ describe('adding and removing files around decisions', () => {
     expect(again.imports[1].id).not.toBe(second.imports[1].id)
   })
 
+  it('a decided finding the checks no longer raise says so, rather than that its payments changed', () => {
+    const { env: decidedEnv, id } = decided()
+    const env = mergeImport(decidedEnv, file(plain, 'Solo,S-1,2025-03-01,70', 'Solo,S-2,2025-03-20,71'))
+    // As an earlier version of the checks raised it, on payments they now leave alone.
+    const old = { ...env.result.findings[0], id: 'old_rule-x', relatedRecords: env.records.filter((r) => r.vendor === 'Solo') }
+    const before = { ...env, result: { ...env.result, findings: [...env.result.findings, old] }, caseStates: { ...env.caseStates, [old.id]: env.caseStates[id] } }
+    const after = mergeImport(before, file(plain, 'Beta,B-1,2025-02-01,9'))
+    expect(after.result.findings.find((f) => f.id === old.id)?.suppressionReason).toMatch(/checks no longer raise this/)
+  })
+
   it('removing a file keeps the payments another file also lists', () => {
     const a = mergeImport(null, file(plain, 'Acme,INV-1,2025-01-10,500', 'Solo,S-1,2025-01-11,5'))
     const b = mergeImport(a, file(plain, 'Acme,INV-1,2025-01-10,500', 'Beta,B-1,2025-02-01,9'))

@@ -537,6 +537,9 @@ export function createApp(deps: AppDependencies): App {
       const existing = projects.get(user.id, project.id as string)
       const currentRevision = projects.revision(user.id, project.id as string)
       if (existing) {
+        const removed = new Set(((existing.environment as { removedImports?: string[] } | undefined)?.removedImports ?? []))
+        const incomingImports = ((project.environment as { imports?: Array<{ id?: unknown }> } | undefined)?.imports ?? []).map((batch) => String(batch?.id))
+        if (incomingImports.some((batch) => removed.has(batch))) throw new HttpError(409, 'A file in this version was removed from the audit on another device. Use the saved version, then add any new file again.', 'import_removed')
         if (req.headers['if-match'] === undefined && JSON.stringify(existing) === JSON.stringify(project)) {
           return json(200, { ok: true, revision: currentRevision, project: existing, replayed: true })
         }
@@ -741,15 +744,18 @@ function samePayment(before: Plain, after: Plain | undefined): boolean {
 const NEEDS_CHECKING = { requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review' } as const
 
 /** The same finding, or the same finding marked to be checked again because its payments changed. That only ever takes away what was decided. */
-function sameOrToBeChecked(before: Plain, after: Plain | undefined): boolean {
+function sameOrToBeChecked(before: Plain, after: Plain | undefined, claimedElsewhere: boolean): boolean {
   if (!after) return false
   const rows = (finding: Plain) => ((finding.relatedRecords ?? []) as { id: string }[]).map((record) => record.id).sort()
   const rest = ({ relatedRecords: _rows, ...finding }: Plain) => finding
   if (JSON.stringify(rows(before)) !== JSON.stringify(rows(after))) return false
   if (sameJson(rest(before), rest(after))) return true
-  const { suppressionReason: _was, ...old } = rest(before)
+  const { suppressionReason: was, ...old } = rest(before)
   const { suppressionReason: why, ...now } = rest(after)
-  return typeof why === 'string' && sameJson({ ...old, ...NEEDS_CHECKING }, now)
+  // Marked to be checked: a reason is given, and one it already had stands.
+  if (typeof why === 'string' && why.trim() !== '' && (was == null || was === why)) return sameJson({ ...old, ...NEEDS_CHECKING }, now)
+  // Raised again from its own payments: no longer replaced, but still to be checked, and never while a newer finding holds its payments.
+  return typeof was === 'string' && why == null && !claimedElsewhere && sameJson({ ...old, ...NEEDS_CHECKING }, now)
 }
 
 /** Equal whatever order the keys were written in. */
@@ -786,7 +792,11 @@ function caseContentChanged(previous: Plain | null, incoming: Plain): boolean {
   for (const id of protectedIds) {
     const before = oldFindings.get(id)
     const after = newFindings.get(id)
-    if (!before || !sameOrToBeChecked(before, after)) return true
+    const rows = new Set((before?.relatedRecords ?? []).map((record) => record.id))
+    const claimedElsewhere = (env.result?.findings ?? []).some((other) => other.id !== id && (other.relatedRecords ?? []).filter((record) => rows.has(record.id)).length >= 2)
+    if (!before || !sameOrToBeChecked(before, after, claimedElsewhere)) return true
+    // Its payments may change only on the way to being checked again.
+    if (newStates[id]?.requiresRevalidation === true && after?.requiresRevalidation === true) continue
     for (const record of before.relatedRecords ?? []) {
       const original = oldRecords.get(record.id)
       if (!original || !samePayment(original, newRecords.get(record.id))) return true

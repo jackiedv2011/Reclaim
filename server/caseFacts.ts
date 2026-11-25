@@ -1,3 +1,4 @@
+import { isoDay, storedDay } from '../src/lib/format.ts'
 import { evaluateEligibility } from '../src/recovery/eligibility.ts'
 import { claimContext } from '../src/recovery/claimLinks.ts'
 import type { CaseState } from '../src/ledger/caseState.ts'
@@ -9,7 +10,6 @@ type StoredState = { activeRequestGeneration?: number; recoveryRequestedAt?: num
 const settlements = (s: StoredState) => (s.recoverySettlements ?? (s.recoveryVerification ? [s.recoveryVerification] : [])).filter(e => Number.isFinite(e.amount) && e.amount > 0 && Number.isFinite(e.settledAt) && e.settledAt > 0 && Boolean(e.reference?.trim()) && ['bank', 'accounting', 'document', 'manual'].includes(e.source) && (e.method === 'refund' || ((e.method === 'credit' || e.method === 'offset') && Boolean(e.appliedToBill?.trim()))))
 const settled = (s: StoredState, generation?: number) => Math.round(settlements(s).filter(e => generation === undefined || (e.requestGeneration ?? 1) === generation).reduce((sum, e) => sum + e.amount, 0) * 100) / 100
 
-const HALF_DAY = 43_200_000
 /**
  * The calendar day a payment or invoice is dated. New records keep it as
  * YYYY-MM-DD, which is used as it is. Older ones hold an instant: midnight
@@ -20,8 +20,8 @@ export function calendarDay(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null
   const text = value.trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text
-  const at = Date.parse(text)
-  return Number.isFinite(at) ? new Date(at + HALF_DAY).toISOString().slice(0, 10) : null
+  const day = storedDay(text)
+  return day && !Number.isNaN(day.getTime()) ? isoDay(day) : null
 }
 
 export function requestGeneration(project: Record<string, unknown> | null, findingId: string): number {

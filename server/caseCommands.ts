@@ -132,8 +132,12 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
           priorReturns: raw.priorReturns?.map(stamp),
           contradictions: raw.contradictions, notes: raw.notes,
         }
-        const gate = evaluateEligibility({ ...finding, evidence, contradictoryEvidence: [] }, evidence, all)
-        revisedFinding = { ...stored, evidence, ...gate, classification: gate.eligible ? 'recovery_candidate' : 'review_needed', class: gate.eligible ? 'recoverable' : 'review', requiresRevalidation: !gate.eligible }
+        // Evidence given again on a finding raised again from payments all still here replaces the old reason it was set aside.
+        const live = new Set((env.records ?? []).map((record) => String((record as { id?: unknown }).id)))
+        const claimedElsewhere = all.some((other) => other.id !== finding.id && !other.suppressionReason && other.relatedRecords.filter((record) => finding.relatedRecords.some((mine) => mine.id === record.id)).length >= 2)
+        const clear = Boolean(finding.suppressionReason) && !claimedElsewhere && finding.relatedRecords.every((record) => live.has(record.id))
+        const gate = evaluateEligibility({ ...finding, evidence, contradictoryEvidence: [], ...(clear ? { suppressionReason: null } : {}) }, evidence, all)
+        revisedFinding = { ...stored, ...(clear ? { suppressionReason: null } : {}), evidence, ...gate, classification: gate.eligible ? 'recovery_candidate' : 'review_needed', class: gate.eligible ? 'recoverable' : 'review', requiresRevalidation: !gate.eligible }
         next = recordEvidenceReview(prior, gate.eligible, actor, at)
         break
       }

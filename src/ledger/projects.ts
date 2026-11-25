@@ -316,13 +316,17 @@ function applyServerCase(id: string, change: CaseChange): void {
     updatedAt: typeof change.updatedAt === 'number' ? change.updatedAt : project.updatedAt,
     environment: {
       ...env,
-      caseStates: change.state ? { ...env.caseStates, [change.findingId]: normalizeCaseState(change.state as CaseState) } : others,
+      caseStates: change.state ? { ...env.caseStates, [change.findingId]: { ...normalizeCaseState(change.state as CaseState), ...(env.caseStates[change.findingId]?.requiresRevalidation ? { requiresRevalidation: true } : {}) } } : others,
       result: {
         ...env.result,
         findings: env.result.findings.map((finding) => {
           if (finding.id !== change.findingId || !raw) return finding
           const known = new Map(finding.relatedRecords.map((record) => [record.id, record]))
-          return { ...raw, relatedRecords: raw.relatedRecords.flatMap((ref) => records.get(ref.id) ?? known.get(ref.id) ?? []) }
+          const answered = { ...raw, relatedRecords: raw.relatedRecords.flatMap((ref) => records.get(ref.id) ?? known.get(ref.id) ?? []) }
+          // Marked here to be checked again after the command left: the answer to the command can't take that back.
+          return finding.requiresRevalidation && finding.suppressionReason && !raw.suppressionReason
+            ? { ...answered, requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review', suppressionReason: finding.suppressionReason }
+            : answered
         }),
       },
     },
@@ -373,7 +377,14 @@ function wireProject(id: string, { base, pending }: { base: CaseBase | null; pen
       // Different rows make it a different finding: that is for the server to judge, not to paper over.
       if (!hasCase || rowIds(server) !== rowIds(local)) return local
       const checkAgain = finding.requiresRevalidation && finding.suppressionReason && !server.requiresRevalidation && !touched.has(finding.id)
-      return checkAgain ? { ...server, requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review', suppressionReason: finding.suppressionReason } : server
+      if (checkAgain) return { ...server, requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review', suppressionReason: finding.suppressionReason }
+      // Raised again from its own payments: no longer replaced, still to be checked.
+      const raisedAgain = server.suppressionReason && !finding.suppressionReason && finding.requiresRevalidation && !touched.has(finding.id)
+      if (raisedAgain) {
+        const { suppressionReason: _replaced, ...rest } = server
+        return { ...rest, requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review' }
+      }
+      return server
     }
     const before = touched.get(finding.id)?.before
     return before && rowIds(before) === rowIds(local) ? before : local
