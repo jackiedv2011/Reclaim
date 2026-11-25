@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { projectSync, type SyncIssueDetail } from '@/ledger/projectSync'
+import { forgetUpload } from '@/ledger/uploadRegistry'
 
 interface SyncNoticeProps {
   issues: SyncIssueDetail[]
@@ -58,7 +59,11 @@ function IssueRow({ issue, onDownload }: { issue: SyncIssueDetail; onDownload: (
   ) : (
     <>
       <span>This can’t be undone.</span>
-      {button('Remove it', () => projectSync.discard(id))}
+      {button('Remove it', () => {
+        // Refused before it was ever saved: the account never audited this ledger, so it can be uploaded again.
+        if (issue.kind === 'refused') forgetUpload(id)
+        projectSync.discard(id)
+      })}
       <button type="button" className="wk-linklike" onClick={() => setConfirming(false)}>
         Keep it
       </button>
@@ -76,7 +81,7 @@ function IssueRow({ issue, onDownload }: { issue: SyncIssueDetail; onDownload: (
         {issue.kind === 'waiting' || issue.kind === 'signed_out' ? button('Retry save', () => projectSync.retry()) : null}
         {issue.kind === 'refused' ? button('Try again', () => projectSync.retry(id)) : null}
         {issue.kind === 'refused' && issue.savedVersion ? button('Use the saved version from my account', () => projectSync.useSaved(id)) : null}
-        {issue.kind === 'gone' ? button('Keep it as a new audit', () => projectSync.keepAsNew(id)) : null}
+        {issue.kind === 'gone' || issue.addable ? button('Keep it as a new audit', () => projectSync.keepAsNew(id)) : null}
         {issue.kind === 'gone' || (issue.kind === 'refused' && !issue.savedVersion) ? remove : null}
         {issue.kind === 'undone' ? button('Dismiss', () => projectSync.dismiss(issue)) : null}
         {decides || issue.kind === 'waiting' || issue.kind === 'signed_out' ? button('Download local copy', () => onDownload(id)) : null}

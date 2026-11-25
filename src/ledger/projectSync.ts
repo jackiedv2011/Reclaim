@@ -79,6 +79,8 @@ export interface SyncIssueDetail {
   name?: string | null
   /** For a refusal: whether the account has a saved version to go back to. */
   savedVersion?: boolean
+  /** Never saved, and refused only because it carries decisions: it can still be added as a historical audit. */
+  addable?: boolean
 }
 export type SyncIssue = SyncIssueDetail | null
 
@@ -691,7 +693,7 @@ export class ProjectSync {
   private refuse(op: Op, answer: ServerAnswer): void {
     // Deleted here, or the account left, while the answer was on its way: nothing left to decide.
     if (!this.ops.includes(op)) return
-    this.stopped.set(op.id, { projectId: op.id, kind: 'refused', status: answer.status, message: answer.message, name: this.local?.name(op.id), savedVersion: this.revisions.has(op.id) })
+    this.stopped.set(op.id, { projectId: op.id, kind: 'refused', status: answer.status, message: answer.message, name: this.local?.name(op.id), savedVersion: this.revisions.has(op.id), addable: !this.revisions.has(op.id) && answer.code === 'case_command_required' })
   }
 
   private markGone(id: string): void {
