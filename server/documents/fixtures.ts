@@ -81,7 +81,7 @@ export async function startHarness(aiProvider: AiProvider | null): Promise<Harne
       const c = client()
       const form = { firstName: 'Test', lastName: 'User', email, company: 'Synthetic Co', password: 'correct-horse-battery', confirmPassword: 'correct-horse-battery', acceptedTerms: true, termsVersion: '2026-01' }
       const res = await c.post('/api/auth/signup', form)
-      if (res.status !== 201) throw new Error(`signup ${res.status}`)
+      if (res.status !== 201) throw new Error(`signup ${res.status} ${JSON.stringify(res.body)}`)
       const mail = (await client().get(`/api/dev/mailbox?to=${encodeURIComponent(email)}`)).body.messages[0]
       const verified = await c.post('/api/auth/verify-email', { token: new URL(mail.link).searchParams.get('token') })
       if (verified.status !== 200) throw new Error(`verify ${verified.status}`)
