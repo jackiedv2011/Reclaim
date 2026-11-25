@@ -6,7 +6,12 @@ import { openDatabase } from './db.ts'
 import { DevMailer } from './mailer.ts'
 import { ProjectStore } from './projectStore.ts'
 import { authorizedProject } from './testProject.ts'
-import { tenantAAudits, tenantBAudits } from '../src/intelligence/fixtures/synthetic.ts'
+
+// The synthetic fixtures run the browser import pipeline (`@/` aliases), which
+// server type-checking cannot resolve; load them at runtime only.
+const FIXTURES: string = '../src/intelligence/fixtures/synthetic.ts'
+type Fixtures = { tenantAAudits: () => Array<Record<string, unknown> & { id: string }>; tenantBAudits: () => Array<Record<string, unknown> & { id: string }> }
+const fixtures = async () => (await import(FIXTURES)) as Fixtures
 
 const baseEnv = { NODE_ENV: 'test', DATABASE_PATH: ':memory:', APP_ORIGIN: 'http://localhost:0', SESSION_DAYS: '1', REMEMBER_ME_DAYS: '30' }
 const NOW = Date.UTC(2026, 6, 1)
@@ -81,7 +86,7 @@ describe('intelligence API', () => {
     const bob = await signedIn(person('Bob', 'bob@example.test'))
     const { project } = authorizedProject('p_alice', { vendor: 'Fixture Coffee Co', invoice: 'INV-1', amount: 250, requested: 250 })
     store.upsert(alice.userId, project)
-    for (const audit of tenantBAudits()) store.upsert(bob.userId, { ...audit, name: audit.name, sourceLabel: 'b.csv', mode: 'upload', createdAt: 1, updatedAt: 2 })
+    for (const audit of (await fixtures()).tenantBAudits()) store.upsert(bob.userId, { ...audit, name: audit.name, sourceLabel: 'b.csv', mode: 'upload', createdAt: 1, updatedAt: 2 })
 
     const a = await alice.client.get('/api/intelligence/attention')
     expect(a.status).toBe(200)
@@ -118,9 +123,30 @@ describe('intelligence API', () => {
 
   it('reads fixture audits saved like real ones', async () => {
     const alice = await signedIn(person('Eve', 'eve@example.test'))
-    for (const audit of tenantAAudits()) store.upsert(alice.userId, { ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: 1, updatedAt: 2 })
+    for (const audit of (await fixtures()).tenantAAudits()) store.upsert(alice.userId, { ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: 1, updatedAt: 2 })
     const res = await alice.client.get('/api/intelligence/attention')
     expect(res.status).toBe(200)
     expect(res.body.result.casesConsidered).toBeGreaterThan(0)
+  })
+
+  it('serves covered spend with the hand-calculated cent-exact totals and keeps currencies apart', async () => {
+    const owner = await signedIn(person('Flo', 'flo@example.test'))
+    for (const audit of (await fixtures()).tenantAAudits()) store.upsert(owner.userId, { ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: 1, updatedAt: 2 })
+    const res = await owner.client.get('/api/intelligence/spend/summary')
+    expect(res.status).toBe(200)
+    expect(res.body.result.gross).toEqual([{ currency: 'EUR', amountMinor: 90000 }, { currency: 'USD', amountMinor: 3754675 }])
+    expect(res.body.result.net).toBeNull()
+    expect(res.body.coverage.flatMap((c: { reasons: string[] }) => c.reasons)).toContain('settlement_unverified')
+    for (const path of ['spend/vendors', 'spend/categories', 'spend/trend', 'coverage', 'recovery/vendors']) expect((await owner.client.get(`/api/intelligence/${path}`)).status).toBe(200)
+    const recovery = await owner.client.get('/api/intelligence/recovery')
+    expect(recovery.status).toBe(200)
+    expect(JSON.stringify(recovery.body.result)).toContain('"matchedReturnsMinor":null')
+  })
+
+  it('rejects malformed and impossible dates', async () => {
+    const { client } = await signedIn(person('Gus', 'gus@example.test'))
+    expect((await client.get('/api/intelligence/spend/summary?from=2026-1-01')).status).toBe(400)
+    expect((await client.get('/api/intelligence/spend/summary?from=2026-13-01')).status).toBe(400)
+    expect((await client.get('/api/intelligence/spend/trend?from=2026-06-01&to=2026-01-01')).status).toBe(400)
   })
 })

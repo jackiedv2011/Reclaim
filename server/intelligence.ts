@@ -16,6 +16,8 @@ import { SINGLE_USER_PERMISSIONS, NO_RETURN_MATCHING, type ReturnMatchPort, type
 import { IntelligenceAccessError } from '../src/intelligence/envelope.ts'
 import { createLegacyAuditSource, type LegacyAuditSource, type StoredAudit } from '../src/intelligence/adapters/legacyAudit.ts'
 import { attentionQueue, ATTENTION_CATEGORIES, type AttentionCategory } from '../src/intelligence/attention.ts'
+import { importCoverageSummary, IntelligenceQueryError, spendByCategory, spendByVendor, spendSummary, spendTrend, type SpendQuery } from '../src/intelligence/spend.ts'
+import { recoveryByVendor, recoveryOverview } from '../src/intelligence/recoveryVisibility.ts'
 
 export const INTELLIGENCE_PREFIX = '/api/intelligence/'
 
@@ -60,6 +62,12 @@ export function limitParam(query: URLSearchParams, max = 100): number | undefine
 
 export const cursorParam = (query: URLSearchParams) => queryParam(query, 'cursor', CURSOR)
 
+const DATE = /^\d{4}-\d{2}-\d{2}$/
+const spendQuery = (query: URLSearchParams): SpendQuery => ({ from: queryParam(query, 'from', DATE), to: queryParam(query, 'to', DATE) })
+const page = (query: URLSearchParams) => ({ limit: limitParam(query), cursor: cursorParam(query) })
+/** Saved audits the adapter could not read are a coverage limit on every answer. */
+const unreadable = (source: LegacyAuditSource) => ({ extraCoverageReasons: source.unreadableAuditIds.length ? ['unreadable_saved_audit'] : [] })
+
 const ROUTES: Array<{ method: 'GET' | 'POST'; pattern: RegExp; handler: Handler }> = [
   {
     method: 'GET',
@@ -71,6 +79,13 @@ const ROUTES: Array<{ method: 'GET' | 'POST'; pattern: RegExp; handler: Handler 
       return attentionQueue(ctx, source.cases, now, { limit: limitParam(query, 200), cursor: cursorParam(query), include: categories as AttentionCategory[] | undefined })
     },
   },
+  { method: 'GET', pattern: /^spend\/summary$/, handler: ({ ctx, source, query, now }) => spendSummary(ctx, source.financial, spendQuery(query), now, unreadable(source)) },
+  { method: 'GET', pattern: /^spend\/vendors$/, handler: ({ ctx, source, query, now }) => spendByVendor(ctx, source.financial, spendQuery(query), now, page(query), unreadable(source)) },
+  { method: 'GET', pattern: /^spend\/categories$/, handler: ({ ctx, source, query, now }) => spendByCategory(ctx, source.financial, spendQuery(query), now, page(query), unreadable(source)) },
+  { method: 'GET', pattern: /^spend\/trend$/, handler: ({ ctx, source, query, now }) => spendTrend(ctx, source.financial, spendQuery(query), now, { granularity: 'month' }, unreadable(source)) },
+  { method: 'GET', pattern: /^coverage$/, handler: ({ ctx, source, now }) => importCoverageSummary(ctx, source.financial, now, unreadable(source)) },
+  { method: 'GET', pattern: /^recovery$/, handler: ({ ctx, source, returns, now }) => recoveryOverview(ctx, source.cases, returns, now, unreadable(source)) },
+  { method: 'GET', pattern: /^recovery\/vendors$/, handler: ({ ctx, source, returns, query, now }) => recoveryByVendor(ctx, source.cases, returns, now, page(query), unreadable(source)) },
 ]
 
 export function tenantContextFor(user: { id: string }): TenantContext {
@@ -104,7 +119,7 @@ export function createIntelligenceRoutes(deps: IntelligenceDeps) {
       return json(200, body)
     } catch (error) {
       if (error instanceof IntelligenceAccessError) throw new HttpError(error.code === 'forbidden' ? 403 : 404, error.code === 'forbidden' ? 'Not permitted.' : 'Not found.', error.code)
-      if (error instanceof RangeError || (error instanceof Error && error.name === 'IntelligenceValidationError')) throw new HttpError(400, error.message, 'validation')
+      if (error instanceof IntelligenceQueryError || error instanceof RangeError) throw new HttpError(400, error.message, 'validation')
       throw error
     }
   }
