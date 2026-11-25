@@ -116,6 +116,7 @@ export class AiExecutionService {
     const task = this.task(taskId)
     const provider = this.providerFor(task.id)
     if (!provider) throw new HttpError(503, 'No AI provider is configured for this task.', 'ai_unavailable')
+    if (!(task.consentScopes ?? ['packet', 'field_set']).includes(scope.scope)) throw new HttpError(400, 'This task needs a one-time consent for the exact data it will send.', 'ai_consent_scope')
     return this.policies.grant(tenant, { task: task.id, purpose: task.purpose, fieldSetHash: this.fieldSetHash(task), provider: provider.name, model: provider.model, ...scope })
   }
 
@@ -137,7 +138,7 @@ export class AiExecutionService {
     const { built, packetHash } = this.build(task, scope, request.input)
     const provider = this.providerFor(task.id)
     if (!provider) return fallback('ai_unavailable', 'No AI provider is configured.')
-    const consent = this.policies.resolve(tenant.tenantId, { task: task.id, purpose: task.purpose, fieldSetHash: this.fieldSetHash(task), provider: provider.name, model: provider.model, packetHash, projectId: request.projectId, findingId: request.findingId }, request.consentId)
+    const consent = this.policies.resolve(tenant.tenantId, { scopes: task.consentScopes ?? ['packet', 'field_set'], task: task.id, purpose: task.purpose, fieldSetHash: this.fieldSetHash(task), provider: provider.name, model: provider.model, packetHash, projectId: request.projectId, findingId: request.findingId }, request.consentId)
     if (!consent.ok) throw new HttpError(consent.code === 'ai_off' ? 403 : 409, consent.reason, consent.code)
 
     const started = this.now()

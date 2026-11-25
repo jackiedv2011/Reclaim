@@ -136,6 +136,7 @@ export function createRecoveryRoutes(deps: WorkstreamDeps): RecoveryRoutes {
       const status = req.url.searchParams.get('status')
       const statuses = ['pending', 'executing', 'executed', 'failed', 'rejected', 'expired', 'stale', 'superseded']
       if (status !== null && !statuses.includes(status)) throw new HttpError(400, 'Unknown status.', 'validation')
+      approvals.sweepExpired(tenant.tenantId)
       return json(200, { proposals: approvals.list(tenant, { status: (status ?? undefined) as never, projectId: req.url.searchParams.get('projectId') ?? undefined, findingId: req.url.searchParams.get('findingId') ?? undefined }) })
     }
     if (path === '/api/approvals' && method === 'POST') {

@@ -37,6 +37,8 @@ export interface AiTask<I, P, O, R> {
   /** Human-readable list of every field the packet can contain. Its hash is what a standing consent covers. */
   fields: readonly string[]
   permission: Permission
+  /** Which consents may cover this task. Default both; tasks that read documents allow only a one-time packet consent. */
+  consentScopes?: ReadonlyArray<'packet' | 'field_set'>
   inputSchema: z.ZodType<I>
   outputSchema: z.ZodType<O>
   system: string

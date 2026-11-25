@@ -137,12 +137,13 @@ export class AiPolicyStore {
    * The consent that covers this exact invocation, or the reason there is none.
    * A named consent must match; otherwise a standing field-set consent is used.
    */
-  resolve(tenantId: string, want: Required<Pick<ConsentScope, 'task' | 'purpose' | 'fieldSetHash' | 'provider' | 'model' | 'packetHash'>> & { projectId: string; findingId: string | null }, consentId?: string | null): { ok: true; consent: ConsentRow } | { ok: false; code: string; reason: string } {
+  resolve(tenantId: string, want: Required<Pick<ConsentScope, 'task' | 'purpose' | 'fieldSetHash' | 'provider' | 'model' | 'packetHash'>> & { projectId: string; findingId: string | null; scopes?: ReadonlyArray<'packet' | 'field_set'> }, consentId?: string | null): { ok: true; consent: ConsentRow } | { ok: false; code: string; reason: string } {
     const policy = this.get(tenantId)
     if (policy.mode !== 'on_demand') return { ok: false, code: 'ai_off', reason: 'External AI is off for this account.' }
     const now = this.now()
     const usable = (c: ConsentRow | undefined): string | null => {
       if (!c) return 'No consent covers this task.'
+      if (want.scopes && !want.scopes.includes(c.scope)) return 'This task needs a one-time consent for the exact data it will send.'
       if (c.revoked_at) return 'That consent was revoked.'
       if (c.expires_at !== null && c.expires_at <= now) return 'That consent has expired.'
       if (c.used_at) return 'That one-time consent was already used.'

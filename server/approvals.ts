@@ -231,13 +231,20 @@ export class ApprovalService {
     return this.view(tenant.tenantId, row)
   }
 
-  /** The account-wide queue. Expired proposals are marked on the way past. */
+  /** Marks pending proposals past their expiry. Called by the queue route and the approval check, never by a read-only job. */
+  sweepExpired(tenantId: string): number {
+    return Number(this.db.prepare("UPDATE action_proposals SET status = 'expired' WHERE user_id = ? AND status = 'pending' AND expires_at <= ?").run(tenantId, this.now()).changes)
+  }
+
+  /** The account-wide queue. Read-only: a pending proposal past its expiry is reported as expired without being rewritten. */
   list(tenant: TenantContext, filter: { status?: ProposalStatus; projectId?: string; findingId?: string } = {}): ProposalView[] {
     requirePermission(tenant, 'case.read')
-    this.db.prepare("UPDATE action_proposals SET status = 'expired' WHERE user_id = ? AND status = 'pending' AND expires_at <= ?").run(tenant.tenantId, this.now())
     const rows = this.db.prepare(`SELECT * FROM action_proposals WHERE user_id = ? AND (? IS NULL OR status = ?) AND (? IS NULL OR project_id = ?) AND (? IS NULL OR finding_id = ?) ORDER BY created_at DESC LIMIT 200`)
       .all(tenant.tenantId, filter.status ?? null, filter.status ?? null, filter.projectId ?? null, filter.projectId ?? null, filter.findingId ?? null, filter.findingId ?? null) as Row[]
-    return rows.map((r) => this.view(tenant.tenantId, r))
+    const now = this.now()
+    return rows.map((r) => (r.status === 'pending' && r.expires_at <= now ? { ...r, status: 'expired' as const } : r))
+      .filter((r) => !filter.status || r.status === filter.status)
+      .map((r) => this.view(tenant.tenantId, r))
   }
 
   events(tenant: TenantContext, id: string) {
