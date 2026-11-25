@@ -65,13 +65,31 @@ Server (behind the flag; read-only, session-derived tenant, 300 reads per hour p
 
 | Check | Baseline (`main` @ `b27ee30`) | This branch |
 |---|---|---|
-| `npx vitest run` | 778 passed in 70 files; **5 files failed to load** | FINAL_VITEST |
-| `npx tsc -p tsconfig.app.json --noEmit` | 0 errors | FINAL_TSC_APP |
-| `npx tsc -p tsconfig.server.json --noEmit` | 0 errors | FINAL_TSC_SERVER |
-| `npx oxlint` | 0 errors (warnings only) | FINAL_OXLINT |
-| `npm run build` | not run in audit | FINAL_BUILD |
+| `npx vitest run` | 778 passed in 70 files; **5 files failed to load** | **1,184 passed in 90 files; 0 failed, 0 skipped.** Breakdown: 778 baseline + 40 restored by the harness fix + 366 new |
+| `npx tsc -p tsconfig.app.json --noEmit` | 0 errors | 0 errors |
+| `npx tsc -p tsconfig.server.json --noEmit` | 0 errors | 0 errors |
+| `npx oxlint` | 0 errors (warnings only) | 0 errors; warnings only, all in pre-existing `landing-site/` and `.preview-pre-v2/` files |
+| `npm run build` | not run in audit | succeeds |
 
-Product-intelligence tests by file: FINAL_BREAKDOWN
+Product-intelligence tests by file (366, all passing):
+
+| File | Tests |
+|---|---|
+| `src/intelligence/attention.test.ts` | 96 |
+| `src/intelligence/assistant.test.ts` | 56 |
+| `src/intelligence/insights.test.ts` | 35 |
+| `src/intelligence/memory.test.ts` | 31 |
+| `src/intelligence/spend.test.ts` | 27 |
+| `src/intelligence/insightRefresh.test.ts` | 21 |
+| `src/intelligence/baselines.test.ts` | 19 |
+| `src/intelligence/vendorProfiles.test.ts` | 19 |
+| `src/intelligence/recoveryVisibility.test.ts` | 16 |
+| `src/intelligence/designFixtures.test.ts` | 12 |
+| `server/intelligence.test.ts` | 11 |
+| `src/intelligence/adapters/legacyAudit.test.ts` | 7 |
+| `server/intelligence.e2e.test.ts` | 7 |
+| `src/intelligence/viewModels.test.ts` | 6 |
+| `src/intelligence/aiGateway.test.ts` | 3 |
 
 No test was skipped, weakened or deleted. Tests changed after the first commit of a slice:
 - **P1 recovery tests** that pinned two known gaps now assert agreement with the selectors, because contract 0.1.1 closed those gaps.
