@@ -8,15 +8,21 @@
  * strength label rather than a fake confidence percentage (§12), and a
  * priority that ranks money by how gettable it is rather than by size (§13).
  */
-import { activeReturned, authorizedOutstanding, eligiblePotential, validSettlements, verifiedReturned } from '@/recovery/financials'
-import { getCaseState, type LedgerEnvironment } from '@/ledger/store'
+import { activeReturned, authorizedOutstanding, eligiblePotential, unrequestedRemainder, validSettlements, verifiedReturned } from '@/recovery/financials'
+import { claimContext, type CarriedState } from '@/recovery/claimLinks'
+import type { ClaimFinding } from '@/recovery/eligibility'
+import { assessRecordReadiness } from '@/audit/dataReadiness'
+import type { LedgerEnvironment } from '@/ledger/store'
 import type { CaseState } from '@/ledger/caseState'
 import { evidenceStrength, keyUncertainty } from '@/audit/ruleChecklist'
-import { formatCurrency, normalizeVendor } from '@/lib/format'
+import { normalizeVendor } from '@/lib/format'
 import { isAtRisk, sumMoney } from '@/lib/claims'
 import { FINDING_TYPE_LABELS } from '@/lib/labels'
+import { currencyOf, exposureCurrencyOf, formatMoney } from './money'
 import type { Finding, FindingType } from '@/types'
 import { latestVendorPosition, VENDOR_STATUS } from '@/recovery/vendorStatus'
+
+export { exposureCurrencyOf } from './money'
 
 /**
  * §12 — three levels, not a percentage. "94% confident" means nothing to a
@@ -67,8 +73,11 @@ export interface Ladder {
    * A case leaves this rung once it is dismissed or once a request goes out.
    */
   verified: number
-  /** Outstanding amount on requests still open with vendors. */
+  /** Outstanding amount on approved requests, sent or not. */
   inRecovery: number
+  /** Of those, how many have gone to the vendor, and how many are approved but not sent yet. */
+  requestsSent: number
+  requestsApproved: number
   /** Money that actually came back — the only figure worth trusting. */
   recovered: number
   /** Stopped before payment. Zero until Reclaim has a prepayment intervention check. */
@@ -76,31 +85,6 @@ export interface Ladder {
   counts: Record<LadderStage, number>
   /** Verified and still waiting on a person — §28's "what should I do". */
   awaitingDecision: number
-}
-
-/**
- * Currency for money that moves (in recovery, recovered). It may come from an
- * attested obligation even when the source CSV omitted its column, but is never
- * assumed: unknown currency keeps unattested money out of the USD totals.
- */
-function currencyOf(finding: Finding): string {
-  const obligation = finding.evidence?.obligation
-  if (finding.currency) return finding.currency
-  if (obligation?.reference?.trim() && obligation.confirmedBy?.trim() && obligation.currency?.trim()) return obligation.currency.trim().toUpperCase()
-  return 'Unknown'
-}
-
-/**
- * Currency for exposure figures (flagged, payments to verify, by check), which
- * are never money owed. Reclaim only supports USD, so a payment row with no
- * currency (a file without a currency column) is read as USD. A finding stays
- * 'Unknown' only when its rows disagree, e.g. one in EUR and one blank.
- */
-export function exposureCurrencyOf(finding: Finding): string {
-  const known = currencyOf(finding)
-  if (known !== 'Unknown') return known
-  const currencies = new Set(finding.relatedRecords.map((r) => r.currency?.trim().toUpperCase() || 'USD'))
-  return currencies.size === 1 ? [...currencies][0] : 'Unknown'
 }
 
 /**
@@ -121,8 +105,9 @@ export function isFlaggedForReview(finding: Finding, state: CaseState): boolean 
  */
 
 export interface Opportunity {
-  finding: Finding
-  state: CaseState
+  /** Carries what an earlier case on the same payments already has out or back (see claimLinks). */
+  finding: ClaimFinding
+  state: CarriedState
   evidence: EvidenceLevel
   /** Ranking score — see `priorityOf`. Not shown to the user, only sorted by. */
   priority: number
@@ -177,11 +162,17 @@ export function priorityOf(finding: Finding, evidence: EvidenceLevel): number {
   return (finding.dollarImpact * CLASS_WEIGHT[finding.class] * EVIDENCE_WEIGHT[evidence]) / effort
 }
 
-function toOpportunity(env: LedgerEnvironment, finding: Finding): Opportunity {
+/** Every finding with its case, as the screens should read them. */
+function cases(env: LedgerEnvironment): Array<{ finding: ClaimFinding; state: CarriedState }> {
+  const context = claimContext(env.result.findings, env.caseStates)
+  return env.result.findings.map((finding) => ({ finding: context.finding(finding), state: context.state(finding) }))
+}
+
+function toOpportunity({ finding, state }: { finding: ClaimFinding; state: CarriedState }): Opportunity {
   const evidence = evidenceOf(finding)
   return {
     finding,
-    state: getCaseState(env, finding.id),
+    state,
     evidence,
     priority: priorityOf(finding, evidence),
     typeLabel: FINDING_TYPE_LABELS[finding.type] ?? finding.type,
@@ -190,8 +181,8 @@ function toOpportunity(env: LedgerEnvironment, finding: Finding): Opportunity {
 
 /** Everything the engine surfaced, highest priority first. */
 export function opportunities(env: LedgerEnvironment): Opportunity[] {
-  return env.result.findings
-    .map((finding) => toOpportunity(env, finding))
+  return cases(env)
+    .map(toOpportunity)
     .sort((a, b) => b.priority - a.priority)
 }
 
@@ -223,8 +214,7 @@ export function recoveryAging(env: LedgerEnvironment, asOf = Date.now()): Recove
     { label: 'Date unknown', count: 0, outstanding: 0 },
   ]
   const localDay = (time: number) => { const date = new Date(time); return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) }
-  for (const finding of env.result.findings) {
-    const state = getCaseState(env, finding.id)
+  for (const { finding, state } of cases(env)) {
     if (eligiblePotential(finding, env.result.findings) === null && !(currencyOf(finding) === 'USD' && state.recoveryStage === 'requested' && state.requestedAmount != null)) continue
     if (state.recoveryStage !== 'requested') continue
     const outstandingCents = Math.round(authorizedOutstanding(state) * 100)
@@ -237,18 +227,17 @@ export function recoveryAging(env: LedgerEnvironment, asOf = Date.now()): Recove
   return buckets.map((bucket) => ({ ...bucket, outstanding: Math.round(bucket.outstanding * 100) / 100 }))
 }
 
-export interface RecentReturn { id: string; findingId: string; vendor: string; amount: number; settledAt: number; currency: string | null; partial: boolean; reference: string | null }
+export interface RecentReturn { id: string; findingId: string; vendor: string; amount: number; settledAt: number; currency: string; partial: boolean; reference: string | null }
 
 /** One row per current recorded return, ordered by its own settlement date. */
 export function recentReturns(env: LedgerEnvironment): RecentReturn[] {
   const rows: RecentReturn[] = []
-  for (const finding of env.result.findings) {
-    const state = getCaseState(env, finding.id)
+  for (const { finding, state } of cases(env)) {
     const settlements = validSettlements(state)
     if (settlements.length) {
       settlements.forEach((entry, index) => {
         if (!Number.isFinite(entry.amount) || entry.amount <= 0 || !Number.isFinite(entry.settledAt) || entry.settledAt <= 0) return
-        rows.push({ id: `${finding.id}:${index}`, findingId: finding.id, vendor: finding.vendor, amount: entry.amount, currency: finding.currency ?? null, settledAt: entry.settledAt, partial: state.recoveryStage === 'requested', reference: entry.reference })
+        rows.push({ id: `${finding.id}:${index}`, findingId: finding.id, vendor: finding.vendor, amount: entry.amount, currency: exposureCurrencyOf(finding), settledAt: entry.settledAt, partial: state.recoveryStage === 'requested', reference: entry.reference })
       })
       continue
     }
@@ -257,9 +246,93 @@ export function recentReturns(env: LedgerEnvironment): RecentReturn[] {
   return rows.sort((a, b) => b.settledAt - a.settledAt || b.amount - a.amount)
 }
 
+/**
+ * What one recovery case is worth right now, the same on every screen: the open
+ * balance while a request is out, what came back once it is done, and before
+ * that what is left to ask for after earlier returns.
+ */
+export function caseAmount({ finding, state }: Pick<Opportunity, 'finding' | 'state'>, findings: Finding[]): { amount: number; label: string } {
+  if (state.recoveryStage === 'recovered') return { amount: verifiedReturned(state), label: verifiedReturned(state) > 0 ? 'returned' : 'amount missing' }
+  if (state.recoveryStage === 'requested' && state.requestedAmount != null) return { amount: Math.max(0, Math.round((state.requestedAmount - activeReturned(state)) * 100) / 100), label: 'outstanding' }
+  if (state.recoveryStage === 'not_recovered' && state.requestedAmount != null) return { amount: state.requestedAmount, label: 'unreturned' }
+  const supported = eligiblePotential(finding, findings)
+  if (state.recoveryStage === 'requested' || state.recoveryStage === 'not_recovered') return { amount: supported === null ? finding.dollarImpact : 0, label: supported === null ? 'under review' : 'amount missing' }
+  if (state.approvedAt && state.recoveryStage === 'confirmed' && supported !== null) return { amount: authorizedOutstanding(state), label: 'approved, not sent' }
+  return { amount: supported === null ? finding.dollarImpact : Math.max(0, Math.round((supported - verifiedReturned(state)) * 100) / 100), label: 'to request' }
+}
+
+/** "2 requests out with vendors · 1 approved, not sent": an approval is not a request until it goes out. */
+export function requestsNote(l: Ladder): string {
+  const parts = [
+    l.requestsSent ? `${l.requestsSent} ${l.requestsSent === 1 ? 'request' : 'requests'} out with vendors` : null,
+    l.requestsApproved ? `${l.requestsApproved} approved, not sent yet` : null,
+  ].filter(Boolean)
+  return parts.length ? parts.join(' · ') : 'No requests out yet'
+}
+
+/** What the loaded columns let the checks do. "Every check ran" is only said when all of them could. */
+export interface CheckCoverage { complete: boolean; summary: string; limits: string[] }
+
+export function checkCoverage(env: LedgerEnvironment): CheckCoverage {
+  // Older imports did not keep their column list; the records still show what could run.
+  const columns = env.imports.some((batch) => batch.detectedColumns) ? env.imports.flatMap((batch) => batch.detectedColumns ?? []) : undefined
+  const { availableCheckCount, totalCheckCount, weakerChecks } = assessRecordReadiness(env.records, 0, columns)
+  const complete = availableCheckCount >= totalCheckCount
+  return {
+    complete,
+    summary: complete ? 'Every check ran' : `${availableCheckCount} of ${totalCheckCount} checks could run`,
+    limits: weakerChecks.map((check) => check.label),
+  }
+}
+
 /** Verified, undecided, and waiting on a human — §28's "what should I do". */
 export function awaitingDecision(env: LedgerEnvironment): Opportunity[] {
   return opportunities(env).filter((o) => o.state.decision === null && eligiblePotential(o.finding, env.result.findings) !== null)
+}
+
+/**
+ * Every figure one finding contributes, in one place: the totals, the lists and
+ * the export all read these, so the same quantity is the same number everywhere.
+ * A null means the finding contributes nothing to that figure.
+ */
+export interface FindingFigures {
+  open: boolean
+  flagged: number | null
+  atRisk: number | null
+  /** USD only, like the recovery workflow. */
+  potential: number | null
+  /** Potential that has no approved request yet. */
+  verified: number | null
+  inRecovery: number | null
+  returned: number
+}
+
+export function figuresOf({ finding, state }: Pick<Opportunity, 'finding' | 'state'>, findings: Finding[]): FindingFigures {
+  const open = isStillInPlay(state)
+  const returned = verifiedReturned(state)
+  // Only an eligible recovery candidate carries potential recovery.
+  const supported = eligiblePotential(finding, findings)
+  // A request for part of the claim that was paid in full leaves the rest supported and requestable.
+  const potential = supported === null ? null : open ? Math.max(0, Math.round((supported - returned) * 100) / 100) : unrequestedRemainder(state, supported)
+  let inRecovery: number | null = null
+  if (supported !== null) {
+    if (open && state.approvedAt && (state.recoveryStage === 'confirmed' || state.recoveryStage === 'requested')) inRecovery = authorizedOutstanding(state)
+  } else if (Boolean(finding.requiresRevalidation || state.requiresRevalidation) && currencyOf(finding) === 'USD' && state.recoveryStage === 'requested' && state.requestedAmount != null && state.approvedAt) {
+    // An import can supersede the detector's finding while an authorized request
+    // remains open. Keep its proven outstanding balance visible for closeout.
+    // Only a superseded finding qualifies: a signal that never passed the gate has
+    // no vendor request to keep open, whatever its currency.
+    inRecovery = authorizedOutstanding(state)
+  }
+  return {
+    open,
+    flagged: isFlaggedForReview(finding, state) ? finding.flaggedAmount ?? finding.dollarImpact : null,
+    atRisk: open && isAtRisk(finding) ? finding.dollarImpact : null,
+    potential,
+    verified: potential !== null && inRecovery === null ? potential : null,
+    inRecovery,
+    returned,
+  }
 }
 
 export function ladder(env: LedgerEnvironment): Ladder {
@@ -267,61 +340,46 @@ export function ladder(env: LedgerEnvironment): Ladder {
   const counts: Record<LadderStage, number> = { ...empty }
   // Totals are kept in whole cents and converted once at the end.
   const cents = { ...empty }
-  const add = (stage: LadderStage, amount: number) => {
+  const add = (stage: LadderStage, amount: number | null) => {
+    if (amount === null) return
     cents[stage] += Math.round(amount * 100)
     counts[stage] += 1
   }
   let awaitingCents = 0
-  let flaggedCents = 0
   let flaggedCount = 0
-  let atRiskCents = 0
   let openCount = 0
+  let requestsSent = 0
+  let requestsApproved = 0
   const recoveredByCurrency: Record<string, number> = {}
   const flaggedByCurrency: Record<string, number> = {}
   const atRiskByCurrency: Record<string, number> = {}
+  const addTo = (totals: Record<string, number>, currency: string, amount: number) => { totals[currency] = sumMoney([totals[currency] ?? 0, amount]) }
 
-  for (const finding of env.result.findings) {
-    const state = getCaseState(env, finding.id)
-    const returned = verifiedReturned(state)
+  for (const { finding, state } of cases(env)) {
+    const figures = figuresOf({ finding, state }, env.result.findings)
     // Historical verified returns survive revalidation of the original signal.
-    if (returned > 0) {
+    if (figures.returned > 0) {
       // Returns were always entered in the app's dollar fields, so a legacy
       // finding without a currency keeps its verified money as USD. Only a known
       // other currency is held out of the USD total.
       const key = currencyOf(finding)
-      recoveredByCurrency[key] = sumMoney([recoveredByCurrency[key] ?? 0, returned])
-      if (key === 'USD') add('recovered', returned)
+      addTo(recoveredByCurrency, key, figures.returned)
+      if (key === 'USD') add('recovered', figures.returned)
     }
-    // An import can supersede the detector's finding while an authorized request
-    // remains open. Keep its proven outstanding balance visible for closeout.
-    // Only a superseded finding qualifies: a signal that never passed the gate has
-    // no vendor request to keep open, whatever its currency.
-    const superseded = Boolean(finding.requiresRevalidation || state.requiresRevalidation)
-    if (superseded && currencyOf(finding) === 'USD' && state.recoveryStage === 'requested' && eligiblePotential(finding, env.result.findings) === null && state.requestedAmount != null && state.approvedAt) {
-      add('inRecovery', authorizedOutstanding(state))
-    }
-    if (!isStillInPlay(state)) continue
-    openCount += 1
-    if (isFlaggedForReview(finding, state)) {
-      const amount = finding.flaggedAmount ?? finding.dollarImpact
-      const currency = exposureCurrencyOf(finding)
-      flaggedByCurrency[currency] = sumMoney([flaggedByCurrency[currency] ?? 0, amount])
-      if (currency === 'USD') flaggedCents += Math.round(amount * 100)
+    if (figures.open) openCount += 1
+    if (figures.flagged !== null) {
+      addTo(flaggedByCurrency, exposureCurrencyOf(finding), figures.flagged)
       flaggedCount += 1
     }
-    if (isAtRisk(finding)) {
-      const currency = exposureCurrencyOf(finding)
-      atRiskByCurrency[currency] = sumMoney([atRiskByCurrency[currency] ?? 0, finding.dollarImpact])
-      if (currency === 'USD') atRiskCents += Math.round(finding.dollarImpact * 100)
+    if (figures.atRisk !== null) addTo(atRiskByCurrency, exposureCurrencyOf(finding), figures.atRisk)
+    add('potential', figures.potential)
+    add('verified', figures.verified)
+    add('inRecovery', figures.inRecovery)
+    if (figures.inRecovery !== null) {
+      if (state.recoveryStage === 'requested') requestsSent += 1
+      else requestsApproved += 1
     }
-    // Only an eligible recovery candidate carries potential recovery.
-    const potential = eligiblePotential(finding, env.result.findings)
-    if (potential === null) continue
-    const remaining = Math.max(0, potential - returned)
-    add('potential', remaining)
-    if (state.decision === null) awaitingCents += Math.round(remaining * 100)
-    if (state.approvedAt && (state.recoveryStage === 'confirmed' || state.recoveryStage === 'requested')) add('inRecovery', authorizedOutstanding(state))
-    else add('verified', remaining)
+    if (figures.potential !== null && state.decision === null) awaitingCents += Math.round(figures.potential * 100)
   }
 
   const dollars = (value: number) => value / 100
@@ -329,13 +387,15 @@ export function ladder(env: LedgerEnvironment): Ladder {
     potential: dollars(cents.potential),
     verified: dollars(cents.verified),
     inRecovery: dollars(cents.inRecovery),
+    requestsSent,
+    requestsApproved,
     recovered: dollars(cents.recovered),
     protected: dollars(cents.protected),
     openCount,
-    atRisk: dollars(atRiskCents),
+    atRisk: atRiskByCurrency.USD ?? 0,
     counts,
     awaitingDecision: dollars(awaitingCents),
-    flagged: dollars(flaggedCents),
+    flagged: flaggedByCurrency.USD ?? 0,
     flaggedCount,
     currency: 'USD',
     recoveredByCurrency,
@@ -354,8 +414,7 @@ export interface VendorCommitments {
 /** Customer-recorded vendor statements; neither bucket is settled money. */
 export function vendorCommitments(env: LedgerEnvironment): VendorCommitments {
   const totals: VendorCommitments = { confirmed: 0, pendingReturn: 0, confirmedCases: 0, pendingCases: 0 }
-  for (const finding of env.result.findings) {
-    const state = getCaseState(env, finding.id)
+  for (const { finding, state } of cases(env)) {
     if (eligiblePotential(finding, env.result.findings) === null && !(currencyOf(finding) === 'USD' && ['exact_duplicate', 'near_duplicate'].includes(finding.type) && state.recoveryStage === 'requested' && state.requestedAmount != null)) continue
     if (state.recoveryStage !== 'requested') continue
     const update = latestVendorPosition(state)
@@ -411,12 +470,11 @@ export function vendors(env: LedgerEnvironment): VendorRollup[] {
   // sum of related-record lists that double-counts anything in two findings.
   for (const record of env.records) rowFor(record.vendor).recordCount += 1
 
-  for (const finding of env.result.findings) {
-    const state = getCaseState(env, finding.id)
+  for (const { finding, state } of cases(env)) {
     const evidence = evidenceOf(finding)
     const row = rowFor(finding.vendor)
     row.caseCount += 1
-    if (isStillInPlay(state)) row.potential = sumMoney([row.potential, Math.max(0, (eligiblePotential(finding, env.result.findings) ?? 0) - verifiedReturned(state))])
+    row.potential = sumMoney([row.potential, figuresOf({ finding, state }, env.result.findings).potential ?? 0])
     if (currencyOf(finding) === 'USD') row.recovered = sumMoney([row.recovered, verifiedReturned(state)])
     if (row.strongest === null || order.indexOf(evidence) > order.indexOf(row.strongest)) row.strongest = evidence
   }
@@ -432,14 +490,14 @@ function isStillInPlay(state: CaseState): boolean {
 }
 
 /**
- * §25 — why the money left, grouped by the check that caught it. A finding the
- * reviewer dismissed as expected was never a leak, so it is left out; money
- * that has since been recovered still left in the first place, so it stays.
+ * §25 — every open finding, grouped by the check that raised it. Dismissed
+ * findings were never a leak and closed ones are no longer open, so neither is
+ * counted: the totals here are the same findings every other screen calls open.
  */
 export function rootCauses(env: LedgerEnvironment): RootCause[] {
   const byType = new Map<string, RootCause>()
-  for (const finding of env.result.findings) {
-    if (getCaseState(env, finding.id).decision === 'expected') continue
+  for (const { finding, state } of cases(env)) {
+    if (!isStillInPlay(state)) continue
     const currency = exposureCurrencyOf(finding)
     const key = `${finding.type}|${currency}`
     const row = byType.get(key) ?? {
@@ -450,7 +508,7 @@ export function rootCauses(env: LedgerEnvironment): RootCause[] {
       value: 0,
     }
     row.count += 1
-    row.value += finding.dollarImpact
+    row.value = sumMoney([row.value, finding.dollarImpact])
     byType.set(key, row)
   }
   return [...byType.values()].sort((a, b) => b.value - a.value)
@@ -461,8 +519,7 @@ export interface RecordedRootCause { label: string; count: number; recovered: nu
 /** Causes confirmed by customers during accounting closeout, separate from rule categories. */
 export function recordedRootCauses(env: LedgerEnvironment): RecordedRootCause[] {
   const causes = new Map<string, RecordedRootCause>()
-  for (const finding of env.result.findings) {
-    const state = getCaseState(env, finding.id)
+  for (const { finding, state } of cases(env)) {
     if (currencyOf(finding) !== 'USD' || state.recoveryStage !== 'recovered' || verifiedReturned(state) <= 0 || !state.reconciledAt || !state.rootCause) continue
     const cause = causes.get(state.rootCause) ?? { label: state.rootCause, count: 0, recovered: 0 }
     cause.count += 1
@@ -484,6 +541,7 @@ export function timelineFor(finding: Finding, state: CaseState, discoveredAt: nu
   const at = (ts: number | null | undefined) =>
     ts ? new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'
 
+  const returned = formatMoney(activeReturned(state), exposureCurrencyOf(finding))
   if (finding.class !== 'recoverable') return [
     { when: at(discoveredAt), what: 'Finding detected', done: true },
     { when: at(state.decidedAt), what: 'Evidence reviewed', done: state.decision !== null },
@@ -519,9 +577,9 @@ export function timelineFor(finding: Finding, state: CaseState, discoveredAt: nu
           : state.recoveryStage === 'recovered' && activeReturned(state) <= 0
             ? 'Return amount missing — correct this case before reconciliation'
             : state.recoveryStage === 'recovered'
-              ? `Money received — ${formatCurrency(activeReturned(state))} recorded by you`
+              ? `Money received — ${returned} recorded by you`
             : activeReturned(state) > 0
-              ? `Partial return — ${formatCurrency(activeReturned(state))} recorded by you`
+              ? `Partial return — ${returned} recorded by you`
               : 'Outcome pending',
       detail: state.recoveryOutcomeNote ?? undefined,
       done: state.recoveryStage === 'recovered' || state.recoveryStage === 'not_recovered' || activeReturned(state) > 0,

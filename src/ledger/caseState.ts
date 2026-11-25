@@ -1,4 +1,5 @@
 import type { Finding } from '../types.ts'
+import { verifiedReturned } from '../recovery/financials.ts'
 
 /** The three outcomes a human can record against a case. */
 export type DecisionValue = 'confirmed' | 'needs_info' | 'expected'
@@ -35,6 +36,8 @@ export interface RecoveryVerification {
   settledAt: number
   /** Required for credits and offsets: issuance alone is not returned value. */
   appliedToBill?: string
+  /** What actually arrived, when it was more than counts toward the claim. */
+  receivedAmount?: number
   /** Request this return belongs to. Untagged historical rows belong to generation 1. */
   requestGeneration?: number
 }
@@ -188,6 +191,24 @@ export function updateRequestedEvidence(state: CaseState, requestedEvidence: str
   return { ...state, requestedEvidence, reason }
 }
 
+/**
+ * A reviewer's decision, applied the same way in the browser and on the server.
+ * Repeating the current decision only updates its note; an earlier request's
+ * history and returns are kept through a new review.
+ */
+export function applyDecision(current: CaseState, input: { decision: DecisionValue; reason: string | null; dismissalTag?: DismissalTag | null }, at = Date.now()): CaseState {
+  const tag = input.dismissalTag ?? null
+  if (current.decision === input.decision) return input.decision === 'expected' ? updateDismissal(current, tag ?? current.dismissalTag ?? null, input.reason) : updateCaseReason(current, input.reason)
+  const decided = input.decision === 'confirmed' ? confirmCase(input.reason) : input.decision === 'needs_info' ? markNeedsInfo(input.reason) : markExpected(input.reason, tag)
+  return {
+    ...decided, decidedAt: at,
+    ...((current.activeRequestGeneration ?? 1) > 1 ? {
+      activeRequestGeneration: current.activeRequestGeneration, archivedRequests: current.archivedRequests, recoverySettlements: current.recoverySettlements,
+      recoveredAmount: verifiedReturned(current), legacyRecoveredAmount: current.legacyRecoveredAmount, requiresRevalidation: current.requiresRevalidation, history: current.history,
+    } : {}),
+  }
+}
+
 /** Persist recovery copy on the case so a restored draft resumes exactly where it left off. */
 export function updateRecoveryDraft(state: CaseState, recoveryDraft: string): CaseState {
   return { ...state, recoveryDraft }
@@ -219,7 +240,8 @@ export function markRecoveryRequested(state: CaseState, requestedAmount?: number
     ...state,
     recoveryStage: 'requested',
     recoveryRequestedAt: Date.now(),
-    requestedAmount: requestedAmount ?? state.requestedAmount ?? null,
+    // 0 means nothing is being asked for (an internal review), whatever an earlier draft said.
+    requestedAmount: requestedAmount === 0 ? null : requestedAmount ?? state.requestedAmount ?? null,
   }
 }
 
@@ -255,6 +277,12 @@ export function sentEmailNote(sent: SentEmail): string {
   return `From ${sent.from} to ${sent.to}${sent.cc.length ? `, cc ${sent.cc.join(', ')}` : ''}. Gmail message ID ${sent.messageId}`
 }
 
+function settlementSummary(entry: RecoveryVerification): string {
+  return entry.receivedAmount !== undefined && entry.receivedAmount > entry.amount
+    ? 'Money received recorded; the part above the claim is noted, not counted'
+    : 'Money received recorded'
+}
+
 /**
  * Compare two states and, if anything that matters changed, append an audit
  * event describing it. Called by the one place that persists case state, so
@@ -270,28 +298,37 @@ export function withHistory(previous: CaseState, next: CaseState, actor: string 
   const holdChanged = (previous.contactHold ?? null) !== (next.contactHold ?? null)
   const vendorChanged = (previous.vendorUpdates?.length ?? 0) !== (next.vendorUpdates?.length ?? 0)
   const settlementsChanged = (previous.recoverySettlements?.length ?? 0) !== (next.recoverySettlements?.length ?? 0)
+  const listed = (state: CaseState) => state.recoverySettlements ?? (state.recoveryVerification ? [state.recoveryVerification] : [])
+  const unchanged = (entries: RecoveryVerification[]) => { const kept = new Set(entries.map((entry) => JSON.stringify(entry))); return (entry: RecoveryVerification) => kept.has(JSON.stringify(entry)) }
+  // One return corrected or removed while the case stays open; reopening an outcome has its own entry.
+  const takenOff = listed(previous).filter((entry) => !unchanged(listed(next))(entry))
+  const settlementCorrected = takenOff.length > 0 && previous.recoveryStage === 'requested'
+  const putOn = settlementCorrected ? listed(next).filter((entry) => !unchanged(listed(previous))(entry)) : []
   const settlementAdded = (next.recoverySettlements?.length ?? 0) > (previous.recoverySettlements?.length ?? 0)
   const requestArchived = (next.archivedRequests?.length ?? 0) > (previous.archivedRequests?.length ?? 0)
   const followUpChanged = (previous.nextFollowUpAt ?? null) !== (next.nextFollowUpAt ?? null)
   const followUpSent = (next.recoveryFollowUps?.length ?? 0) > (previous.recoveryFollowUps?.length ?? 0)
   const reconciliationChanged = (previous.reconciledAt ?? null) !== (next.reconciledAt ?? null)
   const reconciliationDetailsChanged = (previous.reconciliationNote ?? null) !== (next.reconciliationNote ?? null) || (previous.rootCause ?? null) !== (next.rootCause ?? null)
-  if (!requestArchived && !decisionChanged && !stageChanged && !amountChanged && !requestedChanged && !approvalChanged && !attributionChanged && !holdChanged && !vendorChanged && !settlementsChanged && !followUpChanged && !followUpSent && !reconciliationChanged && !reconciliationDetailsChanged) return next
+  if (!requestArchived && !decisionChanged && !stageChanged && !amountChanged && !requestedChanged && !approvalChanged && !attributionChanged && !holdChanged && !vendorChanged && !settlementsChanged && !settlementCorrected && !followUpChanged && !followUpSent && !reconciliationChanged && !reconciliationDetailsChanged) return next
 
   let action: string
   let summary: string
   if (requestArchived) {
     action = 'request:archived'
-    summary = 'Earlier supplier request preserved; new review started'
+    summary = next.recoveryStage === 'confirmed' ? 'Paid request kept in history; a request for the rest can be prepared' : 'Earlier supplier request preserved; new review started'
   } else if (stageChanged && previous.recoveryStage === 'recovered' && next.recoveryStage === 'requested' && (previous.recoveredAmount ?? 0) > 0 && previous.recoveredAmount === next.recoveredAmount) {
     action = 'recovery:remainder_reopened'
     summary = 'Remaining balance reopened'
   } else if (stageChanged && next.recoveryStage === 'requested' && (previous.recoveryStage === 'recovered' || previous.recoveryStage === 'not_recovered')) {
     action = 'outcome:reopened'
     summary = 'Outcome reopened'
+  } else if (settlementCorrected) {
+    action = 'recovery:settlement_corrected'
+    summary = putOn.length ? 'Recorded return corrected' : 'Recorded return removed'
   } else if (settlementAdded) {
     action = 'recovery:settlement_recorded'
-    summary = 'Money received recorded'
+    summary = settlementSummary(next.recoverySettlements!.at(-1)!)
   } else if (stageChanged && next.recoveryStage === 'recovered' && (previous.recoveredAmount ?? 0) > 0) {
     action = 'recovery:remainder_closed'
     summary = 'Remaining balance closed'
@@ -355,6 +392,7 @@ export function withHistory(previous: CaseState, next: CaseState, actor: string 
   else if (action === 'recovery:remainder_reopened') eventAmount = Math.max(0, Math.round((previous.requestedAmount ?? 0) * 100) - Math.round(activeReturned(previous) * 100)) / 100
   else if (action === 'recovery:remainder_closed' || action === 'outcome:not_recovered') eventAmount = remaining
   else if (action === 'recovery:settlement_recorded') eventAmount = lastSettlement?.amount ?? null
+  else if (action === 'recovery:settlement_corrected') eventAmount = -takenOff.reduce((sum, entry) => sum + Math.round(entry.amount * 100), 0) / 100
   else if (action.startsWith('vendor:')) eventAmount = lastVendorUpdate?.amount ?? null
   else if (action === 'recovery:approved' || action === 'stage:requested' || action === 'request:amount_changed') eventAmount = next.requestedAmount ?? null
   else if (action === 'outcome:recovered' || action === 'outcome:amount_changed' || action.startsWith('accounting:')) eventAmount = next.recoveredAmount ?? null
@@ -365,6 +403,7 @@ export function withHistory(previous: CaseState, next: CaseState, actor: string 
   else if (action === 'outcome:recovered' || action === 'outcome:amount_changed') eventMethod = next.recoveredVia ?? null
   let eventNote: string | null = null
   if (action === 'recovery:settlement_recorded') eventNote = lastSettlement?.reference ?? null
+  else if (action === 'recovery:settlement_corrected') eventNote = `Was ${takenOff.map((entry) => entry.reference).join(', ')}`
   else if (action.startsWith('accounting:')) eventNote = next.reconciliationNote ?? null
   else if (action.startsWith('vendor:')) eventNote = lastVendorUpdate?.note ?? null
   else if (action === 'recovery:contact_held') eventNote = next.contactHold ?? null
@@ -414,6 +453,9 @@ export function withHistory(previous: CaseState, next: CaseState, actor: string 
   }
   if (settlementAdded && action !== 'recovery:settlement_recorded' && lastSettlement) {
     alongside.push({ ...stamp, at: lastSettlement.settledAt, action: 'recovery:settlement_recorded', summary: 'Money received recorded', amount: lastSettlement.amount, method: lastSettlement.method, note: lastSettlement.reference })
+  }
+  for (const entry of putOn) {
+    alongside.push({ ...stamp, at: entry.settledAt, action: 'recovery:settlement_recorded', summary: settlementSummary(entry), amount: entry.amount, method: entry.method, note: entry.reference })
   }
   if ((reconciliationChanged || reconciliationDetailsChanged) && next.reconciledAt && !action.startsWith('accounting:')) {
     alongside.push({ ...stamp, at: next.reconciledAt, action: previous.reconciledAt ? 'accounting:corrected' : 'accounting:reconciled', summary: previous.reconciledAt ? 'Accounting reconciliation updated' : 'Accounting reconciliation recorded', amount: next.recoveredAmount ?? null, method: null, note: next.reconciliationNote ?? null })

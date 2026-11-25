@@ -83,6 +83,80 @@ describe('Evidence review in plain words', () => {
   })
 })
 
+describe('Evidence review from a CSV', () => {
+  const HEADER = 'vendor,invoice_number,payment_date,invoice_amount,amount_paid,currency,transaction_id,company,supplier_id'
+  const csvFinding = (rows: string[], header = HEADER) => {
+    const csvEnv = mergeImport(null, { sourceLabel: 'payments.csv', mode: 'upload', parsed: parseCsv([header, ...rows].join('\n')) })
+    return { finding: csvEnv.result.findings.find((f) => f.type === 'exact_duplicate')!, findings: csvEnv.result.findings }
+  }
+  const full = () => csvFinding(['Acme,INV-9,2025-01-10,500,500,USD,TXN-1,Bean Co,SUP-42', 'Acme,INV-9,2025-01-20,500,500,USD,TXN-2,Bean Co,SUP-42'])
+  const bare = () => csvFinding(['Acme,INV-9,2025-01-10,500,500', 'Acme,INV-9,2025-01-20,500,500'], 'vendor,invoice_number,payment_date,invoice_amount,amount_paid')
+  const value = (name: RegExp | string) => (screen.getByRole('textbox', { name }) as HTMLInputElement).value
+
+  it('starts from everything the file says', () => {
+    render(<EvidencePanel {...full()} onSave={() => {}} />)
+    expect(value(/^Company or legal entity/)).toBe('Bean Co')
+    expect(value(/^Supplier account or vendor ID/)).toBe('SUP-42')
+    expect(value(/^Bill or invoice number/)).toBe('INV-9')
+    expect(value(/^Bill amount/)).toBe('500.00')
+    expect(value(/^Currency/)).toBe('USD')
+    expect(screen.getAllByRole('textbox', { name: /^Payment or check number/ }).map((n) => (n as HTMLInputElement).value)).toEqual(['TXN-1', 'TXN-2'])
+    // Nothing the file can't vouch for is filled in.
+    expect(screen.getAllByRole('textbox', { name: /^Bank reference/ }).every((n) => (n as HTMLInputElement).value === '')).toBe(true)
+  })
+
+  it('asks for the currency once and applies it to every payment, unless one differs', () => {
+    const onSave = vi.fn<(evidence: RecoveryEvidence) => void>()
+    render(<EvidencePanel {...bare()} onSave={onSave} />)
+    expect(screen.getAllByRole('textbox', { name: /Currency/ })).toHaveLength(1)
+    fireEvent.change(screen.getByRole('textbox', { name: /^Currency/ }), { target: { value: 'usd' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Person confirming these facts' }), { target: { value: 'Ana' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save evidence' }))
+    expect(onSave.mock.calls[0][0].payments.map((p) => p.currency)).toEqual(['USD', 'USD'])
+    fireEvent.click(screen.getByRole('button', { name: 'A payment was in a different currency' }))
+    fireEvent.change(screen.getAllByRole('textbox', { name: /^Currency of this payment/ })[1], { target: { value: 'EUR' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save evidence' }))
+    expect(onSave.mock.calls[1][0]).toMatchObject({ obligation: { currency: 'USD' }, payments: [{ currency: 'USD' }, { currency: 'EUR' }] })
+    expect(evaluateEligibility(bare().finding, onSave.mock.calls[1][0]).eligible).toBe(false)
+  })
+
+  it('lists what is missing in the open, in plain words, and shrinks as it is answered', () => {
+    render(<EvidencePanel {...bare()} onSave={() => {}} />)
+    const list = () => screen.getByTestId('missing-answers')
+    expect(list().closest('details')).toBeNull()
+    expect(list()).toHaveTextContent('Company or legal entity')
+    expect(list()).toHaveTextContent('$500.00 paid Jan 10, 2025: payment or check number')
+    expect(list()).toHaveTextContent('I checked for refunds: tick it and say where you checked')
+    expect(list().textContent).not.toMatch(/rec_\d|obligation|attest|identity/i)
+    const before = list().querySelectorAll('li').length
+    fireEvent.change(screen.getByRole('textbox', { name: /^Company or legal entity/ }), { target: { value: 'Bean Co' } })
+    expect(list().querySelectorAll('li').length).toBe(before - 1)
+  })
+
+  it('does not call blank payment numbers identical', () => {
+    const { finding: f, findings } = bare()
+    render(<EvidencePanel finding={f} findings={findings} onSave={() => {}} />)
+    fireEvent.change(screen.getByRole('textbox', { name: /^Company or legal entity/ }), { target: { value: 'Bean Co' } })
+    expect(screen.queryByText(/not distinct|same payment or check number|don’t line up/)).toBeNull()
+    for (const input of screen.getAllByRole('textbox', { name: /^Payment or check number/ })) fireEvent.change(input, { target: { value: '1043' } })
+    expect(screen.getByText('Two payments have the same payment or check number. Each needs its own.')).toBeInTheDocument()
+  })
+
+  it('can be saved part way, and refuses a contact address the server would refuse', () => {
+    const onSave = vi.fn<(evidence: RecoveryEvidence) => void>()
+    render(<EvidencePanel {...bare()} onSave={onSave} />)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Person confirming these facts' }), { target: { value: 'Ana' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save evidence' }))
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('status')).toHaveTextContent('Saved. Answer the rest when you have it.')
+    fireEvent.click(screen.getByText('Supplier billing contact (optional)'))
+    fireEvent.click(screen.getByRole('button', { name: 'Add contact suggestion' }))
+    fireEvent.change(screen.getByRole('textbox', { name: /^Billing email/ }), { target: { value: 'ap@vendor.c' } })
+    fireEvent.change(screen.getByRole('textbox', { name: /^Contact source reference/ }), { target: { value: 'Supplier file' } })
+    expect(screen.getByRole('button', { name: 'Save evidence' })).toBeDisabled()
+  })
+})
+
 describe('dollarsToCents', () => {
   it('reads what people type without floating-point drift', () => {
     expect(dollarsToCents('6800')).toBe(680000)

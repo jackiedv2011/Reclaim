@@ -1,4 +1,6 @@
 import { evaluateEligibility } from '../src/recovery/eligibility.ts'
+import { claimContext } from '../src/recovery/claimLinks.ts'
+import type { CaseState } from '../src/ledger/caseState.ts'
 import type { Finding } from '../src/types.ts'
 import type { DraftRequest } from './ai.ts'
 
@@ -7,7 +9,20 @@ type StoredState = { activeRequestGeneration?: number; recoveryRequestedAt?: num
 const settlements = (s: StoredState) => (s.recoverySettlements ?? (s.recoveryVerification ? [s.recoveryVerification] : [])).filter(e => Number.isFinite(e.amount) && e.amount > 0 && Number.isFinite(e.settledAt) && e.settledAt > 0 && Boolean(e.reference?.trim()) && ['bank', 'accounting', 'document', 'manual'].includes(e.source) && (e.method === 'refund' || ((e.method === 'credit' || e.method === 'offset') && Boolean(e.appliedToBill?.trim()))))
 const settled = (s: StoredState, generation?: number) => Math.round(settlements(s).filter(e => generation === undefined || (e.requestGeneration ?? 1) === generation).reduce((sum, e) => sum + e.amount, 0) * 100) / 100
 
-const iso = (v: unknown) => (typeof v === 'string' && v ? v.slice(0, 10) : null)
+const HALF_DAY = 43_200_000
+/**
+ * The calendar day a payment or invoice is dated. New records keep it as
+ * YYYY-MM-DD, which is used as it is. Older ones hold an instant: midnight
+ * where the customer was. East of London that is the evening before in UTC, so
+ * the day is the nearest midnight, never the first ten characters.
+ */
+export function calendarDay(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  const text = value.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text
+  const at = Date.parse(text)
+  return Number.isFinite(at) ? new Date(at + HALF_DAY).toISOString().slice(0, 10) : null
+}
 
 export function requestGeneration(project: Record<string, unknown> | null, findingId: string): number {
   const env = project?.environment as { caseStates?: Record<string, StoredState> } | undefined
@@ -30,8 +45,10 @@ function authorizedRequest(project: Record<string, unknown> | null, findingId: s
     ...f,
     relatedRecords: ((f.relatedRecords as Array<{ id: string }>) ?? []).map((r) => records.get(r.id) ?? r),
   })) as unknown as Finding[]
-  const finding = findings.find((f) => f.id === findingId)
-  if (!finding) return { ok: false, reason: 'That finding is not in the saved project.' }
+  const stored = findings.find((f) => f.id === findingId)
+  if (!stored) return { ok: false, reason: 'That finding is not in the saved project.' }
+  // Money an earlier case on the same payments already has out or back comes off what may be asked for.
+  const finding = claimContext(findings, env?.caseStates as Record<string, CaseState> | undefined).finding(stored)
   if (finding.classification !== 'recovery_candidate') return { ok: false, reason: 'Only recovery candidates can be drafted or sent.' }
   const gate = evaluateEligibility(finding, finding.evidence, findings)
   if (!gate.eligible || gate.potentialAmountMinor === null) return { ok: false, reason: 'The saved evidence does not pass the recovery gate.' }
@@ -62,8 +79,8 @@ export function authorizedDraftFacts(project: Record<string, unknown> | null, fi
     const rec = r as unknown as Record<string, unknown>
     return {
       invoiceNumber: (rec.invoiceNumber as string | null) ?? null,
-      invoiceDate: iso(rec.invoiceDate),
-      paymentDate: iso(rec.paymentDate) ?? '',
+      invoiceDate: calendarDay(rec.invoiceDate),
+      paymentDate: calendarDay(rec.paymentDate) ?? '',
       invoiceAmount: (rec.invoiceAmount as number | null) ?? null,
       amountPaid: Number(rec.amountPaid),
       terms: (rec.terms as string | null) ?? null,

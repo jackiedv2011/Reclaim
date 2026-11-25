@@ -68,7 +68,7 @@ export function Audits({
                   <th>Records</th>
                   <th>Open findings</th>
                   <th>Last updated</th>
-                  <th className="wk-right">Potential recovery</th>
+                  <th className="wk-right">Potential recovery (USD)</th>
                 </tr>
               </thead>
               <tbody>
@@ -105,9 +105,9 @@ export function Audits({
                         <div className="wk-table-sub">{p.sourceLabel}</div>
                       </td>
                       <td className="wk-num">{p.recordCount}</td>
-                      <td className="wk-num">{p.openCaseCount}</td>
+                      <td className="wk-num">{isActive ? l.openCount : p.openCaseCount}</td>
                       <td className="wk-dim">{when(p.updatedAt)}</td>
-                      <td className="wk-right wk-table-money">{formatCurrency(p.flaggedValue)}</td>
+                      <td className="wk-right wk-table-money">{isActive ? formatCurrency(l.potential) : p.potentialRecoveryValue === undefined ? '—' : formatCurrency(p.potentialRecoveryValue)}</td>
                     </tr>
                   )
                 })}

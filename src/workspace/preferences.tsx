@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react'
 import { useTheme, type ThemeChoice } from './theme'
+import { formatMoney } from './money'
 
 /**
  * How one person likes the workspace to look. Everything here is a viewing
@@ -154,16 +155,7 @@ export function usePreferences(): PreferencesValue {
 }
 
 /** Headline money: whole dollars unless the viewer asked for cents. */
-export function useHeadlineMoney(): (value: number) => string {
+export function useHeadlineMoney(): (value: number, currency?: string) => string {
   const { prefs } = usePreferences()
-  return useCallback(
-    (value: number) =>
-      new Intl.NumberFormat('en-US', {
-        style: 'currency',
-        currency: 'USD',
-        minimumFractionDigits: prefs.cents ? 2 : 0,
-        maximumFractionDigits: prefs.cents ? 2 : 0,
-      }).format(value),
-    [prefs.cents]
-  )
+  return useCallback((value: number, currency = 'USD') => formatMoney(value, currency, { cents: prefs.cents }), [prefs.cents])
 }

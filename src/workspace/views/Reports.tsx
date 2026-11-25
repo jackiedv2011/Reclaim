@@ -59,7 +59,7 @@ export function Reports({ env }: { env: LedgerEnvironment }) {
       <section className="wk-section">
         <div className="wk-section-head">
           <h2 className="wk-display wk-h2">By check</h2>
-          <p>Every open finding by the check that raised it, including security alerts and discounts; this is not money owed.</p>
+          <p>Every open finding by the check that raised it, including security alerts and discounts; this is not money owed. Closed and dismissed findings are left out.</p>
         </div>
         {causes.length === 0 ? (
           <div className="wk-empty">
@@ -125,8 +125,8 @@ export function Reports({ env }: { env: LedgerEnvironment }) {
                   <th>Vendor</th>
                   <th>Findings</th>
                   <th>Strongest evidence</th>
-                  <th className="wk-right">Recovered</th>
-                  <th className="wk-right">Flagged value</th>
+                  <th className="wk-right">Recovered (USD)</th>
+                  <th className="wk-right">Potential recovery (USD)</th>
                 </tr>
               </thead>
               <tbody>

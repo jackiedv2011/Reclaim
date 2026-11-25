@@ -3,34 +3,47 @@ import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 import { HttpError } from './http.ts'
 import type { ProjectStore } from './projectStore.ts'
-import { confirmCase, markExpected, markNeedsInfo, recordEvidenceReview, reopenDecision, reopenOutcome, updateRecoveryPackage, withHistory, type CaseState, type RecoveryVerification, type VendorUpdate } from '../src/ledger/caseState.ts'
-import { approveRecovery, beginNewRequestReview, closeWithoutRecovery, recordEmailSent, recordFollowUpSent, recordHistoricalSettlement, recordVendorUpdate, reconcileRecovery, reopenRemainingBalance, setContactHold, setFollowUpAfterDays, setNextFollowUp, startRecoveryRequest, verifyRecovery } from '../src/recovery/model.ts'
-import { activeReturned, validSettlements, verifiedReturned } from '../src/recovery/financials.ts'
-import { assertRecoveryEligible, evaluateEligibility, type RecoveryEvidence } from '../src/recovery/eligibility.ts'
+import { applyDecision, DISMISSAL_TAG_LABEL, type DismissalTag, recordEvidenceReview, reopenDecision, reopenOutcome, updateRecoveryPackage, withHistory, type CaseState, type RecoveryVerification, type VendorUpdate } from '../src/ledger/caseState.ts'
+import { approveRecovery, beginNewRequestReview, closeWithoutRecovery, fileInternalReview, recordEmailSent, recordFollowUpSent, recordHistoricalSettlement, recordVendorUpdate, reconcileRecovery, reopenRemainingBalance, setContactHold, setFollowUpAfterDays, setNextFollowUp, startRecoveryRequest, verifyRecovery } from '../src/recovery/model.ts'
+import { activeReturned, settlementKey, validSettlements, verifiedReturned } from '../src/recovery/financials.ts'
+import { assertRecoveryEligible, evaluateEligibility, type ClaimFinding, type RecoveryEvidence } from '../src/recovery/eligibility.ts'
+import { claimContext } from '../src/recovery/claimLinks.ts'
+import { isWholeCents, LIMITS, validEmail } from '../src/recovery/validation.ts'
 import type { Finding } from '../src/types.ts'
 
-const text = z.string().trim().max(5000)
-const money = z.number().finite().positive().refine((n) => Number.isSafeInteger(Math.round(n * 100)) && Math.abs(n * 100 - Math.round(n * 100)) < 0.000001)
+const text = z.string().trim().max(LIMITS.text)
+const email = z.string().trim().refine(validEmail)
+const cents = z.number().finite().nonnegative().refine((n) => Number.isSafeInteger(Math.round(n * 100)) && isWholeCents(n))
+const money = cents.refine((n) => n > 0)
 const method = z.enum(['refund', 'credit', 'offset'])
-const packageSchema = z.object({ subject: text.min(1).max(300).refine((value) => !/[\r\n]/.test(value)), body: text.min(1), evidenceAttachment: text.min(1).nullable().optional(), recipientEmail: z.email().max(320), recipientConfirmed: z.literal(true), requestedAmount: money, method })
-const reference = z.object({ reference: text.min(1).max(300) })
+const packageSchema = z.object({ subject: text.min(1).max(LIMITS.subject).refine((value) => !/[\r\n]/.test(value)), body: text.min(1), evidenceAttachment: text.min(1).nullable().optional(), recipientEmail: email, recipientConfirmed: z.literal(true), requestedAmount: money, method })
+const reference = z.object({ reference: text.max(LIMITS.reference) })
+const identifier = text.max(LIMITS.identifier)
+const currency = z.string().trim().max(3)
+const minorUnits = z.number().int().nonnegative()
+/**
+ * Evidence may be saved in parts: any answer can still be blank. Only the gate
+ * (evaluateEligibility) decides whether it is complete, and it never counts a blank.
+ */
 const evidenceSchema = z.object({
-  entity: reference.extend({ entityId: text.min(1).max(150) }),
-  supplier: reference.extend({ supplierId: text.min(1).max(150), contact: z.object({ email: text.max(320).pipe(z.email()), source: z.enum(['supplier_record', 'document']), reference: text.min(1).max(300) }).optional() }),
-  payments: z.array(reference.extend({ recordId: text.min(1).max(150), paymentId: text.min(1).max(150), obligationId: text.min(1).max(150), amountMinor: z.number().int().positive(), currency: z.string().length(3), settled: z.boolean() })).min(2).max(30),
-  obligation: reference.extend({ obligationId: text.min(1).max(150), amountMinor: z.number().int().positive(), currency: z.string().length(3) }),
+  entity: reference.extend({ entityId: identifier }),
+  supplier: reference.extend({ supplierId: identifier, contact: z.object({ email, source: z.enum(['supplier_record', 'document']), reference: text.min(1).max(LIMITS.reference) }).optional() }),
+  payments: z.array(reference.extend({ recordId: identifier.min(1), paymentId: identifier, obligationId: identifier, amountMinor: minorUnits.positive(), currency, settled: z.boolean() })).min(2).max(500),
+  obligation: reference.extend({ obligationId: identifier, amountMinor: minorUnits, currency }),
   checks: z.record(z.string(), z.object({ reference: text, confirmed: z.boolean() })),
-  priorReturns: z.array(reference.extend({ method: z.enum(['refund', 'credit']), amountMinor: z.number().int().positive(), appliedToBill: text.max(300).optional() })).max(30).optional(),
-  contradictions: z.array(text.max(300)).max(30),
+  priorReturns: z.array(z.object({ reference: text.min(1).max(LIMITS.reference), method: z.enum(['refund', 'credit']), amountMinor: minorUnits.positive(), appliedToBill: text.max(LIMITS.reference).optional() })).max(30).optional(),
+  contradictions: z.array(text).max(5000),
   notes: text,
 })
+const settlementSchema = z.object({ amount: money, method, source: z.enum(['bank', 'accounting', 'document', 'manual']), reference: text.min(1).max(LIMITS.reference), settledAt: z.number().finite().positive(), appliedToBill: text.max(LIMITS.reference).optional() })
 const commandSchema = z.object({
   commandId: z.uuid(),
   expectedRevision: z.number().int().nonnegative(),
   findingId: z.string().min(1).max(150),
-  type: z.enum(['decision', 'evidence', 'approve', 'approve_and_request', 'request', 'email_sent', 'followup_sent', 'followup_days', 'contact_hold', 'followup', 'vendor_update', 'settlement', 'historical_settlement', 'begin_new_request_review', 'close', 'reconcile', 'reopen', 'reopen_balance']),
+  type: z.enum(['decision', 'evidence', 'approve', 'approve_and_request', 'request', 'email_sent', 'followup_sent', 'followup_days', 'contact_hold', 'followup', 'vendor_update', 'settlement', 'historical_settlement', 'begin_new_request_review', 'close', 'file_internal_review', 'close_internal_review', 'reconcile', 'reopen', 'reopen_balance']),
   input: z.unknown(),
 })
+const CLOCK_DRIFT = 600_000
 type Command = z.infer<typeof commandSchema>
 type StoredEnvironment = { records?: Array<Record<string, unknown> & { id: string }>; result?: { findings?: Array<Record<string, unknown> & { id: string }> }; caseStates?: Record<string, CaseState>; historicalFindings?: unknown[] }
 type EventRow = { command_hash: string; revision: number }
@@ -48,12 +61,24 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   return result.data
 }
 
-function applyCommand(db: DatabaseSync, userId: string, projectId: string, project: Record<string, unknown>, cmd: Command, actor: string, at: number): { project: Record<string, unknown>; sourceRefs: string[] } {
+/** Null when the command left the case exactly as it was (a repeated save): that is a success with nothing to store. */
+function applyCommand(db: DatabaseSync, userId: string, projectId: string, project: Record<string, unknown>, cmd: Command, actor: string, at: number): { project: Record<string, unknown>; sourceRefs: string[] } | null {
   const env = project.environment as StoredEnvironment | undefined
-  const finding = env && factFinding(env, cmd.findingId)
-  if (!env || !finding) throw new HttpError(404, 'That case is not in this account.')
+  const stored = env && factFinding(env, cmd.findingId)
+  if (!env || !stored) throw new HttpError(404, 'That case is not in this account.')
   const states = env.caseStates ?? {}
-  const prior = states[cmd.findingId] ?? { decision: null, reason: null, decidedAt: null, recoveryStage: null }
+  const all = (env.result?.findings ?? []).map((row) => factFinding(env, row.id)!).filter(Boolean)
+  const claims = claimContext(all, states)
+  // Carries what an earlier case on the same payments already has out or back, so it is never asked for twice.
+  const finding: ClaimFinding = claims.finding(stored)
+  // Taking back a dismissal carried over from a replaced finding needs the carried decision to take back.
+  const prior: CaseState = states[cmd.findingId] ?? (cmd.type === 'reopen' ? claims.state(stored) : { decision: null, reason: null, decidedAt: null, recoveryStage: null })
+  // A check that is not a recovery candidate is looked into inside the business; nothing about it goes to a vendor.
+  const internal = finding.class !== 'recoverable'
+  // The screen files one as a request with no recipient. One that names a recipient went to a vendor, and is judged as that.
+  const internalFiling = cmd.type === 'file_internal_review' || (cmd.type === 'request' && internal && !(cmd.input as { recipientEmail?: string } | null)?.recipientEmail)
+  // A computer's clock a few minutes fast is not a date in the future.
+  const notAhead = (time: number) => (time > at && time <= at + CLOCK_DRIFT ? at : time)
   const requestChange = ['decision', 'evidence', 'approve', 'approve_and_request', 'request', 'reopen'].includes(cmd.type)
   const priorGeneration = prior.activeRequestGeneration ?? 1
   if (requestChange && prior.recoveryStage === 'confirmed' &&
@@ -62,7 +87,7 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
       .get(userId, projectId, cmd.findingId, priorGeneration)
     if (send) throw new HttpError(409, 'A Gmail send is in progress or has a receipt waiting to be recorded. Check the send before changing the request.', 'gmail_receipt_pending')
   }
-  if (prior.requiresRevalidation && (cmd.type === 'approve' || cmd.type === 'approve_and_request' || cmd.type === 'request')) {
+  if (prior.requiresRevalidation && !internalFiling && (cmd.type === 'approve' || cmd.type === 'approve_and_request' || cmd.type === 'request')) {
     throw new HttpError(409, 'Revalidate the case evidence before approving or recording another request.', 'revalidation_required')
   }
   if (prior.requiresRevalidation && (cmd.type === 'followup' || cmd.type === 'followup_days')) {
@@ -70,7 +95,6 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
   }
   let next: CaseState = prior
   let revisedFinding: Finding | null = null
-  const all = (env.result?.findings ?? []).map((row) => factFinding(env, row.id)!).filter(Boolean)
   const priorReturnedMinor = Math.round((verifiedReturned(prior) - activeReturned(prior)) * 100)
   const checkNewAmount = (amount: number) => {
     const gate = evaluateEligibility(finding, finding.evidence, all)
@@ -82,11 +106,9 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
     switch (cmd.type) {
       case 'decision': {
         if (prior.recoveryStage === 'requested' || prior.recoveryStage === 'recovered' || prior.recoveryStage === 'not_recovered') throw new Error('A sent request must be resolved before changing the review decision.')
-        const data = parse(z.object({ decision: z.enum(['confirmed', 'needs_info', 'expected']), reason: text.nullable() }), cmd.input)
+        const data = parse(z.object({ decision: z.enum(['confirmed', 'needs_info', 'expected']), reason: text.nullable(), dismissalTag: z.enum(Object.keys(DISMISSAL_TAG_LABEL) as [DismissalTag, ...DismissalTag[]]).nullable().optional() }), cmd.input)
         if (priorGeneration > 1 && prior.requiresRevalidation && data.decision === 'confirmed') throw new Error('Review fresh evidence before confirming a new request.')
-        next = data.decision === 'confirmed' ? confirmCase(data.reason) : data.decision === 'needs_info' ? markNeedsInfo(data.reason) : markExpected(data.reason)
-        if (priorGeneration > 1) next = { ...next, activeRequestGeneration: priorGeneration, archivedRequests: prior.archivedRequests, recoverySettlements: prior.recoverySettlements, recoveredAmount: verifiedReturned(prior), legacyRecoveredAmount: prior.legacyRecoveredAmount, requiresRevalidation: prior.requiresRevalidation, history: prior.history }
-        next.decidedAt = at
+        next = applyDecision(prior, data, at)
         break
       }
       case 'begin_new_request_review': {
@@ -110,9 +132,8 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
           priorReturns: raw.priorReturns?.map(stamp),
           contradictions: raw.contradictions, notes: raw.notes,
         }
-        const candidate = { ...finding, evidence, contradictoryEvidence: [] }
-        const gate = evaluateEligibility(candidate, evidence, all)
-        revisedFinding = { ...candidate, ...gate, classification: gate.eligible ? 'recovery_candidate' : 'review_needed', class: gate.eligible ? 'recoverable' : 'review', requiresRevalidation: !gate.eligible }
+        const gate = evaluateEligibility({ ...finding, evidence, contradictoryEvidence: [] }, evidence, all)
+        revisedFinding = { ...stored, evidence, ...gate, classification: gate.eligible ? 'recovery_candidate' : 'review_needed', class: gate.eligible ? 'recoverable' : 'review', requiresRevalidation: !gate.eligible }
         next = recordEvidenceReview(prior, gate.eligible, actor, at)
         break
       }
@@ -126,7 +147,14 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
         next = cmd.type === 'approve_and_request' ? startRecoveryRequest(approved, data.package.requestedAmount, at, finding.dollarImpact) : approved
         break
       }
+      case 'file_internal_review':
       case 'request': {
+        if (internalFiling) {
+          if (!internal) throw new Error('Only an internal review can be filed this way. A vendor request needs its recipient and approval.')
+          const note = parse(z.object({ subject: text.max(LIMITS.subject), body: text }), cmd.input)
+          next = fileInternalReview(prior, note, at)
+          break
+        }
         const data = parse(packageSchema, cmd.input)
         assertRecoveryEligible(finding, all, data.requestedAmount)
         checkNewAmount(data.requestedAmount)
@@ -138,9 +166,9 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
         break
       }
       case 'vendor_update': {
-        const data = parse(z.object({ status: z.string().min(1).max(50), note: text.min(1), at: z.number().finite(), amount: money.optional(), method: method.optional(), expectedAt: z.number().finite().optional() }), cmd.input)
+        const data = parse(z.object({ status: z.string().min(1).max(50), note: text.min(1), at: z.number().finite(), amount: cents.optional(), method: method.optional(), expectedAt: z.number().finite().optional() }), cmd.input)
         if (prior.requiresRevalidation && data.status === 'followed_up') throw new HttpError(409, 'Review the historical request before recording another supplier follow-up.', 'revalidation_required')
-        next = recordVendorUpdate(prior, data as VendorUpdate, at)
+        next = recordVendorUpdate(prior, { ...data, at: notAhead(data.at) } as VendorUpdate, at)
         break
       }
       case 'email_sent':
@@ -171,24 +199,23 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
         break
       }
       case 'settlement': {
-        const data = parse(z.object({ amount: money, method, source: z.enum(['bank', 'accounting', 'document', 'manual']), reference: text.min(1).max(300), settledAt: z.number().finite().positive(), appliedToBill: text.optional() }), cmd.input)
-        if (data.settledAt > at + 60_000) throw new Error('A return cannot be dated in the future.')
+        const data = parse(settlementSchema.extend({ excessConfirmed: z.boolean().optional(), replaces: text.max(LIMITS.text).optional(), remove: z.boolean().optional() }), cmd.input)
         if (finding.evidence?.priorReturns?.some((entry) => entry.reference.trim().toLowerCase() === data.reference.toLowerCase())) throw new Error('This return was already included in the evidence review.')
-        const key = `${data.method}|${data.reference.toLowerCase()}|${data.appliedToBill?.toLowerCase() ?? ''}`
-        const allStates = Object.entries(states)
-        if (allStates.some(([id, state]) => id !== cmd.findingId && (state.recoverySettlements ?? []).some((entry) => `${entry.method}|${entry.reference.toLowerCase()}|${entry.appliedToBill?.toLowerCase() ?? ''}` === key))) throw new Error('This return reference is already used by another case in this project.')
-        next = verifyRecovery(prior, data as RecoveryVerification)
+        // One vendor payment can cover several cases, so the same reference may be split across them;
+        // verifyRecovery refuses it twice inside one case.
+        const gate = evaluateEligibility(finding, finding.evidence, all)
+        next = verifyRecovery(prior, { ...data, settledAt: notAhead(data.settledAt), supportedAmount: gate.potentialAmountMinor === null ? undefined : gate.potentialAmountMinor / 100 }, at)
         break
       }
       case 'historical_settlement': {
-        const data = parse(z.object({ generation: z.number().int().positive(), amount: money, method, source: z.enum(['bank', 'accounting', 'document', 'manual']), reference: text.min(1).max(300), settledAt: z.number().finite().positive(), appliedToBill: text.optional() }), cmd.input)
-        if (data.settledAt > at + 60_000) throw new Error('A return cannot be dated in the future.')
+        const data = parse(settlementSchema.extend({ generation: z.number().int().positive() }), cmd.input)
+        data.settledAt = notAhead(data.settledAt)
+        if (data.settledAt > at) throw new Error('A return cannot be dated in the future.')
         if (finding.evidence?.priorReturns?.some((entry) => entry.reference.trim().toLowerCase() === data.reference.toLowerCase())) throw new Error('This return was already included in the evidence review.')
         const archived = prior.archivedRequests?.find((request) => request.generation === data.generation)
         if (!archived) throw new Error('Select an archived request for this return.')
         if ((data.method === 'credit' || data.method === 'offset') && !data.appliedToBill?.trim()) throw new Error('Enter the bill where the credit was applied.')
-        const key = `${data.method}|${data.reference.toLowerCase()}|${data.appliedToBill?.toLowerCase() ?? ''}`
-        if (Object.entries(states).some(([, state]) => validSettlements(state).some((entry) => `${entry.method}|${entry.reference.toLowerCase()}|${entry.appliedToBill?.toLowerCase() ?? ''}` === key))) throw new Error('This return reference was already recorded.')
+        if (validSettlements(prior).some((entry) => settlementKey(entry) === settlementKey(data))) throw new Error('This return reference was already recorded.')
         const oldReturnedMinor = Math.round(validSettlements(prior).filter((entry) => (entry.requestGeneration ?? 1) === data.generation).reduce((sum, entry) => sum + entry.amount, 0) * 100)
         if (Math.round(data.amount * 100) > Math.round((archived.requestedAmount ?? 0) * 100) - oldReturnedMinor) throw new Error('The return exceeds the remaining amount of the earlier request.')
         const proof: RecoveryVerification = { amount: data.amount, method: data.method, source: data.source, reference: data.reference, settledAt: data.settledAt, appliedToBill: data.appliedToBill }
@@ -201,7 +228,9 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
         next = reconcileRecovery(prior, { ...data, at })
         break
       }
+      case 'close_internal_review':
       case 'close': {
+        if (cmd.type === 'close_internal_review' && !internal) throw new Error('Only an internal review can be closed this way.')
         const data = parse(z.object({ reason: text.min(1) }), cmd.input)
         next = closeWithoutRecovery(prior, data.reason, at)
         break
@@ -212,7 +241,8 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
         break
       }
       case 'reopen_balance': {
-        next = reopenRemainingBalance(prior, at)
+        const gate = evaluateEligibility(finding, finding.evidence, all)
+        next = reopenRemainingBalance(prior, at, gate.potentialAmountMinor === null ? 0 : gate.potentialAmountMinor / 100)
         break
       }
     }
@@ -221,11 +251,11 @@ function applyCommand(db: DatabaseSync, userId: string, projectId: string, proje
     throw new HttpError(409, error instanceof Error ? error.message : 'Invalid case transition.', 'invalid_transition')
   }
   const changed = JSON.stringify(next) !== JSON.stringify(prior) || Boolean(revisedFinding)
-  if (!changed) throw new HttpError(409, 'This command did not change the case.', 'no_change')
-  const nextState = withHistory(prior, next, actor)
+  if (!changed) return null
+  const nextState = withHistory(prior, next, actor, internal)
   const findingRows = env.result?.findings ?? []
-  const nextEnv = { ...env, caseStates: { ...states, [cmd.findingId]: nextState }, result: { ...env.result, findings: findingRows.map((row) => row.id === cmd.findingId ? { ...(revisedFinding ?? row), relatedRecords: (revisedFinding ?? finding).relatedRecords.map((record) => ({ id: record.id })), customerDecision: nextState.decision } : row) }, updatedAt: at }
-  return { project: { ...project, environment: nextEnv, updatedAt: at }, sourceRefs: finding.relatedRecords.map((record) => record.id) }
+  const nextEnv = { ...env, caseStates: { ...states, [cmd.findingId]: nextState }, result: { ...env.result, findings: findingRows.map((row) => row.id === cmd.findingId ? { ...(revisedFinding ?? row), relatedRecords: stored.relatedRecords.map((record) => ({ id: record.id })), customerDecision: nextState.decision } : row) }, updatedAt: at }
+  return { project: { ...project, environment: nextEnv, updatedAt: at }, sourceRefs: stored.relatedRecords.map((record) => record.id) }
 }
 
 export class CaseCommands {
@@ -288,6 +318,11 @@ export class CaseCommands {
       if (!project || revision === null) throw new HttpError(404, 'That project is not in this account.')
       if (cmd.expectedRevision !== revision) throw new HttpError(409, 'This project changed on another device. Reload and review the newer version before retrying.', 'revision_conflict', { revision: String(revision) })
       const result = applyCommand(this.db, userId, projectId, project, cmd, actor, Date.now())
+      // Saving the same thing twice is a success; there is nothing new to store or log.
+      if (!result) {
+        this.db.exec('COMMIT')
+        return { revision, project, replayed: false }
+      }
       const nextRevision = this.projects.upsert(userId, result.project)
       this.db.prepare('INSERT INTO case_events (user_id, project_id, finding_id, command_id, command_hash, action, actor, at, prior_revision, revision, source_refs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(userId, projectId, cmd.findingId, cmd.commandId, hash, cmd.type, actor, Date.now(), revision, nextRevision, JSON.stringify(result.sourceRefs))

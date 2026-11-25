@@ -1,17 +1,16 @@
-const plainAmount = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+import { formatMoney, UNKNOWN_CURRENCY } from '../money'
 
 /**
- * A per-check total for display: USD as money, a ledger with no currency column
- * as a plain number (it is not known to be dollars), anything else with its code.
+ * A per-check total for display: USD in the viewer's headline style, anything
+ * else in its own currency. Rows that disagree on currency show a plain number.
  */
 export function formatCauseValue(value: number, currency: string, money: (value: number) => string): string {
-  if (currency === 'USD') return money(value)
-  return currency === 'Unknown' ? plainAmount.format(value) : `${plainAmount.format(value)} ${currency}`
+  return currency === 'USD' ? money(value) : formatMoney(value, currency)
 }
 
 /** "Flagged exposure · Unknown" reads as an error; say what it means. */
 export function currencyLabel(currency: string): string {
-  return currency === 'Unknown' ? 'no currency in file' : currency
+  return currency === UNKNOWN_CURRENCY ? 'currency not known' : currency
 }
 
 /** Dollars as typed ("6,800" or "$6800.50") to whole cents, without floating point. 0 when it isn't an amount. */
