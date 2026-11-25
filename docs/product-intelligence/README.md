@@ -65,18 +65,18 @@ Server (behind the flag; read-only, session-derived tenant, 300 reads per hour p
 
 | Check | Baseline (`main` @ `b27ee30`) | This branch |
 |---|---|---|
-| `npx vitest run` | 778 passed in 70 files; **5 files failed to load** | **1,184 passed in 90 files; 0 failed, 0 skipped.** Breakdown: 778 baseline + 40 restored by the harness fix + 366 new |
+| `npx vitest run` | 778 passed in 70 files; **5 files failed to load** | **1,188 passed in 90 files; 0 failed, 0 skipped.** Breakdown: 778 baseline + 40 restored by the harness fix + 370 new |
 | `npx tsc -p tsconfig.app.json --noEmit` | 0 errors | 0 errors |
 | `npx tsc -p tsconfig.server.json --noEmit` | 0 errors | 0 errors |
 | `npx oxlint` | 0 errors (warnings only) | 0 errors; warnings only, all in pre-existing `landing-site/` and `.preview-pre-v2/` files |
 | `npm run build` | not run in audit | succeeds |
 
-Product-intelligence tests by file (366, all passing):
+Product-intelligence tests by file (370, all passing; counts after the review fixes):
 
 | File | Tests |
 |---|---|
 | `src/intelligence/attention.test.ts` | 96 |
-| `src/intelligence/assistant.test.ts` | 56 |
+| `src/intelligence/assistant.test.ts` | 59 |
 | `src/intelligence/insights.test.ts` | 35 |
 | `src/intelligence/memory.test.ts` | 31 |
 | `src/intelligence/spend.test.ts` | 27 |
@@ -85,7 +85,7 @@ Product-intelligence tests by file (366, all passing):
 | `src/intelligence/vendorProfiles.test.ts` | 19 |
 | `src/intelligence/recoveryVisibility.test.ts` | 16 |
 | `src/intelligence/designFixtures.test.ts` | 12 |
-| `server/intelligence.test.ts` | 11 |
+| `server/intelligence.test.ts` | 12 |
 | `src/intelligence/adapters/legacyAudit.test.ts` | 7 |
 | `server/intelligence.e2e.test.ts` | 7 |
 | `src/intelligence/viewModels.test.ts` | 6 |
