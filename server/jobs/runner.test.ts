@@ -98,11 +98,12 @@ describe('claiming and leases', () => {
 
   it('a second claim for the same tenant waits, and the database forbids two leases anyway', () => {
     runner.register('test.noop', { payloadSchema: Payload, handler: async () => {} })
-    runner.enqueue(A, 'test.noop', { ref: '1' }, { runAt: T0 })
-    const second = runner.enqueue(A, 'test.noop', { ref: '2' }, { runAt: T0 })
-    expect(runner.claim(T0, 'w1')).not.toBeNull()
+    const ids = [runner.enqueue(A, 'test.noop', { ref: '1' }, { runAt: T0 }), runner.enqueue(A, 'test.noop', { ref: '2' }, { runAt: T0 })].map((r) => r.job.id)
+    const claimed = runner.claim(T0, 'w1')
+    expect(claimed).not.toBeNull()
     expect(runner.claim(T0, 'w2')).toBeNull()
-    expect(() => db.prepare("UPDATE jobs SET status = 'leased' WHERE id = ?").run(second.job.id)).toThrow(/UNIQUE/)
+    const other = ids.find((id) => id !== claimed!.id)!
+    expect(() => db.prepare("UPDATE jobs SET status = 'leased' WHERE id = ?").run(other)).toThrow(/UNIQUE/)
   })
 
   it('does not claim jobs before they are due or kinds it does not know', async () => {
