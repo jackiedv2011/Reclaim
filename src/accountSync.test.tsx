@@ -643,4 +643,47 @@ describe('files added and removed around decisions', () => {
     const res = await live.api(`/api/projects/${project.id}`, { method: 'PUT', headers: { 'If-Match': String(revision + 1) }, json: { ...stored, environment: mergeImport(deserializeOld(old), rows('Beta,B-1,2025-02-01,9')) } })
     expect([res.status, res.body.code]).toEqual([409, 'import_removed'])
   })
+
+  it('a file read wrongly and uploaded again read rightly brings its decision back to be checked, not a second claim', async () => {
+    await signedIn()
+    const wrong = { ...rows(), parsed: parseCsv('vendor,invoice_number,payment_date,amount_paid\nAcme,INV-1,02/04/2026,100\nAcme,INV-1,03/04/2026,100') }
+    const project = create('misread', mergeImport(null, wrong))
+    await projectSync.flush()
+    const finding = project.environment.result.findings[0].id
+    saveProject({ ...project, environment: setCaseState(project.environment, finding, confirmCase('Seen')) }, { sync: false })
+    projectSync.command(project.id, finding, 'decision', { decision: 'confirmed', reason: 'Seen' })
+    await projectSync.flush()
+    await save(project.id, (env) => removeImport(env, env.imports[0].id))
+    const right = await save(project.id, (env) => mergeImport(env, { ...wrong, parsed: parseCsv('vendor,invoice_number,payment_date,amount_paid\nAcme,INV-1,02/04/2026,100\nAcme,INV-1,03/04/2026,100', { dateOrder: 'day-first' }) }))
+    expect(right.environment.result.findings.map((f: { id: string }) => f.id)).toEqual([finding])
+    expect(right.environment.result.findings[0]).toMatchObject({ requiresRevalidation: true, potentialAmountMinor: null, suppressionReason: expect.stringMatching(/changed/) })
+    expect(right.environment.caseStates[finding]).toMatchObject({ decision: 'confirmed', requiresRevalidation: true })
+    expect(right.environment.records.map((r: { paymentDate: string }) => r.paymentDate)).toEqual(['2026-04-02', '2026-04-03'])
+  })
+
+  it('a transaction ID alone never brings back a removed payment', async () => {
+    const { id, finding } = await decided()
+    await save(id, (env) => removeImport(env, env.imports[0].id))
+    const back = await save(id, (env) => mergeImport(env, rows('Beta Freight,INV-1,2025-01-10,7300', 'Beta Freight,INV-1,2025-01-20,7300')))
+    const old = back.environment.result.findings.find((f: { id: string }) => f.id === finding)
+    expect(old.suppressionReason).toBeTruthy()
+    expect(back.environment.records.every((r: { id: string }) => !old.relatedRecords.some((x: { id: string }) => x.id === r.id))).toBe(true)
+  })
+
+  it('a save can’t stand a second finding on a decided one’s payments, however it is split up', async () => {
+    const { id, finding } = await decided()
+    await save(id, (env) => mergeImport(env, rows('Acme,INV-1,2025-01-25,500')))
+    const env = JSON.parse(serializeEnvironment(loadProject(id)!.environment))
+    const replacing = env.result.findings.find((f: { id: string }) => f.id !== finding)
+    const put = async (findings: unknown[]) => {
+      const [stored] = await onServer()
+      const revision = (await live.api('/api/projects')).body.revisions[id]
+      return live.api(`/api/projects/${id}`, { method: 'PUT', headers: { 'If-Match': String(revision) }, json: { ...stored, environment: { ...env, result: { ...env.result, findings } } } })
+    }
+    const revived = { ...env.result.findings.find((f: { id: string }) => f.id === finding) }
+    delete revived.suppressionReason
+    const first = await put([revived])
+    if (first.status === 200) expect((await put([revived, replacing])).body.code).toBe('case_command_required')
+    else expect(first.body.code).toBe('case_command_required')
+  })
 })

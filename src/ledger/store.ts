@@ -309,15 +309,20 @@ export function mergeImport(env: LedgerEnvironment | null, input: MergeImportInp
 
   // A payment that comes back after its file was removed is the same payment: it keeps its id, so the
   // findings and requests made on it attach to it again instead of opening a second claim on the same money.
-  const retiredByKey = new Map<string, APRecord[]>()
-  for (const r of base.retiredRecords ?? []) {
-    const key = r.identityKey ?? recordIdentity(r)
-    retiredByKey.set(key, [...(retiredByKey.get(key) ?? []), r])
-  }
+  // Only payments of a file someone removed: one voided in the source stays gone. Vendor, day, amount and bill must
+  // agree, or the very same cells read the other way round; a transaction ID alone never brings a payment back.
+  const removedFiles = new Set(base.removedImports ?? [])
+  const removedPayments = (base.retiredRecords ?? []).filter((r) => removedFiles.has(r.importBatchId))
   const revived = new Set<string>()
+  const reread = new Set<string>()
   const comeBack = (r: APRecord) => {
-    const match = (retiredByKey.get(r.identityKey ?? recordIdentity(r)) ?? []).find((old) => !revived.has(old.id))
+    const free = removedPayments.filter((old) => !revived.has(old.id) && couldBeSamePayment(old, r))
+    const same = free.find((old) => paymentKey(old) === paymentKey(r))
+    const cells = cellsKey(r)
+    const misread = same ? undefined : free.find((old) => cells !== null && cellsKey(old) === cells)
+    const match = same ?? misread
     if (match) revived.add(match.id)
+    if (misread) reread.add(misread.id)
     return match?.id
   }
 
@@ -366,7 +371,8 @@ export function mergeImport(env: LedgerEnvironment | null, input: MergeImportInp
     identified.set(record.id, record)
   }
   const kept = revived.size ? { ...base, retiredRecords: (base.retiredRecords ?? []).filter((r) => !revived.has(r.id)) } : base
-  return rebuildLedger(kept, [...base.records.map((r) => identified.get(r.id) ?? r), ...newRecords], batch, seq)
+  // A payment read differently this time is a changed payment: what was decided on it is checked again.
+  return rebuildLedger(kept, [...base.records.map((r) => identified.get(r.id) ?? r), ...newRecords], batch, seq, reread)
 }
 
 /**

@@ -802,6 +802,12 @@ function caseContentChanged(previous: Plain | null, incoming: Plain): boolean {
       if (!original || !samePayment(original, newRecords.get(record.id))) return true
     }
   }
+  // Two findings standing at once on the same payments, one of them decided, would be two claims on the same money.
+  const live = (env.result?.findings ?? []).filter((finding) => !finding.suppressionReason)
+  for (const decided of live.filter((finding) => newStates[finding.id]?.decision || finding.evidence != null)) {
+    const rows = new Set((decided.relatedRecords ?? []).map((record) => record.id))
+    if (live.some((other) => other.id !== decided.id && (other.relatedRecords ?? []).filter((record) => rows.has(record.id)).length >= 2)) return true
+  }
   return (env.result?.findings ?? []).some((finding) => !sameJson(finding.evidence ?? null, oldFindings.get(finding.id)?.evidence ?? null))
 }
 
