@@ -193,7 +193,7 @@ npx vitest run server
 
 Results on this branch (2026-11-25):
 - `tsc`: clean.
-- `oxlint server/jobs`: 0 warnings, 0 errors.
+- `oxlint server/jobs`: exit 0, no findings.
 - `vitest run server/jobs`: **4 files, 57 passed, 0 failed** (runner 19, handlers 27, followUpText 6, routes 5).
 - `vitest run server`: **18 files, 260 passed, 0 failed**.
 
