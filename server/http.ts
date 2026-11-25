@@ -1,4 +1,16 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { promisify } from 'node:util'
+import { gunzip, gzip } from 'node:zlib'
+
+const gunzipAsync = promisify(gunzip)
+const gzipAsync = promisify(gzip)
+
+export interface BodyOptions {
+  /** Accept a gzip body, up to this many bytes once decompressed. Without it a compressed body is refused. */
+  maxDecompressed?: number
+  /** What a body over the limit is told. */
+  tooLarge?: string
+}
 
 export interface Request {
   method: string
@@ -6,7 +18,7 @@ export interface Request {
   headers: IncomingMessage['headers']
   cookies: Record<string, string>
   ip: string
-  json<T = unknown>(): Promise<T>
+  json<T = unknown>(options?: BodyOptions): Promise<T>
   /** The body exactly as sent (webhook signatures are computed over these bytes). */
   text(): Promise<string>
 }
@@ -100,7 +112,10 @@ export function serializeCookie(name: string, value: string, options: { maxAge?:
   return parts.join('; ')
 }
 
-const MAX_BODY = 25 * 1024 * 1024 // a ledger with tens of thousands of rows serializes well under this
+/** What may cross the wire. A saved audit travels compressed (about a tenth of its JSON), so 50,000 rows fit well under this. */
+export const MAX_BODY = 25 * 1024 * 1024
+/** How much of an over-limit body is read and thrown away, so the client is done sending and can read the 413. */
+const MAX_DISCARD = 100 * 1024 * 1024
 
 /**
  * The client's address. Behind a proxy or load balancer the socket address is
@@ -122,23 +137,42 @@ export function clientIp(req: Pick<IncomingMessage, 'headers' | 'socket'>, trust
 
 export async function toRequest(req: IncomingMessage, options: { trustProxy?: number } = {}): Promise<Request> {
   const url = new URL(req.url ?? '/', 'http://localhost')
-  let raw: Promise<string> | null = null
-  const text = () =>
-    (raw ??= new Promise<string>((resolve, reject) => {
-      const chunks: Buffer[] = []
+  const tooLarge = (options?: BodyOptions) => new HttpError(413, options?.tooLarge ?? 'Request too large', 'too_large')
+  const bytes = (options?: BodyOptions) =>
+    new Promise<Buffer>((resolve, reject) => {
+      let chunks: Buffer[] = []
       let size = 0
       req.on('data', (chunk: Buffer) => {
         size += chunk.length
-        if (size > MAX_BODY) {
-          reject(new HttpError(413, 'Request too large'))
-          req.destroy()
+        if (size <= MAX_BODY) {
+          chunks.push(chunk)
           return
         }
-        chunks.push(chunk)
+        // Keep reading without keeping it: closing the socket now would reach the
+        // browser as a network failure instead of the 413, and it would retry forever.
+        chunks = []
+        if (size > MAX_DISCARD) {
+          reject(tooLarge(options))
+          setTimeout(() => req.destroy(), 1000).unref()
+        }
       })
-      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      req.on('end', () => (size > MAX_BODY ? reject(tooLarge(options)) : resolve(Buffer.concat(chunks))))
       req.on('error', reject)
-    }))
+    })
+  let raw: Promise<string> | null = null
+  const text = (options?: BodyOptions) =>
+    (raw ??= (async () => {
+      const encoding = (req.headers['content-encoding'] ?? 'identity').toLowerCase()
+      const body = await bytes(options)
+      if (encoding === 'identity') return body.toString('utf8')
+      if (encoding !== 'gzip' || !options?.maxDecompressed) throw new HttpError(415, 'This endpoint does not take a compressed body.')
+      try {
+        return (await gunzipAsync(body, { maxOutputLength: options.maxDecompressed })).toString('utf8')
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') throw tooLarge(options)
+        throw new HttpError(400, 'The compressed body could not be read.')
+      }
+    })())
   let cached: Promise<unknown> | null = null
   return {
     method: req.method ?? 'GET',
@@ -146,9 +180,9 @@ export async function toRequest(req: IncomingMessage, options: { trustProxy?: nu
     headers: req.headers,
     cookies: parseCookies(req.headers.cookie),
     ip: clientIp(req, options.trustProxy ?? 0),
-    text,
-    json<T>() {
-      cached ??= text().then((body) => {
+    text: () => text(),
+    json<T>(options?: BodyOptions) {
+      cached ??= text(options).then((body) => {
         if (!body) return {}
         try {
           return JSON.parse(body)
@@ -159,6 +193,14 @@ export async function toRequest(req: IncomingMessage, options: { trustProxy?: nu
       return cached as Promise<T>
     },
   }
+}
+
+/** Compresses a large JSON answer (a saved audit is mostly repeated keys) for a client that accepts it. */
+export async function compressed(response: Response, acceptEncoding: string | string[] | undefined): Promise<Response> {
+  if (typeof response.body !== 'string' || response.body.length < 64 * 1024) return response
+  if (!/\bgzip\b/.test(String(acceptEncoding ?? ''))) return response
+  const body = await gzipAsync(response.body, { level: 1 })
+  return { ...response, headers: { ...response.headers, 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' }, body }
 }
 
 export function writeResponse(res: ServerResponse, response: Response, options: { noStore?: boolean; hsts?: boolean } = {}): void {

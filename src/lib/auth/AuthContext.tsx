@@ -3,9 +3,9 @@ import * as api from '@/lib/auth/apiAuthService'
 import * as guest from '@/lib/auth/localAuthService'
 import type { AuthError, AuthOutcome, AuthUser } from '@/lib/auth/types'
 import { TERMS_VERSION } from '@/legal/terms'
-import { clearStorageScope, setStorageScope } from '@/lib/storageScope'
-import { fromStorable, mergeServerProjects } from '@/ledger/projects'
-import { projectSync } from '@/ledger/projectSync'
+import { setStorageScope } from '@/lib/storageScope'
+import { forgetScope, hasUnsavedWork, loadAccountProjects, loadOverflow } from '@/ledger/projects'
+import { projectSync, ServerAnswer } from '@/ledger/projectSync'
 import { entitlementsFor, type Entitlements, type Plan } from '@/lib/plans'
 import { readProfile, type OnboardingProfile } from '../../../server/onboarding.ts'
 
@@ -27,6 +27,13 @@ function withGuestOnboarding(user: AuthUser): AuthUser {
 }
 
 export type AuthStatus = 'loading' | 'ready'
+
+/** What the last attempt to load the account's audits did not bring. */
+export interface AuditsProblem {
+  /** The account could not be read at all: what is on screen is only what this browser holds. */
+  unreachable: boolean
+  message: string
+}
 
 interface AuthContextValue {
   user: AuthUser | null
@@ -60,6 +67,9 @@ interface AuthContextValue {
   resetPassword: (token: string, newPassword: string, confirmPassword: string) => Promise<AuthOutcome>
   /** Downloads everything the account holds, after any unsaved changes reach the server. */
   exportAccountData: () => Promise<void>
+  /** Set when the account's audits could not all be loaded. An empty list with this set is not an empty account. */
+  auditsProblem: AuditsProblem | null
+  reloadAudits: () => Promise<void>
   /** Deletes the account on the server, then everything cached for it in this browser. */
   deleteAccount: (confirmEmail: string) => Promise<{ ok: true } | AuthError>
   /** Accepts the current Terms and Privacy Policy (shown when they changed since the account accepted). */
@@ -73,16 +83,29 @@ const AuthContext = createContext<AuthContextValue | null>(null)
  * before `user` is published so the workspace never renders another
  * account's (or an empty) cache.
  */
-async function enterAccount(user: AuthUser): Promise<void> {
+async function enterAccount(user: AuthUser): Promise<AuditsProblem | null> {
   setStorageScope(user.id)
+  await loadOverflow()
+  // A guest's audits in this browser are offered to the account (legacyMigration.ts); the large ones are in the database.
+  await loadOverflow('reclaim.u.guest.')
   projectSync.restore()
+  const problem = await loadAudits()
+  projectSync.retry()
+  return problem
+}
+
+async function loadAudits(): Promise<AuditsProblem | null> {
   try {
-    const projects = await projectSync.pull()
-    mergeServerProjects(projects.map(fromStorable))
+    const { failed } = await loadAccountProjects()
+    if (!failed.length) return null
+    return { unreachable: false, message: failed.length === 1 ? 'One of your audits couldn’t be opened. The others are here, and nothing was deleted.' : `${failed.length} of your audits couldn’t be opened. The others are here, and nothing was deleted.` }
   } catch (err) {
     console.warn('Reclaim: could not load audits from the server —', err instanceof Error ? err.message : err)
+    return {
+      unreachable: true,
+      message: err instanceof ServerAnswer ? 'Your audits couldn’t be loaded: the server didn’t answer as expected. They are still in your account.' : 'Your audits couldn’t be loaded. Check your connection; they are still in your account.',
+    }
   }
-  projectSync.retry()
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -90,6 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading')
   const [providers, setProviders] = useState<api.Providers | null>(null)
   const [entitlements, setEntitlements] = useState<Entitlements | null>(null)
+  const [auditsProblem, setAuditsProblem] = useState<AuditsProblem | null>(null)
   const mounted = useRef(true)
 
   const refreshEntitlements = useCallback(async () => {
@@ -127,16 +151,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void api.fetchProviders().then((p) => mounted.current && setProviders(p))
     ;(async () => {
       const guestUser = guest.getSession()
-      if (guestUser?.isGuest) {
+      // A guest tab can come back signed in (Google sends it here with a session): the account wins.
+      const serverUser = await api.getSession()
+      if (guestUser?.isGuest && !serverUser) {
         setStorageScope('guest')
+        await loadOverflow()
         if (mounted.current) {
           setEntitlements(entitlementsFor('free', 0))
           setUser(withGuestOnboarding(guestUser))
         }
       } else {
-        const serverUser = await api.getSession()
         if (serverUser) {
-          await enterAccount(serverUser)
+          guest.logOut()
+          const problem = await enterAccount(serverUser)
+          if (mounted.current) setAuditsProblem(problem)
           const ent = await api.fetchEntitlements()
           if (mounted.current) setEntitlements(ent)
         }
@@ -151,11 +179,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const adopt = useCallback(async (next: AuthUser) => {
     guest.logOut()
-    await enterAccount(next)
+    setAuditsProblem(await enterAccount(next))
     const ent = await api.fetchEntitlements()
     setEntitlements(ent)
     setUser(next)
   }, [])
+
+  const reloadAudits = useCallback(async () => {
+    if (!signedInId) return
+    const problem = await loadAudits()
+    projectSync.retry()
+    if (mounted.current) setAuditsProblem(problem)
+    window.dispatchEvent(new CustomEvent('reclaim:projects-changed', { detail: { id: null } }))
+  }, [signedInId])
+
+  const unreachable = auditsProblem?.unreachable ?? false
+  useEffect(() => {
+    if (!signedInId || !unreachable) return
+    const onOnline = () => void reloadAudits()
+    window.addEventListener('online', onOnline)
+    return () => window.removeEventListener('online', onOnline)
+  }, [signedInId, unreachable, reloadAudits])
 
   const markOnboardingSeen = useCallback(async () => {
     if (user?.isGuest) {
@@ -253,15 +297,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (leaving && !leaving.isGuest) {
       await projectSync.flush()
       await api.logOut()
-      // Keep this account's scoped cache when a save has not reached the server.
-      // The next sign-in merges it with the server copy instead of discarding it.
-      if (!projectSync.pending && !projectSync.syncIssue) clearStorageScope(leaving.id)
+      // Nothing that has not reached the server is ever cleared: it stays for
+      // this account's next log-in, which sends it.
+      if (!hasUnsavedWork()) forgetScope(leaving.id)
     } else if (leaving?.isGuest) {
-      clearStorageScope('guest')
+      forgetScope('guest')
     }
     guest.logOut()
     projectSync.reset(Boolean(leaving && !leaving.isGuest))
     setStorageScope(null)
+    setAuditsProblem(null)
     setEntitlements(null)
     setUser(null)
   }, [user])
@@ -284,16 +329,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (confirmEmail) => {
       const leaving = user
       if (!leaving || leaving.isGuest) return { ok: false, message: 'Only a signed-in account can be deleted.' }
-      // Pending saves are dropped, not flushed: nothing should be written back after this.
+      // Nothing is written back while this is asked. Only once the account is
+      // gone are its unsent saves dropped: a refusal leaves everything as it was.
+      projectSync.pause()
+      let deleted = false
+      try {
+        const result = await api.deleteAccount(confirmEmail)
+        if (!result.ok) return result
+        deleted = true
+      } finally {
+        if (!deleted) projectSync.resume()
+      }
       projectSync.reset()
-      const result = await api.deleteAccount(confirmEmail)
-      if (!result.ok) return result
-      clearStorageScope(leaving.id)
+      forgetScope(leaving.id)
       guest.logOut()
       setStorageScope(null)
+      setAuditsProblem(null)
       setEntitlements(null)
       setUser(null)
-      return result
+      return { ok: true }
     },
     [user]
   )
@@ -326,10 +380,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       requestPasswordReset: api.requestPasswordReset,
       resetPassword,
       exportAccountData,
+      auditsProblem,
+      reloadAudits,
       deleteAccount,
       acceptTerms,
     }),
-    [user, status, providers, entitlements, refreshEntitlements, refreshAccount, markOnboardingSeen, markTourSeen, saveOnboarding, setDevPlan, signUp, verifyEmail, logIn, continueAsGuest, logOut, resetPassword, exportAccountData, deleteAccount, acceptTerms]
+    [user, status, providers, entitlements, refreshEntitlements, refreshAccount, markOnboardingSeen, markTourSeen, saveOnboarding, setDevPlan, signUp, verifyEmail, logIn, continueAsGuest, logOut, resetPassword, exportAccountData, auditsProblem, reloadAudits, deleteAccount, acceptTerms]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
