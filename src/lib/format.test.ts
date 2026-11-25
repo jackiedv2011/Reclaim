@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseCurrency, parseDate } from '@/lib/format'
+import { formatCurrency, normalizeVendor, parseCurrency, parseDate, parseTerms } from '@/lib/format'
 
 describe('parseCurrency', () => {
   it('accepts complete currency values', () => {
@@ -64,5 +64,51 @@ describe('parseDate', () => {
   it('reads a slash date as month-first unless told the file is day-first', () => {
     expect(parseDate('04/03/2025')?.getMonth()).toBe(3)
     expect(parseDate('13/03/2025')).toBeNull()
+  })
+})
+
+describe('normalizeVendor', () => {
+  it('reads legal words, punctuation, articles and initials as one vendor', () => {
+    const same = (names: string[]) => expect(new Set(names.map(normalizeVendor)).size, names.map((n) => `${n} → ${normalizeVendor(n)}`).join('; ')).toBe(1)
+    same(['Acme', 'ACME Inc', 'Acme, Inc.', 'Acme Incorporated', 'Acme L.L.C.', 'Acme, LLC', 'Acme Ltd.', 'Acme Limited', 'Acme Corp', 'Acme Corporation', 'Acme Co.', 'Acme Company', 'Acme PLC', 'Acme GmbH', 'Acme Pty Ltd', ' acme ', 'The Acme Company'])
+    same(['Smith & Jones', 'Smith and Jones', 'SMITH AND JONES, LLP', 'Smith & Jones Co', 'Smith & Jones & Co.'])
+    same(["Lowe's", 'LOWES', 'Lowe’s'])
+    same(['A.B.C. Supply', 'ABC Supply', 'A B C Supply', 'ABC Supply Co., Inc.'])
+    same(['J.P. Morgan', 'JP Morgan', 'J. P. Morgan'])
+    same(['Home Depot', 'The Home Depot'])
+    same(['Coca-Cola', 'Coca Cola'])
+  })
+  it('keeps different vendors and numbered locations apart', () => {
+    const distinct = ['Station 1042', 'Station 1043', 'Acme Steel', 'Acme Stone', 'Acme', 'Sysco #214', 'Sysco #215', 'Amazon', 'Amazon.com', 'Company', 'Co', 'The']
+    expect(new Set(distinct.map(normalizeVendor)).size).toBe(distinct.length)
+  })
+  it('never normalizes a name away, and is stable when applied twice', () => {
+    for (const name of ['Inc.', 'The', '***', 'Co & Co', '株式会社', 'Café Noir', 'The Company', 'A.B.C.', 'Smith & Co', 'The The', 'X & Y']) {
+      expect(normalizeVendor(name).length, name).toBeGreaterThan(0)
+      expect(normalizeVendor(normalizeVendor(name)), name).toBe(normalizeVendor(name))
+    }
+  })
+})
+
+describe('parseTerms', () => {
+  it('reads the spellings exports use', () => {
+    for (const raw of ['2/10 net 30', '2/10 net 30 days', '2% 10 Days Net 30 Days', '2%10 Net30', '2/10, Net 30.', '2/10-N30', '2/10; net 30', 'Net 30, 2/10', 'Net 30 2/10', 'n/30; 2% 10 days', '2% 10, net 30', ' 2 / 10 , n / 30 ', '2/10 NET 30 DAYS.', '2.0/10 net 30']) {
+      expect(parseTerms(raw), raw).toEqual({ discountPct: 2, discountDays: 10, netDays: 30 })
+    }
+  })
+  it('marks end-of-month terms', () => {
+    for (const raw of ['2/10, n/30 EOM', '2/10 net 30 E.O.M.', '2/10 EOM, net 30', '2/10 net 30 end of month']) expect(parseTerms(raw), raw).toEqual({ discountPct: 2, discountDays: 10, netDays: 30, endOfMonth: true })
+  })
+  it('rejects what is not a discount', () => {
+    for (const raw of ['Net 30', 'Net 302/10', '2/10', '0/10 net 30', '100/10 net 30', '2/30 net 10', '210 net 30', 'Due on receipt', '1st 2/10 net 30', '2/10 net 30 or else', null, '']) expect(parseTerms(raw), String(raw)).toBeNull()
+  })
+})
+
+describe('formatCurrency', () => {
+  it('is dollars unless told otherwise, and never throws on an odd code', () => {
+    expect(formatCurrency(1234.5)).toBe('$1,234.50')
+    expect(formatCurrency(1234.5, 'eur')).toBe('€1,234.50')
+    expect(formatCurrency(1234.5, null)).toBe('$1,234.50')
+    expect(formatCurrency(1234.5, 'ZZZZ')).toBe('ZZZZ 1,234.50')
   })
 })
