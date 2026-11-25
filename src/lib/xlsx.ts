@@ -5,6 +5,7 @@
  * the same reading as a CSV. Nothing in the workbook is ever evaluated.
  */
 
+import { cellKey } from '@/lib/csvMapping'
 import { CURRENCY_CODES } from '@/lib/format'
 
 export class WorkbookError extends Error {}
@@ -14,6 +15,8 @@ export interface WorkbookSheet {
   /** Every row from the first, blanks included, so position + 1 is the row number Excel shows. */
   rows: string[][]
   hidden: boolean
+  /** Cells held as numbers, by cellKey. */
+  numbers: Set<number>
 }
 
 /** A real export is a few MB unpacked; past this it is a mistake or a trap. */
@@ -220,7 +223,8 @@ function columnIndex(reference: string): number {
   return index - 1
 }
 
-function sheetRows(source: string, strings: string[], styles: CellStyle[], epoch1904: boolean): string[][] {
+function sheetRows(source: string, strings: string[], styles: CellStyle[], epoch1904: boolean): { rows: string[][]; numbers: Set<number> } {
+  const numbers = new Set<number>()
   const xml = source.includes('<!--') ? source.replace(/<!--[\s\S]*?-->/g, '') : source
   const rows: string[][] = []
   let previousRow = 0
@@ -251,12 +255,13 @@ function sheetRows(source: string, strings: string[], styles: CellStyle[], epoch
       if (text === '') continue
       while (cells.length < column) cells.push('')
       cells[column] = text
+      if (type === 'n') numbers.add(cellKey(rowNumber - 1, column))
     }
     if (cells.length === 0) continue
     while (rows.length < rowNumber - 1) rows.push([])
     rows[rowNumber - 1] = cells
   }
-  return rows
+  return { rows, numbers }
 }
 
 /** Whether these are the first bytes of a spreadsheet rather than of text. */
@@ -290,8 +295,8 @@ export async function readWorkbook(bytes: Uint8Array): Promise<WorkbookSheet[]> 
     const id = attribute(match[1], '(?:\\w+:)?id')
     const xml = id ? await text(targets.get(id) ?? '') : null
     if (xml === null) continue
-    const rows = sheetRows(xml, strings, styles, epoch1904)
-    if (rows.length > 0) sheets.push({ name: attribute(match[1], 'name') ?? `Sheet ${sheets.length + 1}`, rows, hidden })
+    const { rows, numbers } = sheetRows(xml, strings, styles, epoch1904)
+    if (rows.length > 0) sheets.push({ name: attribute(match[1], 'name') ?? `Sheet ${sheets.length + 1}`, rows, hidden, numbers })
   }
   return sheets
 }

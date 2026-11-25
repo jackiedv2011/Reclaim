@@ -112,7 +112,7 @@ async function workbookTables(bytes: Uint8Array): Promise<CsvTable[]> {
   const sheets = await readWorkbook(bytes)
   const tables = sheets.filter((sheet) => !sheet.hidden).map((sheet) => {
     const others = sheets.filter((other) => other !== sheet).map((other) => (other.hidden ? `${other.name} (hidden)` : other.name))
-    return tableOf(Papa.unparse(sheet.rows), sheet.rows, [], { name: sheet.name, others })
+    return tableOf(Papa.unparse(sheet.rows), sheet.rows, [], { name: sheet.name, others }, sheet.numbers)
   })
   const rank = (table: CsvTable) => (readsWithoutAsking(table).ask ? 0 : 1e9) + (canMatchColumns(table) ? dataRows(table).length : -1)
   return tables.map((table) => ({ table, rank: rank(table) })).sort((a, b) => b.rank - a.rank).map(({ table }) => table)

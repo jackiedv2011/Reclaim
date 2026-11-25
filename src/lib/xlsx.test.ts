@@ -49,7 +49,7 @@ describe('reading a workbook', () => {
       { name: 'Old', rows: plainRows([['y']]), state: 'hidden' },
       { name: 'Two', rows: plainRows([['z']]) },
     ]))
-    expect(sheets).toEqual([{ name: 'A & B', rows: [['x', '1']], hidden: false }, { name: 'Old', rows: [['y']], hidden: true }, { name: 'Two', rows: [['z']], hidden: false }])
+    expect(sheets.map(({ name, rows, hidden }) => ({ name, rows, hidden }))).toEqual([{ name: 'A & B', rows: [['x', '1']], hidden: false }, { name: 'Old', rows: [['y']], hidden: true }, { name: 'Two', rows: [['z']], hidden: false }])
   })
 
   it('reads a large sheet quickly', async () => {
