@@ -530,6 +530,130 @@ describe('following up from Gmail', () => {
   })
 })
 
+describe('a send cut off by a crash', () => {
+  /** The same database, opened again by a new server process. */
+  async function restart() {
+    const db = app.db
+    await app.close()
+    app = createApp({ config, db, mailer: new DevMailer(db), google: null, drafts: null, quickbooks: null, gmail: gmail.client, now: () => clock })
+    base = `http://127.0.0.1:${await app.listen(0)}`
+  }
+  /** Leaves the case exactly as a process killed while Gmail was answering would. */
+  function interrupt(payload: { projectId: string; findingId: string }, userId: string) {
+    app.db.prepare("INSERT INTO gmail_sends (user_id, project_id, finding_id, generation, status, from_email, to_email, cc, amount_minor, created_at) VALUES (?, ?, ?, 1, 'sending', 'owner@gmail.com', 'ap@sierra.test', '', 680000, ?)").run(userId, payload.projectId, payload.findingId, clock)
+    app.db.prepare("INSERT INTO gmail_attempts (user_id, project_id, finding_id, kind, actor, status, at) VALUES (?, ?, ?, 'request', 'Alice Test', 'sending', ?)").run(userId, payload.projectId, payload.findingId, clock)
+  }
+
+  it('becomes "uncertain" at the next start, and the customer can finish it after checking Sent', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    await connect(alice)
+    const { payload } = await saveApprovedCase(alice)
+    const userId = (await alice.get('/api/auth/me')).body.user.id as string
+    interrupt(payload, userId)
+    expect((await alice.post('/api/integrations/gmail/send', payload)).body.code).toBe('gmail_send_in_progress')
+    await restart()
+    // Seeded rather than approved through commands, so the restart treats the case as legacy; approve it again.
+    await saveApprovedCase(alice)
+    expect((await alice.get(`/api/integrations/gmail/attempts?projectId=${payload.projectId}&findingId=${payload.findingId}`)).body.attempts).toMatchObject([{ status: 'uncertain' }])
+    expect((await alice.post('/api/integrations/gmail/send', payload)).body.code).toBe('gmail_send_uncertain')
+    expect(gmail.state.sent).toHaveLength(0)
+    expect((await alice.post('/api/integrations/gmail/send', { ...payload, retryUncertain: true })).status).toBe(200)
+    expect(gmail.state.sent).toHaveLength(1)
+  })
+
+  it('a follow-up cut off the same way recovers too', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    const { payload } = await saveApprovedCase(alice)
+    const userId = (await alice.get('/api/auth/me')).body.user.id as string
+    app.db.prepare("INSERT INTO gmail_follow_ups (user_id, project_id, finding_id, generation, seq, status, from_email, to_email, cc, created_at) VALUES (?, ?, ?, 1, 1, 'sending', 'owner@gmail.com', 'ap@sierra.test', '', ?)").run(userId, payload.projectId, payload.findingId, clock)
+    await restart()
+    expect(app.db.prepare('SELECT status FROM gmail_follow_ups').get()).toEqual({ status: 'uncertain' })
+  })
+
+  it('without a restart, a send that never settled stops blocking the case after ten minutes', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    await connect(alice)
+    const { payload } = await saveApprovedCase(alice)
+    interrupt(payload, (await alice.get('/api/auth/me')).body.user.id as string)
+    clock += 9 * 60 * 1000
+    expect((await alice.post('/api/integrations/gmail/send', payload)).body.code).toBe('gmail_send_in_progress')
+    clock += 2 * 60 * 1000
+    expect((await alice.post('/api/integrations/gmail/send', payload)).body.code).toBe('gmail_send_uncertain')
+  })
+})
+
+describe('the same payments in two audits', () => {
+  /** The same ledger uploaded again: a different audit id, the same payments. */
+  async function copyOf(c: Client, id: string, options: { vendor?: string; to?: string; days?: [string, string] } = {}) {
+    const { project, findingId } = authorizedProject(id, { vendor: options.vendor ?? 'Sierra Coffee Supply', invoice: 'INV-77', amount: 6800, requested: 6800 })
+    if (options.days) options.days.forEach((day, i) => (project.environment.records[i].paymentDate = day))
+    Object.assign(project.environment.caseStates[findingId], { recoverySubject: LETTER.subject, recoveryDraft: LETTER.body, recoveryRecipientEmail: options.to ?? 'ap@sierra.test' })
+    await seedCase(c, project)
+    return { project, findingId, payload: { projectId: id, findingId, to: options.to ?? 'ap@sierra.test', cc: [], subject: LETTER.subject, body: LETTER.body, amountRequested: 6800 } }
+  }
+  const send = (c: Client, payload: Record<string, unknown>) => c.post('/api/integrations/gmail/send', payload)
+
+  it('are asked for once: the second audit is refused until the customer confirms', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    await connect(alice)
+    expect((await send(alice, (await copyOf(alice, 'a1')).payload)).status).toBe(200)
+    const second = await copyOf(alice, 'a2')
+    const refused = await send(alice, second.payload)
+    expect(refused.status).toBe(409)
+    expect(refused.body).toMatchObject({ code: 'gmail_payments_already_requested', earlier: { projectId: 'a1', to: 'ap@sierra.test' } })
+    expect(gmail.state.sent).toHaveLength(1)
+    expect((await send(alice, { ...second.payload, confirmRepeat: true })).status).toBe(200)
+    expect(gmail.state.sent).toHaveLength(2)
+  })
+
+  it('are recognised after the first audit is deleted, and under another spelling of the vendor', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    await connect(alice)
+    await send(alice, (await copyOf(alice, 'a1')).payload)
+    await alice.call('/api/projects/a1', { method: 'DELETE' })
+    expect((await send(alice, (await copyOf(alice, 'a2', { vendor: 'SIERRA COFFEE SUPPLY, ' })).payload)).body.code).toBe('gmail_payments_already_requested')
+    // Named differently, but the same payments and the same address.
+    expect((await send(alice, (await copyOf(alice, 'a3', { vendor: 'Sierra Coffee Holdings' })).payload)).body.code).toBe('gmail_payments_already_requested')
+  })
+
+  it('are recognised when the first request was recorded by hand, or its send is unconfirmed', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    await connect(alice)
+    const byHand = await copyOf(alice, 'a1')
+    const states = byHand.project.environment.caseStates as Record<string, Record<string, unknown>>
+    states[byHand.findingId] = { ...states[byHand.findingId], recoveryStage: 'requested', recoveryRequestedAt: clock }
+    await seedCase(alice, byHand.project)
+    const second = await copyOf(alice, 'a2')
+    expect((await send(alice, second.payload)).body.code).toBe('gmail_payments_already_requested')
+    gmail.state.sendFailure = 'uncertain'
+    expect((await send(alice, { ...second.payload, confirmRepeat: true })).body.code).toBe('gmail_send_uncertain')
+    gmail.state.sendFailure = null
+    states[byHand.findingId] = { ...states[byHand.findingId], recoveryStage: 'confirmed', recoveryRequestedAt: null }
+    await seedCase(alice, byHand.project)
+    expect((await send(alice, (await copyOf(alice, 'a3')).payload)).body).toMatchObject({ code: 'gmail_payments_already_requested', earlier: { projectId: 'a2' } })
+  })
+
+  it('does not stop another account, another vendor, or a new duplicate that shares only the original payment', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    await connect(alice)
+    expect((await send(alice, (await copyOf(alice, 'a1')).payload)).status).toBe(200)
+    expect((await send(alice, (await copyOf(alice, 'a2', { vendor: 'Other Vendor', to: 'ap@other.test' })).payload)).status).toBe(200)
+    expect((await send(alice, (await copyOf(alice, 'a3', { days: ['2025-01-05', '2025-03-20'] })).payload)).status).toBe(200)
+    const bob = await signedIn('Bob', 'bob@example.com')
+    await connect(bob)
+    expect((await send(bob, (await copyOf(bob, 'b1')).payload)).status).toBe(200)
+  })
+
+  it('two audits sent at the same moment still email the vendor once', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    await connect(alice)
+    const [a, b] = [await copyOf(alice, 'a1'), await copyOf(alice, 'a2')]
+    const statuses = (await Promise.all([send(alice, a.payload), send(alice, b.payload)])).map((r) => r.status).sort()
+    expect(statuses).toEqual([200, 409])
+    expect(gmail.state.sent).toHaveLength(1)
+  })
+})
+
 describe('Gmail and the account', () => {
   it('sends from an audit encrypted at rest', async () => {
     const keyed = loadConfig({

@@ -56,6 +56,24 @@ export function sealSecret(plaintext: string, key: Buffer, context: string): str
   return ['v1', iv.toString('base64url'), cipher.getAuthTag().toString('base64url'), ciphertext.toString('base64url')].join('.')
 }
 
+/**
+ * A fixed value sealed under DATA_KEY and kept in the database, so a start
+ * with a different key is noticed before anything is read or written under it.
+ */
+const KEY_CHECK = 'reclaim-data-key-check-v1'
+
+export function sealKeyCheck(key: Buffer): string {
+  return sealSecret(KEY_CHECK, key, KEY_CHECK)
+}
+
+export function passesKeyCheck(sealed: string, key: Buffer): boolean {
+  try {
+    return openSecret(sealed, key, KEY_CHECK) === KEY_CHECK
+  } catch {
+    return false
+  }
+}
+
 /** Throws if the value was altered, sealed under another key, or sealed for another context. */
 export function openSecret(sealed: string, key: Buffer, context: string): string {
   const [version, iv, tag, ciphertext] = sealed.split('.')

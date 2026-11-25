@@ -23,6 +23,9 @@ interface FakeSub {
   currentPeriodEnd: number
   itemId: string
   priceId: string
+  defaultPaymentMethod: string | null
+  metadata: Record<string, string>
+  openInvoice: string | null
   pendingUpdate: boolean
   intent: { status: string; clientSecret: string | null } | null
 }
@@ -55,6 +58,12 @@ export class FakeStripe implements StripeApi {
   calls: string[] = []
   /** Fails the next call with this error, once. */
   failNext: StripeError | null = null
+  /** Fails every call of this name until removed — an outage of one endpoint. */
+  failOn = new Map<string, Error>()
+  /** A subscription's price arrives without its lookup key (the key has moved to a replacement price). */
+  hideLookupKeys = false
+  /** Milliseconds each call takes, so overlapping requests really overlap. */
+  latency = 0
   private idempotent = new Map<string, unknown>()
   private seq = 0
   now = Math.floor(Date.now() / 1000)
@@ -77,8 +86,11 @@ export class FakeStripe implements StripeApi {
     return `${prefix}_fake${String(this.seq).padStart(4, '0')}`
   }
 
-  private enter(name: string): void {
+  private async enter(name: string): Promise<void> {
     this.calls.push(name)
+    if (this.latency) await new Promise((resolve) => setTimeout(resolve, this.latency))
+    const outage = this.failOn.get(name)
+    if (outage) throw outage
     if (this.failNext) {
       const err = this.failNext
       this.failNext = null
@@ -103,7 +115,7 @@ export class FakeStripe implements StripeApi {
   }
 
   private view(sub: FakeSub): StripeSubscription {
-    return { id: sub.id, customer: sub.customer, status: sub.status, cancelAtPeriodEnd: sub.cancelAtPeriodEnd, currentPeriodEnd: sub.currentPeriodEnd, itemId: sub.itemId, priceId: sub.priceId, pendingUpdate: sub.pendingUpdate, paymentIntent: sub.intent }
+    return { id: sub.id, customer: sub.customer, status: sub.status, cancelAtPeriodEnd: sub.cancelAtPeriodEnd, currentPeriodEnd: sub.currentPeriodEnd, itemId: sub.itemId, priceId: sub.priceId, priceLookupKey: this.hideLookupKeys ? null : (this.prices.get(sub.priceId)?.lookupKey ?? null), defaultPaymentMethod: sub.defaultPaymentMethod, latestInvoiceId: sub.openInvoice, metadata: { ...sub.metadata }, pendingUpdate: sub.pendingUpdate, paymentIntent: sub.intent }
   }
 
   private sub(id: string): FakeSub {
@@ -125,12 +137,12 @@ export class FakeStripe implements StripeApi {
   // ---------- StripeApi ----------
 
   async findPrice(lookupKey: string) {
-    this.enter('findPrice')
+    await this.enter('findPrice')
     return [...this.prices.values()].find((p) => p.lookupKey === lookupKey) ?? null
   }
 
   async createCustomer(input: { email: string; name: string; userId: string }, idempotencyKey: string) {
-    this.enter('createCustomer')
+    await this.enter('createCustomer')
     return this.once(idempotencyKey, () => {
       const id = this.id('cus')
       this.customers.set(id, { id, email: input.email, userId: input.userId, defaultPaymentMethod: null })
@@ -139,7 +151,7 @@ export class FakeStripe implements StripeApi {
   }
 
   async attachPaymentMethod(paymentMethodId: string, customerId: string) {
-    this.enter('attachPaymentMethod')
+    await this.enter('attachPaymentMethod')
     if (!/^pm_\w+$/.test(paymentMethodId)) throw new StripeError(400, 'invalid_request_error', 'resource_missing', `No such PaymentMethod: '${paymentMethodId}'`)
     if (paymentMethodId === 'pm_card_attachDeclined') throw new StripeError(402, 'card_error', 'card_declined', 'Your card was declined.')
     const customer = this.customers.get(customerId)
@@ -147,8 +159,8 @@ export class FakeStripe implements StripeApi {
     customer.defaultPaymentMethod = paymentMethodId
   }
 
-  async createSubscription(input: { customerId: string; priceId: string; paymentMethodId: string; userId: string }, idempotencyKey: string) {
-    this.enter('createSubscription')
+  async createSubscription(input: { customerId: string; priceId: string; paymentMethodId: string; userId: string; plan: string }, idempotencyKey: string) {
+    await this.enter('createSubscription')
     return this.once(idempotencyKey, () => {
       this.price(input.priceId)
       const declined = input.paymentMethodId === 'pm_card_chargeDeclined'
@@ -161,6 +173,9 @@ export class FakeStripe implements StripeApi {
         currentPeriodEnd: this.now + 30 * DAY_S,
         itemId: this.id('si'),
         priceId: input.priceId,
+        defaultPaymentMethod: input.paymentMethodId,
+        metadata: { reclaim_user_id: input.userId, reclaim_plan: input.plan, reclaim_price_id: input.priceId },
+        openInvoice: declined || challenge ? this.id('in') : null,
         pendingUpdate: false,
         intent: declined ? { status: 'requires_payment_method', clientSecret: null } : challenge ? { status: 'requires_action', clientSecret: `pi_secret_${this.seq}` } : { status: 'succeeded', clientSecret: null },
       }
@@ -172,12 +187,40 @@ export class FakeStripe implements StripeApi {
   }
 
   async retrieveSubscription(id: string) {
-    this.enter('retrieveSubscription')
+    await this.enter('retrieveSubscription')
     return this.view(this.sub(id))
   }
 
+  async listSubscriptions(customerId: string) {
+    await this.enter('listSubscriptions')
+    return [...this.subscriptions.values()].filter((s) => s.customer === customerId).map((s) => this.view(s))
+  }
+
+  async setSubscriptionPaymentMethod(id: string, paymentMethodId: string) {
+    await this.enter('setSubscriptionPaymentMethod')
+    const sub = this.sub(id)
+    sub.defaultPaymentMethod = paymentMethodId
+    this.emit('customer.subscription.updated', this.wire(sub))
+    return this.view(sub)
+  }
+
+  async payInvoice(invoiceId: string, paymentMethodId: string) {
+    await this.enter('payInvoice')
+    const sub = [...this.subscriptions.values()].find((s) => s.openInvoice === invoiceId)
+    if (!sub) throw new StripeError(400, 'invalid_request_error', 'invoice_already_paid', 'Invoice is already paid')
+    if (paymentMethodId === 'pm_card_chargeDeclined') {
+      sub.intent = { status: 'requires_payment_method', clientSecret: null }
+      throw new StripeError(402, 'card_error', 'card_declined', 'Your card was declined.')
+    }
+    if (paymentMethodId === 'pm_card_authenticationRequired') {
+      sub.intent = { status: 'requires_action', clientSecret: `pi_secret_${invoiceId}` }
+      throw new StripeError(402, 'card_error', 'invoice_payment_intent_requires_action', 'This payment requires additional user action.')
+    }
+    this.completeAuthentication(sub.id)
+  }
+
   async changeSubscriptionPrice(id: string, itemId: string, priceId: string) {
-    this.enter('changeSubscriptionPrice')
+    await this.enter('changeSubscriptionPrice')
     const sub = this.sub(id)
     if (sub.itemId !== itemId) throw new StripeError(400, 'invalid_request_error', 'resource_missing', 'No such subscription item.')
     const from = this.price(sub.priceId)
@@ -195,7 +238,7 @@ export class FakeStripe implements StripeApi {
   }
 
   async setCancelAtPeriodEnd(id: string, cancel: boolean) {
-    this.enter('setCancelAtPeriodEnd')
+    await this.enter('setCancelAtPeriodEnd')
     const sub = this.sub(id)
     sub.cancelAtPeriodEnd = cancel
     this.emit('customer.subscription.updated', this.wire(sub))
@@ -203,7 +246,7 @@ export class FakeStripe implements StripeApi {
   }
 
   async cancelSubscriptionNow(id: string, options: { invoiceNow?: boolean } = {}) {
-    this.enter('cancelSubscriptionNow')
+    await this.enter('cancelSubscriptionNow')
     const sub = this.sub(id)
     if (options.invoiceNow) this.invoice(sub.customer, null)
     sub.status = sub.status === 'incomplete' ? 'incomplete_expired' : 'canceled'
@@ -211,7 +254,7 @@ export class FakeStripe implements StripeApi {
   }
 
   async createInvoiceItem(input: { customerId: string; subscriptionId: string | null; amountCents: number; description: string; metadata: Record<string, string> }, idempotencyKey: string) {
-    this.enter('createInvoiceItem')
+    await this.enter('createInvoiceItem')
     return this.once(idempotencyKey, () => {
       const id = this.id('ii')
       this.invoiceItems.set(id, { id, customer: input.customerId, subscription: input.subscriptionId, amountCents: input.amountCents, description: input.description, metadata: input.metadata, invoiced: false })
@@ -220,7 +263,7 @@ export class FakeStripe implements StripeApi {
   }
 
   async deleteInvoiceItem(id: string) {
-    this.enter('deleteInvoiceItem')
+    await this.enter('deleteInvoiceItem')
     const item = this.invoiceItems.get(id)
     if (!item || item.invoiced) return false
     this.invoiceItems.delete(id)
@@ -228,7 +271,7 @@ export class FakeStripe implements StripeApi {
   }
 
   async invoicePendingItems(customerId: string) {
-    this.enter('invoicePendingItems')
+    await this.enter('invoicePendingItems')
     this.invoice(customerId, null)
   }
 
@@ -237,7 +280,10 @@ export class FakeStripe implements StripeApi {
   /** The browser finished 3-D Secure: the first invoice is paid. */
   completeAuthentication(subscriptionId: string): void {
     const sub = this.sub(subscriptionId)
+    // A cancelled subscription's payment was voided with it: the bank's approval has nothing to pay.
+    if (sub.status === 'canceled' || sub.status === 'incomplete_expired') throw new StripeError(400, 'invalid_request_error', 'payment_intent_unexpected_state', 'This payment was cancelled.')
     sub.status = 'active'
+    sub.openInvoice = null
     sub.intent = { status: 'succeeded', clientSecret: null }
     this.emit('customer.subscription.updated', this.wire(sub))
     this.emit('invoice.paid', { object: 'invoice', subscription: sub.id, customer: sub.customer })
@@ -247,6 +293,8 @@ export class FakeStripe implements StripeApi {
   failRenewal(subscriptionId: string): void {
     const sub = this.sub(subscriptionId)
     sub.status = 'past_due'
+    sub.openInvoice = this.id('in')
+    sub.intent = { status: 'requires_payment_method', clientSecret: null }
     this.emit('invoice.payment_failed', { object: 'invoice', subscription: sub.id, customer: sub.customer })
     this.emit('customer.subscription.updated', this.wire(sub))
   }

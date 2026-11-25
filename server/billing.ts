@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import type { AuthService } from './auth.ts'
 import type { UserRow } from './db.ts'
 import { HttpError, json, RateLimiter, type Request, type Response } from './http.ts'
+import { KeyedLock } from './keyedLock.ts'
 import { entitlementsFor, planOf, PLAN_PRICE_USD, type Plan } from './plans.ts'
 import { StripeError, subscriptionIdOf, verifyWebhook, type StripeApi, type StripeSubscription } from './stripe.ts'
 
@@ -17,6 +18,8 @@ export type { StripeApi } from './stripe.ts'
  *   POST /api/billing/change     Growth ↔ Flat, prorated and charged now
  *   POST /api/billing/cancel     paid access runs to the end of the period
  *   POST /api/billing/resume     undo a scheduled cancel
+ *   POST /api/billing/card       new card on file; pays the open bill if one failed
+ *   POST /api/billing/card/confirm  after 3-D Secure on that payment
  *   GET  /api/billing            plan, status, next bill date, success fees
  *   POST /api/billing/webhook    Stripe's events, signature-checked
  *
@@ -38,6 +41,13 @@ export type PaidPlan = Exclude<Plan, 'free'>
 
 /** Statuses in which the plan's features stay on. past_due is Stripe's retry window. */
 const PAID_STATUSES = new Set(['active', 'trialing', 'past_due'])
+/** Statuses Stripe never charges again. Everything else can still take money. */
+const ENDED_STATUSES = new Set(['canceled', 'incomplete_expired'])
+/** Subscriptions whose card can be replaced (and, when a bill failed, paid with the new one). */
+const CARD_STATUSES = new Set(['active', 'trialing', 'past_due', 'unpaid', 'paused'])
+const OPEN_BILL_STATUSES = new Set(['past_due', 'unpaid'])
+/** How long a price looked up from Stripe is sold from memory before it is checked again. */
+const PRICE_TTL_MS = 10 * 60 * 1000
 const SUCCESS_FEES_ENABLED = false
 
 type AccountRow = {
@@ -128,6 +138,13 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
       type TEXT NOT NULL,
       received_at INTEGER NOT NULL
     );
+    -- Which plan a Stripe price id stands for, remembered for good: a price stays
+    -- that plan for its subscribers after it is replaced or archived, and a renewal
+    -- must not depend on Stripe answering a price search.
+    CREATE TABLE IF NOT EXISTS billing_prices (
+      price_id TEXT PRIMARY KEY,
+      plan TEXT NOT NULL
+    );
     -- Every settlement the server has seen, once, with the plan at that moment.
     CREATE TABLE IF NOT EXISTS recovery_fees (
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -157,7 +174,13 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
 
   const limiter = new RateLimiter(20, 60 * 60 * 1000)
   let background: Promise<void> = Promise.resolve()
-  const priceCache = new Map<PaidPlan, string>()
+  const priceCache = new Map<PaidPlan, { id: string; until: number }>()
+  // One billing change at a time per account: a second subscribe waits for the
+  // first and then sees its subscription, and a webhook can't write an older
+  // copy of the subscription over a newer one.
+  const locks = new KeyedLock()
+  /** Accounts being deleted: nothing may be bought for them any more. */
+  const closing = new Map<string, number>()
 
   const account = (userId: string) => db.prepare('SELECT * FROM billing_accounts WHERE user_id = ?').get(userId) as AccountRow | undefined
   const accountByCustomer = (customerId: string) => db.prepare('SELECT * FROM billing_accounts WHERE stripe_customer_id = ?').get(customerId) as AccountRow | undefined
@@ -171,27 +194,47 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
 
   async function priceFor(plan: PaidPlan): Promise<string> {
     const cached = priceCache.get(plan)
-    if (cached) return cached
+    if (cached && cached.until > Date.now()) return cached.id
     const price = await requireStripe().findPrice(PRICE_LOOKUP_KEYS[plan])
     // A wrong price must never be charged: the amount on the site is the amount billed.
     if (!price || price.unitAmount !== PLAN_PRICE_USD[plan] * 100 || price.currency !== 'usd' || price.interval !== 'month') {
       console.error(`billing: Stripe price "${PRICE_LOOKUP_KEYS[plan]}" is missing or not $${PLAN_PRICE_USD[plan]}/month (run scripts/stripe-setup.ts)`)
       throw new HttpError(503, 'Paid plans aren’t set up correctly yet. Nothing was charged.', 'billing_misconfigured')
     }
-    priceCache.set(plan, price.id)
+    priceCache.set(plan, { id: price.id, until: Date.now() + PRICE_TTL_MS })
+    rememberPrice(price.id, plan)
     return price.id
   }
 
-  async function planForPrice(priceId: string | null): Promise<PaidPlan | null> {
+  function rememberPrice(priceId: string, plan: PaidPlan): void {
+    db.prepare('INSERT OR IGNORE INTO billing_prices (price_id, plan) VALUES (?, ?)').run(priceId, plan)
+  }
+
+  /**
+   * The plan a subscription is on, from its price. Tried in order: prices
+   * already remembered, the lookup key on the price itself, the plan written
+   * into the subscription for that same price, then Stripe's price search.
+   *
+   * Null means Stripe answered and the price is none of ours. A search that
+   * fails throws: not knowing is never the same as not paid.
+   */
+  async function planForSubscription(sub: StripeSubscription): Promise<PaidPlan | null> {
+    const priceId = sub.priceId
     if (!priceId) return null
-    for (const plan of ['growth', 'flat'] as const) {
-      try {
-        if ((await priceFor(plan)) === priceId) return plan
-      } catch {
-        // a misconfigured price matches nothing
+    const known = (db.prepare('SELECT plan FROM billing_prices WHERE price_id = ?').get(priceId) as { plan: string } | undefined)?.plan
+    if (isPaidPlan(known)) return known
+    let plan = PAID_PLANS.find((p) => PRICE_LOOKUP_KEYS[p] === sub.priceLookupKey) ?? null
+    if (!plan && sub.metadata.reclaim_price_id === priceId && isPaidPlan(sub.metadata.reclaim_plan)) plan = sub.metadata.reclaim_plan
+    if (!plan) {
+      for (const candidate of PAID_PLANS) {
+        if ((await requireStripe().findPrice(PRICE_LOOKUP_KEYS[candidate]))?.id === priceId) {
+          plan = candidate
+          break
+        }
       }
     }
-    return null
+    if (plan) rememberPrice(priceId, plan)
+    return plan
   }
 
   /**
@@ -202,23 +245,66 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
   async function applySubscription(sub: StripeSubscription): Promise<AccountRow | null> {
     const row = accountByCustomer(sub.customer)
     if (!row) return null
+    const active = PAID_STATUSES.has(sub.status)
     // A different subscription only takes over when it is paid and the current one is not;
     // a declined or abandoned attempt never touches the plan.
-    if (row.stripe_subscription_id !== sub.id && (!PAID_STATUSES.has(sub.status) || hasPaidSubscription(row))) return row
-    const plan = await planForPrice(sub.priceId)
-    const paid = PAID_STATUSES.has(sub.status) && plan !== null
+    if (row.stripe_subscription_id !== sub.id) {
+      if (!active) return row
+      if (hasPaidSubscription(row) && (await isStillPaid(row.stripe_subscription_id))) {
+        await cancelDuplicate(row, sub)
+        return row
+      }
+    }
+    const before = planOf(auth.findUserById(row.user_id)?.plan)
+    let plan = active ? await planForSubscription(sub) : null
+    if (active && !plan) {
+      // Paid, at a price Stripe says is none of ours: keep whatever plan the account
+      // has rather than take away something that is being paid for.
+      console.error(`billing: subscription ${sub.id} is ${sub.status} at an unrecognised price; its plan was kept`)
+      const stated = isPaidPlan(sub.metadata.reclaim_plan) ? sub.metadata.reclaim_plan : null
+      const stored = row.stripe_subscription_id === sub.id && isPaidPlan(row.subscription_plan) ? row.subscription_plan : null
+      plan = stored ?? stated ?? (before === 'free' ? null : before)
+    }
+    const paid = active && plan !== null
     db.prepare(
       `UPDATE billing_accounts SET stripe_subscription_id = ?, subscription_plan = ?, subscription_status = ?, current_period_end = ?, cancel_at_period_end = ?, updated_at = ? WHERE user_id = ?`
-    ).run(sub.id, plan, sub.status, sub.currentPeriodEnd ? sub.currentPeriodEnd * 1000 : null, sub.cancelAtPeriodEnd ? 1 : 0, Date.now(), row.user_id)
-    const before = planOf(auth.findUserById(row.user_id)?.plan)
-    const after: Plan = paid ? plan : sub.status === 'incomplete' ? before : 'free'
+    ).run(sub.id, plan ?? row.subscription_plan, sub.status, sub.currentPeriodEnd ? sub.currentPeriodEnd * 1000 : null, sub.cancelAtPeriodEnd ? 1 : 0, Date.now(), row.user_id)
+    const after: Plan = paid ? plan! : sub.status === 'incomplete' || active ? before : 'free'
     if (after !== before) auth.setPlan(row.user_id, after)
     if (after === 'growth') queueBilling(row.user_id)
     if (!paid && (sub.status === 'canceled' || sub.status === 'unpaid')) {
       // The last period's fees still get billed, on a final invoice.
       queueBilling(row.user_id, { finalInvoice: true })
     }
+    if (!active && sub.status !== 'incomplete' && row.stripe_subscription_id === sub.id && !closing.has(row.user_id)) {
+      // Another subscription of this customer may still be paid for; then it is the plan.
+      const other = (await requireStripe().listSubscriptions(row.stripe_customer_id)).find((s) => s.id !== sub.id && PAID_STATUSES.has(s.status))
+      if (other) return applySubscription(other)
+    }
     return account(row.user_id) ?? null
+  }
+
+  async function isStillPaid(subscriptionId: string): Promise<boolean> {
+    try {
+      return PAID_STATUSES.has((await requireStripe().retrieveSubscription(subscriptionId)).status)
+    } catch (err) {
+      if (err instanceof StripeError && err.code === 'resource_missing') return false
+      throw err
+    }
+  }
+
+  /**
+   * A second paid subscription while the account already has one. The one
+   * Reclaim made is stopped so it never renews; anything an operator set up by
+   * hand in Stripe is left for them. Refunding what it charged is the operator's call.
+   */
+  async function cancelDuplicate(row: AccountRow, sub: StripeSubscription): Promise<void> {
+    if (sub.metadata.reclaim_user_id !== row.user_id) {
+      console.error(`billing: customer ${row.stripe_customer_id} has a second paid subscription ${sub.id} that Reclaim did not create; review it in Stripe`)
+      return
+    }
+    await requireStripe().cancelSubscriptionNow(sub.id)
+    console.error(`billing: cancelled duplicate subscription ${sub.id} of customer ${row.stripe_customer_id}; review it for a refund`)
   }
 
   async function ensureCustomer(user: UserRow): Promise<AccountRow> {
@@ -380,7 +466,12 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
       if (db.prepare('SELECT 1 FROM billing_events WHERE id = ?').get(event.id)) return json(200, { received: true, duplicate: true })
       const subscriptionId = event.type.startsWith('customer.subscription.') || event.type.startsWith('invoice.') ? subscriptionIdOf(event.data.object) : null
       // The payload is only a pointer: the subscription is read back from Stripe.
-      if (subscriptionId) await applySubscription(await stripe.retrieveSubscription(subscriptionId))
+      // A failure here answers 500 and the event is not recorded, so Stripe sends it again.
+      if (subscriptionId) {
+        const customer = event.data.object.customer
+        const owner = typeof customer === 'string' ? accountByCustomer(customer)?.user_id : undefined
+        await locks.run(owner ?? subscriptionId, async () => applySubscription(await stripe.retrieveSubscription(subscriptionId)))
+      }
       db.prepare('INSERT OR IGNORE INTO billing_events (id, type, received_at) VALUES (?, ?, ?)').run(event.id, event.type, Date.now())
       return json(200, { received: true })
     }
@@ -392,21 +483,64 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
     }
 
     if (method !== 'POST') throw new HttpError(404, 'Not found.')
-    if (!limiter.check(user.id)) throw new HttpError(429, 'Too many attempts. Wait a minute and try again.', 'rate_limited')
+    if (!limiter.check(user.id)) throw new HttpError(429, 'Too many billing changes. Wait an hour and try again.', 'rate_limited')
+    requireStripe()
+    const body = (req.headers['content-type'] ?? '').includes('application/json') ? await req.json<Record<string, unknown>>() : {}
+    return locks.run(user.id, () => {
+      // Whatever held the lock may have been this account's deletion.
+      const fresh = auth.findUserById(user.id)
+      if (!fresh || (closing.get(user.id) ?? 0) > Date.now()) throw new HttpError(409, 'This account is being deleted. Nothing was charged.', 'account_closing')
+      return change(path, fresh, body)
+    })
+  }
+
+  const paymentMethodFrom = (value: unknown): string => {
+    if (typeof value !== 'string' || !/^pm_\w{3,}$/.test(value)) throw new HttpError(400, 'The card wasn’t verified. Enter it again.', 'validation')
+    return value
+  }
+
+  /**
+   * Before a new subscription is made, every earlier one is settled: a paid one
+   * becomes the plan (and nothing more is bought), an attempt that was never
+   * paid is cancelled so its 3-D Secure page can't charge later. Returns an
+   * identical attempt still waiting for the bank, which is simply used again.
+   */
+  async function settleEarlier(row: AccountRow, priceId: string, paymentMethodId: string): Promise<StripeSubscription | null> {
+    const api = requireStripe()
+    const open = (await api.listSubscriptions(row.stripe_customer_id)).filter((s) => !ENDED_STATUSES.has(s.status))
+    const adopt = async (paid: StripeSubscription): Promise<never> => {
+      await applySubscription(paid)
+      throw new HttpError(409, 'You already have a paid plan. Change it from Settings.', 'already_subscribed')
+    }
+    const paid = open.find((s) => PAID_STATUSES.has(s.status))
+    if (paid) await adopt(paid)
+    const same = open.find((s) => s.status === 'incomplete' && s.priceId === priceId && s.defaultPaymentMethod === paymentMethodId && s.paymentIntent?.status === 'requires_action' && s.paymentIntent.clientSecret)
+    for (const earlier of open) {
+      if (earlier.id === same?.id) continue
+      // Read again right before cancelling: the customer may be finishing it in another tab.
+      const now = await api.retrieveSubscription(earlier.id)
+      if (PAID_STATUSES.has(now.status)) await adopt(now)
+      if (!ENDED_STATUSES.has(now.status)) await api.cancelSubscriptionNow(now.id)
+    }
+    return same ?? null
+  }
+
+  async function change(path: string, user: UserRow, body: Record<string, unknown>): Promise<Response> {
     const api = requireStripe()
     const current = planOf(user.plan)
-    const body = (req.headers['content-type'] ?? '').includes('application/json') ? await req.json<Record<string, unknown>>() : {}
 
     if (path === '/api/billing/subscribe') {
       const plan = paidPlanFrom(body.plan)
-      const paymentMethodId = body.paymentMethodId
-      if (typeof paymentMethodId !== 'string' || !/^pm_\w{3,}$/.test(paymentMethodId)) throw new HttpError(400, 'The card wasn’t verified. Enter it again.', 'validation')
+      const paymentMethodId = paymentMethodFrom(body.paymentMethodId)
       if (hasPaidSubscription(account(user.id))) throw new HttpError(409, 'You already have a paid plan. Change it from Settings.', 'already_subscribed')
       try {
         const priceId = await priceFor(plan)
         const row = await ensureCustomer(user)
-        await api.attachPaymentMethod(paymentMethodId, row.stripe_customer_id)
-        const sub = await api.createSubscription({ customerId: row.stripe_customer_id, priceId, paymentMethodId, userId: user.id }, `reclaim-sub-${user.id}-${plan}-${paymentMethodId}`)
+        const waiting = await settleEarlier(row, priceId, paymentMethodId)
+        if (!waiting) await api.attachPaymentMethod(paymentMethodId, row.stripe_customer_id)
+        // The last subscription is part of the key: a retry of one attempt is the same
+        // request to Stripe, an attempt after it was cancelled is a new one.
+        const sub = waiting ?? (await api.createSubscription({ customerId: row.stripe_customer_id, priceId, paymentMethodId, userId: user.id, plan }, `reclaim-sub-${user.id}-${plan}-${paymentMethodId}-${account(user.id)?.stripe_subscription_id ?? 'first'}`))
         if (sub.status === 'incomplete' && sub.paymentIntent?.status === 'requires_action' && sub.paymentIntent.clientSecret) {
           db.prepare('UPDATE billing_accounts SET stripe_subscription_id = ?, subscription_status = ?, updated_at = ? WHERE user_id = ?').run(sub.id, sub.status, Date.now(), user.id)
           return json(200, { status: 'requires_action', clientSecret: sub.paymentIntent.clientSecret, subscriptionId: sub.id })
@@ -437,6 +571,19 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
       }
     }
 
+    if (path === '/api/billing/card' || path === '/api/billing/card/confirm') {
+      const confirming = path === '/api/billing/card/confirm'
+      const paymentMethodId = confirming ? null : paymentMethodFrom(body.paymentMethodId)
+      const row = account(user.id)
+      if (!row?.stripe_subscription_id || !CARD_STATUSES.has(row.subscription_status ?? '')) throw new HttpError(409, 'There is no subscription to update. Choose a plan to subscribe.', 'no_subscription')
+      if (confirming && body.subscriptionId !== row.stripe_subscription_id) throw new HttpError(404, 'No payment is waiting.', 'not_found')
+      try {
+        return await updateCard(user, row.stripe_customer_id, row.stripe_subscription_id, paymentMethodId)
+      } catch (err) {
+        return failed(err, current)
+      }
+    }
+
     const row = account(user.id)
     if (!hasPaidSubscription(row)) throw new HttpError(409, 'You’re on Free. Choose a plan to subscribe.', 'no_subscription')
 
@@ -444,7 +591,7 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
       const plan = paidPlanFrom(body.plan)
       try {
         let sub = await api.retrieveSubscription(row.stripe_subscription_id)
-        if ((await planForPrice(sub.priceId)) === plan) {
+        if ((await planForSubscription(sub)) === plan) {
           if (sub.cancelAtPeriodEnd) sub = await api.setCancelAtPeriodEnd(sub.id, false)
         } else {
           if (!sub.itemId) throw new Error('subscription has no item')
@@ -470,22 +617,68 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
     throw new HttpError(404, 'Not found.')
   }
 
+  /** Puts a card on the subscription (or, with none given, re-reads it after 3-D Secure) and pays a bill that failed. */
+  async function updateCard(user: UserRow, customerId: string, subscriptionId: string, paymentMethodId: string | null): Promise<Response> {
+    const api = requireStripe()
+    let sub: StripeSubscription
+    if (paymentMethodId) {
+      await api.attachPaymentMethod(paymentMethodId, customerId)
+      sub = await api.setSubscriptionPaymentMethod(subscriptionId, paymentMethodId)
+      if (OPEN_BILL_STATUSES.has(sub.status) && sub.latestInvoiceId) {
+        try {
+          await api.payInvoice(sub.latestInvoiceId, paymentMethodId)
+        } catch (err) {
+          // Declined, wants 3-D Secure, or was paid meanwhile: the subscription says which.
+          if (!(err instanceof StripeError && (err.status === 402 || err.status === 400))) throw err
+        }
+        sub = await api.retrieveSubscription(subscriptionId)
+      }
+    } else {
+      sub = await api.retrieveSubscription(subscriptionId)
+    }
+    await applySubscription(sub)
+    if (!OPEN_BILL_STATUSES.has(sub.status)) return answer(user.id, { status: sub.status })
+    if (paymentMethodId && sub.paymentIntent?.status === 'requires_action' && sub.paymentIntent.clientSecret) {
+      return json(200, { status: 'requires_action', clientSecret: sub.paymentIntent.clientSecret, subscriptionId: sub.id })
+    }
+    throw new HttpError(402, 'The new card is saved, but the overdue payment was declined or not completed. Try another card.', 'payment_incomplete')
+  }
+
   async function closeAccount(userId: string): Promise<void> {
+    await locks.run(userId, () => closeLocked(userId))
+  }
+
+  async function closeLocked(userId: string): Promise<void> {
     const row = account(userId)
+    // Held until the rows are gone; short enough that a deletion that fails later doesn't lock billing.
+    closing.set(userId, Date.now() + 60_000)
     if (!row) return
     if (!stripe) {
-      if (hasPaidSubscription(row)) throw new HttpError(503, 'Your subscription can’t be cancelled on this server right now, so the account wasn’t deleted. Contact us and we’ll cancel it.', 'billing_unavailable')
+      closing.delete(userId)
+      if (row.stripe_subscription_id && CARD_STATUSES.has(row.subscription_status ?? '')) throw new HttpError(503, 'Your subscription can’t be cancelled on this server right now, so the account wasn’t deleted. Contact us and we’ll cancel it.', 'billing_unavailable')
       return
     }
     await background
     try {
-      if (hasPaidSubscription(row)) {
-        await billFees(userId)
-        await stripe.cancelSubscriptionNow(row.stripe_subscription_id, { invoiceNow: true })
-      } else {
-        await billFees(userId, { finalInvoice: true })
+      // Asked of Stripe rather than read from the one tracked id, so nothing that could
+      // still charge (a duplicate, an unpaid or unfinished attempt) outlives the account.
+      const open = (await stripe.listSubscriptions(row.stripe_customer_id).catch((err: unknown) => {
+        // The customer is gone from Stripe, so nothing of theirs can charge.
+        if (err instanceof StripeError && err.code === 'resource_missing') return []
+        throw err
+      })).filter((s) => !ENDED_STATUSES.has(s.status))
+      const paid = open.some((s) => PAID_STATUSES.has(s.status))
+      await billFees(userId, paid ? {} : { finalInvoice: true })
+      for (const sub of open) {
+        try {
+          await stripe.cancelSubscriptionNow(sub.id, PAID_STATUSES.has(sub.status) ? { invoiceNow: true } : {})
+        } catch (err) {
+          // Ended on Stripe's side between the list and now.
+          if (!(err instanceof StripeError && err.code === 'resource_missing')) throw err
+        }
       }
     } catch (err) {
+      closing.delete(userId)
       console.error('billing: closing account failed:', err instanceof Error ? err.message : 'unknown')
       throw new HttpError(502, 'We couldn’t cancel your subscription with our payment provider, so the account wasn’t deleted. Try again in a minute.', 'billing_failed')
     }
@@ -493,6 +686,25 @@ export function createBilling({ db, auth, stripe, webhookSecret, requireUser }: 
 
   return { route, recordRecoveries, idle: () => background, closeAccount }
 }
+
+/** What an account's billing looks like in its data export. Stripe's own ids are left out. */
+export function exportBilling(db: DatabaseSync, user: Pick<UserRow, 'id' | 'plan'>) {
+  const has = (table: string) => db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== undefined
+  const row = has('billing_accounts') ? (db.prepare('SELECT * FROM billing_accounts WHERE user_id = ?').get(user.id) as AccountRow | undefined) : undefined
+  const fees = has('recovery_fees') ? (db.prepare('SELECT * FROM recovery_fees WHERE user_id = ? ORDER BY recorded_at').all(user.id) as FeeRow[]) : []
+  // A settlement's date was typed in a browser, so it may not be a date at all.
+  const iso = (at: number | null) => (at === null || Number.isNaN(new Date(at).getTime()) ? null : new Date(at).toISOString())
+  return {
+    plan: planOf(user.plan),
+    subscription: row?.subscription_status
+      ? { plan: row.subscription_plan, status: row.subscription_status, currentPeriodEnd: iso(row.current_period_end), cancelAtPeriodEnd: row.cancel_at_period_end === 1 }
+      : null,
+    recordedReturns: fees.map((f) => ({ auditId: f.project_id, findingId: f.finding_id, amountCents: f.amount_cents, feeCents: f.fee_cents, method: f.method, reference: f.reference, settledAt: iso(f.settled_at), recordedAt: iso(f.recorded_at), plan: f.plan, billable: f.billable === 1, reason: f.reason, voidedAt: iso(f.voided_at) })),
+  }
+}
+
+const PAID_PLANS: PaidPlan[] = ['growth', 'flat']
+const isPaidPlan = (value: unknown): value is PaidPlan => value === 'growth' || value === 'flat'
 
 const PLAN_NAME: Record<Plan, string> = { free: 'Free', growth: 'Growth', flat: 'Flat' }
 

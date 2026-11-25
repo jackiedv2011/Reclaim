@@ -16,12 +16,14 @@ which one it is.
 Set these in the host's secret/environment settings. Never bake them into the
 image, commit them, or pass them as build arguments. The image ignores `.env`
 files entirely (`.dockerignore`), so a container only sees what the host gives it.
+A blank value counts as not set. A number that isn't one (`REMEMBER_ME_DAYS=30 days`) stops the start with a message naming the setting.
 
 | Variable | Secret? | Required | Notes |
 |---|---|---|---|
 | `NODE_ENV` | no | set by image | `production` in the image. Turns on Secure cookies, HSTS, static serving and the startup checks. |
 | `APP_ORIGIN` | no | **yes** | Public address, e.g. `https://app.reclaim.example`. Must be `https://` with no path. Used in email links and both OAuth redirect URIs. |
 | `PORT` | no | set by image | `8787`. Point the host's HTTP routing at it. |
+| `TRUST_PROXY` | no | **yes** | How many proxies in front of the server add to `X-Forwarded-For`. `1` behind a host's load balancer, Caddy or nginx; `2` with a CDN in front of that; `0` if visitors connect directly. Too low and every visitor shares one rate limit; too high and a visitor can fake their address (§3). |
 | `DATABASE_PATH` | no | set by image | `/data/reclaim.sqlite`. Keep it on the volume. |
 | `RESEND_API_KEY` | **secret** | one provider **required** | With `EMAIL_FROM`. Resend needs a domain you own and have verified with them. |
 | `EMAIL_FROM` | no | with Resend | e.g. `Reclaim <no-reply@reclaim.example>`. |
@@ -29,8 +31,8 @@ files entirely (`.dockerignore`), so a container only sees what the host gives i
 | `GMAIL_APP_PASSWORD` | **secret** | with Gmail | A Google app password (2-Step Verification → App passwords). |
 | `CONTACT_EMAIL` | no | no | Where the landing site's contact form goes. Default `reclaimbusiness1@gmail.com`. |
 | `REQUIRE_EMAIL_VERIFICATION` | no | no | Default `true`. Leave it on for pilots. |
-| `SESSION_DAYS` / `REMEMBER_ME_DAYS` | no | no | Default 1 and 30. |
-| `GOOGLE_CLIENT_ID` | no (public id) | no | Both Google values set → "Continue with Google" appears. |
+| `SESSION_DAYS` / `REMEMBER_ME_DAYS` | no | no | Plain numbers of days. Default 1 and 30. |
+| `GOOGLE_CLIENT_ID` | no (public id) | no | Both Google values set → "Continue with Google" appears. The server refuses to start with only one of the two. |
 | `GOOGLE_CLIENT_SECRET` | **secret** | with the id | |
 | `GMAIL_TOKEN_KEY` | **secret** | no | 32 random bytes, base64: `openssl rand -base64 32`. With the two Google values, turns on "Send from your Gmail" (all plans). Seals stored Gmail refresh tokens. Needs the Google setup in §4a. Rotating it disconnects every Gmail user, like `QBO_TOKEN_KEY` (§6). |
 | `ANTHROPIC_API_KEY` | **secret** | no | Without it, "Draft with AI" reports itself unavailable. |
@@ -102,11 +104,12 @@ balancer or a reverse proxy (Caddy, nginx, the platform's router) that forwards 
    `includeSubDomains` covers every subdomain of the app's host: make sure they all serve HTTPS.
 5. Email from Resend needs its DNS records (SPF/DKIM) on the sending domain.
 
-**Known gap behind a proxy:** sign-up, login, reset and contact-form rate limits
-key on the connecting address (`server/http.ts`), which behind a proxy is the
-proxy. Every visitor then shares one budget: 20 failed logins from anyone
-briefly lock out everyone. Fine for a small supervised pilot; fix it (trust
-`X-Forwarded-For` from the known proxy only) before opening sign-ups widely.
+**Behind a proxy, set `TRUST_PROXY`.** Sign-up, login, reset and contact-form
+rate limits key on the visitor's address (`server/http.ts`). Behind a proxy the
+connecting address is the proxy's, so the server takes the visitor's from
+`X-Forwarded-For`, counting `TRUST_PROXY` entries from the right. Production
+refuses to start without it. Check it after deploying: log in wrongly 21 times
+from one network, then confirm another network can still log in.
 
 ## 4. Google sign-in and the Intuit redirect URI
 
@@ -156,7 +159,8 @@ character for character.
 
 How sending is guarded (so support can explain it): the server sends only for a case that passes the
 evidence checks and the customer's approval on the server's copy, and only the approved subject,
-message and recipient. Each case sends at most once (`gmail_sends` table). If Gmail's answer is lost
+message and recipient. Each case sends at most once (`gmail_sends` table), and a second
+audit holding the same payments is refused unless the customer confirms. A send cut off by a crash or restart is treated as unconfirmed at the next start. If Gmail's answer is lost
 (network failure or a Google 5xx), the case is **not** marked sent, and the customer is asked to check
 their Gmail Sent folder before they can try again.
 
@@ -237,8 +241,11 @@ Nobody is signed out, and nothing needs reconnecting.
 5. Take a fresh backup. Keep the old key, stored as carefully as the new one,
    for as long as you keep backups taken under it (30 days), then destroy it.
 
-**Never just replace `DATA_KEY` without step 2.** Audits sealed under a key the
-server doesn't have can't be read, and the app returns errors for those accounts until the key is restored.
+**Never just replace `DATA_KEY` without step 2.** The database keeps a value sealed under its key and the server
+checks it at startup: with a different key, and no `DATA_KEY_PREVIOUS` that matches, it refuses to start and changes nothing.
+
+**One audit that can't be opened** (a damaged row) doesn't stop the server or the account. It is left in the database
+as it is, reported as `unreadable` by `GET /api/projects` and `unreadableAudits` in the export, never saved over, and logged. Restore it from a backup.
 
 ## 7. Rotating `QBO_TOKEN_KEY`
 
@@ -266,6 +273,9 @@ Billing lives in `server/billing.ts`; the REST client is `server/stripe.ts` (no 
 - **Prices:** two monthly USD prices found by lookup key, `reclaim_growth_monthly` ($15) and `reclaim_flat_monthly` ($50). Create them once per Stripe account (test and live are separate) with `npm run stripe:setup` (reads `STRIPE_SECRET_KEY` from `.env`; safe to re-run; a live key needs `--live`). The server refuses to sell a plan whose price isn't exactly what the site says.
 - **Source of truth:** `users.plan` is only set from a subscription read back from Stripe. Checkout and Settings read it right after a change so the app switches at once; the webhook keeps it right afterwards (renewals, failed payments, the end of a cancelled period). Webhook payloads are treated as pointers: the subscription is re-fetched with the pinned API version (`2024-06-20`).
 - **Transitions:** Free → Growth/Flat (card, 3-D Secure supported); Growth ↔ Flat (prorated, charged now; if that charge fails the plan doesn't change); Cancel (paid features stay on until the period ends, then Free); Keep plan (undo a cancel). `past_due` keeps access while Stripe retries; when retries run out Stripe cancels and the account returns to Free. Configure retries in Stripe → Settings → Billing → Subscriptions and emails → "Manage failed payments" (recommended: cancel the subscription after the last retry).
+- **Updating a card:** `/checkout?card=update`. The new card becomes the one the subscription charges; if a bill failed it is tried again at once (3-D Secure supported), otherwise nothing is charged.
+- **One subscription per account:** billing changes run one at a time per account. Starting a plan first cancels earlier unpaid attempts, so an abandoned 3-D Secure page can't charge later. Deleting an account cancels every subscription of that Stripe customer that could still charge. A log line starting `billing: cancelled duplicate subscription` means a customer was charged twice by an older version: check it for a refund.
+- **Replaced prices:** the server remembers which plan each Stripe price id stands for, so archiving or replacing a price doesn't change existing subscribers. If Stripe can't be reached while handling an event, the webhook answers 500 and Stripe retries.
 - **Stored:** only Stripe's customer and subscription ids (`billing_accounts`). Card data never reaches the server.
 - **Growth's proposed 10% success fee:** automatic success-fee invoicing is disabled. A customer-entered return creates no billable fee. Existing unbilled legacy fee rows are quarantined at startup; any already-invoiced item needs operator review. Define independent matching, attribution, reversals, customer approval and invoiceable fee events before activating this feature. Subscription billing is separate and may charge if Stripe live credentials are configured, so verify the deployment configuration before enabling checkout.
 
@@ -288,6 +298,7 @@ stripe listen --forward-to localhost:8790/api/billing/webhook
 - [ ] `docker build` succeeds from a clean checkout. The image has no `.env` or `data/`: `docker run --rm reclaim ls -a /app` shows no `.env`.
 - [ ] Domain resolves, HTTPS works, `http://` redirects to `https://`.
 - [ ] `APP_ORIGIN` matches the domain exactly. The container starts with no "Refusing to start" lines.
+- [ ] `TRUST_PROXY` set to the real number of proxies (§3).
 - [ ] `GET /healthz` returns 200 through the public URL. The host's health check uses it.
 - [ ] Volume mounted at `/data` and survives a container restart: sign up, restart, sign in.
 - [ ] Email works end to end: sign up with a fresh address, get the verification email, follow the link, run a password reset.

@@ -1,6 +1,4 @@
 import { createServer, type Server } from 'node:http'
-import { readFileSync, existsSync, statSync } from 'node:fs'
-import { extname, join, normalize, resolve, sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { openDatabase } from './db.ts'
 import { ProjectStore } from './projectStore.ts'
@@ -12,7 +10,7 @@ import { createGoogleClient, type GoogleClient } from './google.ts'
 import { createDraftService, DraftError, DraftRequestSchema, unsupportedAmounts, type DraftService } from './ai.ts'
 import { answerCaseQuestion } from './assistant.ts'
 import type { ServerConfig } from './config.ts'
-import { HttpError, RateLimiter, empty, isCrossSiteWrite, json, redirect, serializeCookie, toRequest, writeResponse, type Request, type Response } from './http.ts'
+import { HttpError, RateLimiter, isCrossSiteWrite, json, redirect, serializeCookie, toRequest, writeResponse, type Request, type Response } from './http.ts'
 import { newToken, openSecret, sealSecret } from './crypto.ts'
 import { createQuickBooksClient, migrateQuickBooksLink, syncLedger, QuickBooksReconnectError, QuickBooksUnauthorizedError, type QuickBooksClient, type QuickBooksTokens } from './quickbooks.ts'
 import { entitlementsFor, isPlan, monthStart, planOf, PLAN_LIMITS, type Plan } from './plans.ts'
@@ -22,6 +20,7 @@ import { createBilling } from './billing.ts'
 import { createStripeClient, type StripeApi } from './stripe.ts'
 import { createGmailClient, createGmailRoutes, type GmailClient } from './gmail.ts'
 import { OnboardingProfileSchema } from './onboarding.ts'
+import { serveStatic } from './staticFiles.ts'
 
 const SESSION_COOKIE = 'reclaim_session'
 const OAUTH_STATE_COOKIE = 'reclaim_oauth_state'
@@ -55,29 +54,6 @@ export interface App {
   close(): Promise<void>
 }
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.txt': 'text/plain; charset=utf-8',
-  '.csv': 'text/csv; charset=utf-8',
-  '.woff2': 'font/woff2',
-  '.woff': 'font/woff',
-  '.ttf': 'font/ttf',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.mp4': 'video/mp4',
-  '.webm': 'video/webm',
-  '.xml': 'application/xml',
-  '.webmanifest': 'application/manifest+json',
-}
-
 export function createApp(deps: AppDependencies): App {
   const { config } = deps
   const db = deps.db ?? openDatabase(config.databasePath)
@@ -106,7 +82,7 @@ export function createApp(deps: AppDependencies): App {
   const quickbooksSyncLimiter = new RateLimiter(20, 60 * 60 * 1000)
   const gmailSendLimiter = new RateLimiter(30, 60 * 60 * 1000)
   const gmailClient = deps.gmail !== undefined ? deps.gmail : config.gmailSend ? createGmailClient(config.gmailSend.clientId, config.gmailSend.clientSecret) : null
-  const gmailRoutes = createGmailRoutes({ db, appOrigin: config.appOrigin, production: config.production, gmail: gmailClient && config.gmailSend ? { client: gmailClient, tokenKey: config.gmailSend.tokenKey } : null, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), getProject: (userId, projectId) => projects.get(userId, projectId), allowSend: (id) => gmailSendLimiter.check(`gmail:${id}`), now: deps.now })
+  const gmailRoutes = createGmailRoutes({ db, appOrigin: config.appOrigin, production: config.production, gmail: gmailClient && config.gmailSend ? { client: gmailClient, tokenKey: config.gmailSend.tokenKey } : null, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), getProject: (userId, projectId) => projects.get(userId, projectId), listProjects: (userId) => projects.list(userId), allowSend: (id) => gmailSendLimiter.check(`gmail:${id}`), now: deps.now })
 
   const sessionCookie = (token: string, maxAge: number) => serializeCookie(SESSION_COOKIE, token, { maxAge, secure: config.production })
   const clearSessionCookie = () => serializeCookie(SESSION_COOKIE, '', { maxAge: 0, secure: config.production })
@@ -150,8 +126,13 @@ export function createApp(deps: AppDependencies): App {
   const requireJson = (req: Request) => {
     if (!(req.headers['content-type'] ?? '').includes('application/json')) throw new HttpError(415, 'Send JSON.')
   }
+  // What a refused caller is told to wait: each limiter's own window, and nothing shorter.
+  const waits = new Map<RateLimiter, string>([
+    [credentialLimiter, 'a minute'],
+    [loginEmailLimiter, '15 minutes'],
+  ])
   const limit = (limiter: RateLimiter, key: string) => {
-    if (!limiter.check(key)) throw new HttpError(429, 'Too many attempts. Wait a minute and try again.', 'rate_limited')
+    if (!limiter.check(key)) throw new HttpError(429, `Too many attempts. Wait ${waits.get(limiter) ?? 'an hour'} and try again.`, 'rate_limited')
   }
 
   // QuickBooks Online (GET-only adapter, write-capable OAuth scope; sandbox or production per QBO_ENVIRONMENT). Tokens are sealed at rest under a
@@ -505,8 +486,8 @@ export function createApp(deps: AppDependencies): App {
     // ---------- account data ----------
     if (path === '/api/projects' && method === 'GET') {
       const user = requireUser(req)
-      const saved = projects.list(user.id)
-      return json(200, { projects: saved, revisions: Object.fromEntries(saved.map((project) => [project.id, projects.revision(user.id, project.id as string)])) })
+      const { projects: saved, unreadable } = projects.listAll(user.id)
+      return json(200, { projects: saved, unreadable, revisions: Object.fromEntries(saved.map((project) => [project.id, projects.revision(user.id, project.id as string)])) })
     }
 
     const commandMatch = path.match(/^\/api\/projects\/([\w-]+)\/case-commands$/)
@@ -648,7 +629,7 @@ export function createApp(deps: AppDependencies): App {
     if (path.startsWith('/api/')) throw new HttpError(404, 'Not found.')
 
     // ---------- static site (production) ----------
-    if (deps.staticDir && method === 'GET') return serveStatic(deps.staticDir, path)
+    if (deps.staticDir && (method === 'GET' || method === 'HEAD')) return serveStatic(deps.staticDir, req)
     throw new HttpError(404, 'Not found.')
   }
 
@@ -656,6 +637,13 @@ export function createApp(deps: AppDependencies): App {
     const options = { noStore: (rawReq.url ?? '').startsWith('/api/'), hsts: config.production }
     try {
       const req = await toRequest(rawReq, { trustProxy: config.trustProxy })
+      // Every route reads its body as an object; `null`, a list or a bare value is the caller's mistake, not a crash.
+      const readJson = req.json
+      req.json = async <T>() => {
+        const body: unknown = await readJson()
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Body must be a JSON object.', 'validation')
+        return body as T
+      }
       const response = await route(req)
       writeResponse(rawRes, response, options)
     } catch (err) {
@@ -735,23 +723,4 @@ function quarantineLegacyProject(project: Record<string, unknown>): Record<strin
     approvedAt: null,
     requiresRevalidation: true,
   }])) } }
-}
-
-function serveStatic(root: string, urlPath: string): Response {
-  let decoded: string
-  try {
-    decoded = decodeURIComponent(urlPath)
-  } catch {
-    throw new HttpError(400, 'Bad request.')
-  }
-  const base = resolve(root)
-  const safe = normalize(decoded).replace(/^(\.\.[/\\])+/, '')
-  const candidates = [join(base, safe), join(base, safe, 'index.html'), join(base, 'index.html')]
-  for (const file of candidates) {
-    if (file !== base && !file.startsWith(base + sep)) continue
-    if (existsSync(file) && statSync(file).isFile()) {
-      return { status: 200, headers: { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream' }, body: readFileSync(file) }
-    }
-  }
-  return empty(404)
 }

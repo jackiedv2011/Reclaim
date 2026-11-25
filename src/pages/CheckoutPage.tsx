@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { CardElement, Elements, useElements, useStripe } from '@stripe/react-stripe-js'
-import type { StripeCardElementChangeEvent, StripeCardElementOptions } from '@stripe/stripe-js'
+import type { Stripe, StripeCardElement, StripeCardElementChangeEvent, StripeCardElementOptions } from '@stripe/stripe-js'
 import { ArrowLeft, BadgeCheck, Check, CreditCard, Lock, ShieldCheck } from 'lucide-react'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { PLAN_LABEL, PLAN_PITCH, PLAN_PRICE_USD, PLAN_SUCCESS_FEE, FLAT_BREAK_EVEN, planOf, type Plan } from '@/lib/plans'
 import { getStripe, STRIPE_IS_TEST_MODE } from '@/billing/stripe'
 import { changePlan, confirmSubscription, subscribe, type BillingResult } from '@/billing/api'
+import { UpdateCardForm } from '@/components/billing/UpdateCardForm'
 import { ReclaimLogo } from '@/components/ReclaimLogo'
 import { useTheme } from '@/workspace/theme'
 import '@/workspace/workspace.css'
@@ -19,6 +20,12 @@ function planFromUrl(): PaidPlan | null {
   const p = new URLSearchParams(window.location.search).get('plan')
   return p === 'growth' || p === 'flat' ? p : null
 }
+
+/** `/checkout?card=update`: a subscriber replacing the card on file. */
+const isCardUpdate = () => new URLSearchParams(window.location.search).get('card') === 'update'
+
+/** Stripe.js blocked or offline leaves no card form; the page says so rather than failing. */
+const loadCardForm = () => getStripe().catch(() => null)
 
 /** Stripe's card field lives in an iframe and cannot read CSS variables, so it is handed the resolved colours. */
 function cardOptions(): StripeCardElementOptions {
@@ -73,6 +80,18 @@ function PaymentForm({ plan, email, defaultName, theme, onDone }: { plan: PaidPl
     const card = elements.getElement(CardElement)
     if (!card) return
     setBusy(true)
+    try {
+      await pay(stripe, card)
+    } catch {
+      // Stripe.js throws when it can't be reached; the server may or may not have been asked.
+      await refreshAccount()
+      setFormError('Couldn’t reach our payment provider. Check Settings to see whether your plan changed before trying again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const pay = async (stripe: Stripe, card: StripeCardElement) => {
     // The card number is entered in Stripe's own iframe and turned into a token
     // there; it never passes through Reclaim's code or server.
     const result = await stripe.createPaymentMethod({
@@ -81,7 +100,6 @@ function PaymentForm({ plan, email, defaultName, theme, onDone }: { plan: PaidPl
       billing_details: { name: name.trim(), email, address: { postal_code: postal.trim() } },
     })
     if (result.error || !result.paymentMethod.card) {
-      setBusy(false)
       setFormError(result.error?.message ?? 'That card could not be verified. Check the details and try again.')
       return
     }
@@ -93,7 +111,6 @@ function PaymentForm({ plan, email, defaultName, theme, onDone }: { plan: PaidPl
       outcome = challenge.error ? { ok: false, message: `${challenge.error.message ?? 'Your bank didn’t approve the payment.'} Nothing was charged, and your plan hasn’t changed.` } : await confirmSubscription(subscriptionId)
     }
     await refreshAccount()
-    setBusy(false)
     if (!outcome.ok) {
       setFormError(outcome.message)
       return
@@ -203,11 +220,44 @@ function SwitchPlan({ plan, current, onDone }: { plan: PaidPlan; current: PaidPl
       {error ? (
         <div className="wk-alert" role="alert" style={{ marginTop: 12 }}>
           <p>{error}</p>
+          <p>
+            <a className="wk-linklike" href="/checkout?card=update">Update your card</a>
+          </p>
         </div>
       ) : null}
       <button type="button" className="wk-btn" data-variant="primary" style={{ marginTop: 14 }} disabled={busy} onClick={() => void go()}>
         {busy ? 'Switching…' : `Switch to ${PLAN_LABEL[plan]}`}
       </button>
+    </div>
+  )
+}
+
+function UpdateCard({ email, name, theme }: { email: string; name: string; theme: string }) {
+  const { refreshAccount } = useAuth()
+  const [done, setDone] = useState(false)
+  const [options, setOptions] = useState<StripeCardElementOptions>(cardOptions)
+  useEffect(() => setOptions(cardOptions()), [theme])
+  if (!done) {
+    return (
+      <UpdateCardForm
+        email={email}
+        name={name}
+        options={options}
+        onDone={async () => {
+          await refreshAccount()
+          setDone(true)
+        }}
+      />
+    )
+  }
+  return (
+    <div className="wk-card wk-checkout-done" data-testid="card-updated" role="status">
+      <BadgeCheck aria-hidden="true" className="wk-plans-badge" />
+      <h2 className="wk-display wk-h2">Your card is updated</h2>
+      <p className="wk-dim" style={{ marginTop: 10, fontSize: 13.5 }}>Your next bill goes to the new card. Any overdue payment has been made.</p>
+      <a className="wk-btn" data-variant="primary" href="/audit?mode=settings" style={{ marginTop: 16 }}>
+        Back to settings
+      </a>
     </div>
   )
 }
@@ -269,20 +319,30 @@ function Summary({ plan }: { plan: PaidPlan }) {
 export function CheckoutPage() {
   const { user, status } = useAuth()
   const { resolved: theme } = useTheme()
+  const updating = isCardUpdate()
   const plan = planFromUrl()
-  const [stripePromise] = useState(getStripe)
+  const [stripePromise] = useState(loadCardForm)
+  const [cardFormMissing, setCardFormMissing] = useState(false)
   const [receipt, setReceipt] = useState<Receipt | null>(null)
   const [switched, setSwitched] = useState(false)
 
   useEffect(() => {
-    if (!plan) window.location.replace('/audit?mode=plans')
-  }, [plan])
+    if (!plan && !updating) window.location.replace('/audit?mode=plans')
+  }, [plan, updating])
 
   useEffect(() => {
-    document.title = plan ? `Checkout — Reclaim ${PLAN_LABEL[plan]}` : 'Checkout — Reclaim'
-  }, [plan])
+    let cancelled = false
+    void getStripe().catch(() => !cancelled && setCardFormMissing(true))
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
-  if (!plan || status === 'loading') return <main className="wk wk-checkout" aria-busy="true" />
+  useEffect(() => {
+    document.title = updating ? 'Update your card — Reclaim' : plan ? `Checkout — Reclaim ${PLAN_LABEL[plan]}` : 'Checkout — Reclaim'
+  }, [plan, updating])
+
+  if ((!plan && !updating) || status === 'loading') return <main className="wk wk-checkout" aria-busy="true" />
 
   const signedIn = user && !user.isGuest
   const current = signedIn ? planOf(user.plan) : null
@@ -297,9 +357,9 @@ export function CheckoutPage() {
           <Lock aria-hidden="true" />
           Secure checkout
         </span>
-        <a className="wk-btn" data-variant="ghost" data-size="sm" href="/audit?mode=plans">
+        <a className="wk-btn" data-variant="ghost" data-size="sm" href={updating ? '/audit?mode=settings' : '/audit?mode=plans'}>
           <ArrowLeft aria-hidden="true" />
-          Back to plans
+          {updating ? 'Back to settings' : 'Back to plans'}
         </a>
       </header>
 
@@ -309,6 +369,31 @@ export function CheckoutPage() {
         </div>
       ) : null}
 
+      {cardFormMissing ? (
+        <div className="wk-alert" role="alert">
+          <p>The card form couldn’t load from Stripe. Check your connection (or an ad blocker) and reload this page. Nothing was charged.</p>
+        </div>
+      ) : null}
+
+      {updating || !plan ? (
+        <div className="wk-checkout-grid">
+          <section className="wk-checkout-main">
+            <h1 className="wk-display wk-h1">Update your card</h1>
+            {signedIn ? (
+              <Elements stripe={stripePromise}>
+                <UpdateCard email={user.email} name={user.name} theme={theme} />
+              </Elements>
+            ) : (
+              <div className="wk-card">
+                <p style={{ fontWeight: 500 }}>Log in to change the card on your account.</p>
+                <a className="wk-btn" data-variant="primary" href={`/login?next=${encodeURIComponent('/checkout?card=update')}`} style={{ marginTop: 14 }}>
+                  Log in
+                </a>
+              </div>
+            )}
+          </section>
+        </div>
+      ) : (
       <div className="wk-checkout-grid">
         <section className="wk-checkout-main">
           <h1 className="wk-display wk-h1">Start Reclaim {PLAN_LABEL[plan]}</h1>
@@ -359,6 +444,7 @@ export function CheckoutPage() {
         </section>
         <Summary plan={plan} />
       </div>
+      )}
     </main>
   )
 }

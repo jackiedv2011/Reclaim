@@ -428,6 +428,226 @@ describe('deleting an account', () => {
   })
 })
 
+describe('a price that cannot be identified', () => {
+  const tracked = () => [...stripe.subscriptions.values()][0]
+  /** A restarted server on the same database: nothing cached in memory. */
+  async function restart() {
+    const db = app.db
+    await app.close()
+    app = createApp({ config: loadConfig(env), db, stripe, google: null, drafts: null, quickbooks: null })
+    base = `http://127.0.0.1:${await app.listen(0)}`
+  }
+  const send = async () => {
+    const statuses: number[] = []
+    const queued = stripe.drainSigned(WHSEC)
+    for (const { body, signature } of queued) statuses.push((await fetch(`${base}/api/billing/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signature }, body })).status)
+    return { statuses, queued }
+  }
+
+  it('a renewal survives a price-lookup outage: the stored price says which plan it is', async () => {
+    const client = await signedIn()
+    await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_visa' })
+    await deliver()
+    await restart()
+    stripe.hideLookupKeys = true
+    stripe.failOn.set('findPrice', new StripeError(500, 'api_error', null, 'down'))
+    stripe.endPeriod()
+    expect((await send()).statuses.every((s) => s === 200)).toBe(true)
+    expect(await plan(client)).toBe('growth')
+  })
+
+  it('without a stored price, a failed lookup answers 500, changes nothing, and Stripe’s retry is handled', async () => {
+    const client = await signedIn()
+    await client.post('/api/billing/subscribe', { plan: 'flat', paymentMethodId: 'pm_card_visa' })
+    await deliver()
+    app.db.exec('DELETE FROM billing_prices')
+    tracked().metadata = {}
+    await restart()
+    stripe.hideLookupKeys = true
+    stripe.failOn.set('findPrice', new StripeError(500, 'api_error', null, 'down'))
+    stripe.endPeriod()
+    const { statuses, queued } = await send()
+    expect(statuses.every((s) => s === 500)).toBe(true)
+    expect(await plan(client)).toBe('flat')
+    stripe.failOn.clear()
+    for (const { body, signature } of queued) {
+      const res = await fetch(`${base}/api/billing/webhook`, { method: 'POST', headers: { 'Stripe-Signature': signature }, body })
+      expect([res.status, ((await res.json()) as { duplicate?: boolean }).duplicate]).toEqual([200, undefined])
+    }
+    expect(await plan(client)).toBe('flat')
+    expect((await client.get('/api/billing')).body.status).toBe('active')
+  })
+
+  it('a price replaced under the same lookup key does not downgrade existing subscribers', async () => {
+    const client = await signedIn()
+    await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_visa' })
+    await deliver()
+    app.db.exec('DELETE FROM billing_prices')
+    tracked().metadata = {}
+    stripe.prices.get(tracked().priceId)!.lookupKey = 'retired'
+    stripe.addPrice('reclaim_growth_monthly', 1500)
+    await restart()
+    stripe.endPeriod()
+    await deliver()
+    expect(await plan(client)).toBe('growth')
+    expect((await client.get('/api/billing')).body.status).toBe('active')
+    // And it still ends normally.
+    await client.post('/api/billing/cancel')
+    stripe.endPeriod()
+    await deliver()
+    expect(await plan(client)).toBe('free')
+  })
+})
+
+describe('one live subscription per account', () => {
+  const live = () => [...stripe.subscriptions.values()].filter((s) => !['canceled', 'incomplete_expired'].includes(s.status))
+
+  it('overlapping subscribes charge once', async () => {
+    const client = await signedIn()
+    stripe.latency = 15
+    const results = await Promise.all([
+      client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_visa' }),
+      client.post('/api/billing/subscribe', { plan: 'flat', paymentMethodId: 'pm_card_mastercard' }),
+    ])
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409])
+    expect(live()).toHaveLength(1)
+  })
+
+  it('a double click on a 3-D Secure card returns the same payment, not a second one', async () => {
+    const client = await signedIn()
+    const body = { plan: 'growth', paymentMethodId: 'pm_card_authenticationRequired' }
+    const [a, b] = await Promise.all([client.post('/api/billing/subscribe', body), client.post('/api/billing/subscribe', body)])
+    expect(a.body.subscriptionId).toBe(b.body.subscriptionId)
+    expect(live()).toHaveLength(1)
+  })
+
+  it('a second 3-D Secure attempt cancels the first, so both can never be paid', async () => {
+    const client = await signedIn()
+    const first = await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_authenticationRequired' })
+    const second = await client.post('/api/billing/subscribe', { plan: 'flat', paymentMethodId: 'pm_card_authenticationRequired' })
+    expect(second.body.subscriptionId).not.toBe(first.body.subscriptionId)
+    expect(() => stripe.completeAuthentication(first.body.subscriptionId)).toThrow()
+    stripe.completeAuthentication(second.body.subscriptionId)
+    await deliver()
+    expect(await plan(client)).toBe('flat')
+    expect(live()).toHaveLength(1)
+  })
+
+  it('an attempt paid before its event arrives is adopted instead of buying again', async () => {
+    const client = await signedIn()
+    const first = await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_authenticationRequired' })
+    stripe.completeAuthentication(first.body.subscriptionId)
+    const again = await client.post('/api/billing/subscribe', { plan: 'flat', paymentMethodId: 'pm_card_visa' })
+    expect(again.status).toBe(409)
+    expect(await plan(client)).toBe('growth')
+    expect(live()).toHaveLength(1)
+  })
+
+  it('a duplicate left by an older version is cancelled when Stripe reports it', async () => {
+    const client = await signedIn()
+    await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_visa' })
+    const tracked = live()[0]
+    const extra = await stripe.createSubscription({ customerId: tracked.customer, priceId: tracked.priceId, paymentMethodId: 'pm_card_visa', userId: tracked.metadata.reclaim_user_id, plan: 'growth' }, 'other')
+    await deliver()
+    expect(live().map((s) => s.id)).toEqual([tracked.id])
+    expect(stripe.subscriptions.get(extra.id)!.status).toBe('canceled')
+    expect(await plan(client)).toBe('growth')
+  })
+
+  it('when the tracked subscription ends but another is still paid, the paid one takes over', async () => {
+    const client = await signedIn()
+    await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_visa' })
+    const tracked = live()[0]
+    const flat = [...stripe.prices.values()].find((p) => p.lookupKey === 'reclaim_flat_monthly')!
+    // Made by an operator in the dashboard: no Reclaim metadata, so it is left alone.
+    const manual = await stripe.createSubscription({ customerId: tracked.customer, priceId: flat.id, paymentMethodId: 'pm_card_visa', userId: 'operator', plan: 'flat' }, 'manual')
+    await deliver()
+    expect(await plan(client)).toBe('growth')
+    stripe.exhaustRetries(tracked.id)
+    await deliver()
+    expect(await plan(client)).toBe('flat')
+    expect(live().map((s) => s.id)).toEqual([manual.id])
+  })
+
+  it('deleting the account cancels every subscription that could still charge', async () => {
+    const client = await signedIn()
+    await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_visa' })
+    const tracked = live()[0]
+    for (const status of ['active', 'trialing', 'past_due', 'unpaid', 'paused', 'incomplete'] as const) {
+      const extra = await stripe.createSubscription({ customerId: tracked.customer, priceId: tracked.priceId, paymentMethodId: 'pm_card_visa', userId: 'someone', plan: 'growth' }, `extra-${status}`)
+      stripe.subscriptions.get(extra.id)!.status = status
+    }
+    expect((await client.post('/api/account/delete', { confirmEmail: 'pilot@example.com' })).status).toBe(200)
+    expect(live()).toEqual([])
+  })
+
+  it('a subscribe that overlaps deletion cannot leave a subscription behind', async () => {
+    const client = await signedIn()
+    await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_authenticationRequired' })
+    stripe.latency = 15
+    const [deleted] = await Promise.all([client.post('/api/account/delete', { confirmEmail: 'pilot@example.com' }), client.post('/api/billing/subscribe', { plan: 'flat', paymentMethodId: 'pm_card_visa' })])
+    expect(deleted.status).toBe(200)
+    expect(live()).toEqual([])
+  })
+})
+
+describe('updating the card', () => {
+  async function pastDue(status: 'past_due' | 'unpaid' = 'past_due') {
+    const client = await signedIn()
+    await client.post('/api/billing/subscribe', { plan: 'growth', paymentMethodId: 'pm_card_visa' })
+    const sub = [...stripe.subscriptions.values()][0]
+    stripe.failRenewal(sub.id)
+    sub.status = status
+    await deliver()
+    return { client, sub }
+  }
+
+  it('a past-due customer’s new card is saved and the open bill is paid with it', async () => {
+    const { client, sub } = await pastDue()
+    const res = await client.post('/api/billing/card', { paymentMethodId: 'pm_card_new' })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ status: 'active', billing: { status: 'active' } })
+    expect(sub.defaultPaymentMethod).toBe('pm_card_new')
+    expect(stripe.calls).toContain('payInvoice')
+    expect([...stripe.customers.values()][0].defaultPaymentMethod).toBe('pm_card_new')
+  })
+
+  it('3-D Secure on the new card is finished in the browser, then confirmed', async () => {
+    const { client, sub } = await pastDue()
+    const res = await client.post('/api/billing/card', { paymentMethodId: 'pm_card_authenticationRequired' })
+    expect(res.body).toMatchObject({ status: 'requires_action', clientSecret: expect.any(String), subscriptionId: sub.id })
+    expect((await client.post('/api/billing/card/confirm', { subscriptionId: sub.id })).status).toBe(402)
+    stripe.completeAuthentication(sub.id)
+    const confirmed = await client.post('/api/billing/card/confirm', { subscriptionId: sub.id })
+    expect(confirmed.status).toBe(200)
+    expect(confirmed.body.billing.status).toBe('active')
+  })
+
+  it('a declined new card says so and keeps the plan during Stripe’s retries', async () => {
+    const { client } = await pastDue()
+    const res = await client.post('/api/billing/card', { paymentMethodId: 'pm_card_chargeDeclined' })
+    expect(res.status).toBe(402)
+    expect(res.body.message).toMatch(/declined/)
+    expect(await plan(client)).toBe('growth')
+  })
+
+  it('an unpaid subscription comes back, and a paid-up one changes card without being charged', async () => {
+    const { client } = await pastDue('unpaid')
+    expect(await plan(client)).toBe('free')
+    expect((await client.post('/api/billing/card', { paymentMethodId: 'pm_card_new' })).status).toBe(200)
+    expect(await plan(client)).toBe('growth')
+    stripe.calls = []
+    expect((await client.post('/api/billing/card', { paymentMethodId: 'pm_card_newer' })).status).toBe(200)
+    expect(stripe.calls).not.toContain('payInvoice')
+  })
+
+  it('needs a subscription and a Stripe card id', async () => {
+    const client = await signedIn()
+    expect((await client.post('/api/billing/card', { paymentMethodId: 'pm_card_visa' })).status).toBe(409)
+    expect((await client.post('/api/billing/card', { paymentMethodId: '4242' })).status).toBe(400)
+  })
+})
+
 describe('Stripe REST client', () => {
   it('form-encodes nested params the way Stripe expects', () => {
     expect(decodeURIComponent(formEncode({ items: [{ price: 'p_1' }], expand: ['latest_invoice.payment_intent'], metadata: { a: 'b' }, skip: undefined }))).toBe(

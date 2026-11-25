@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useAuth } from '@/lib/auth/AuthContext'
+import { messageOf } from '@/lib/auth/apiAuthService'
 import { AuthSplit, SplitField } from '@/pages/AuthSplit'
 import { DevInbox } from '@/pages/DevInbox'
 
@@ -20,9 +21,14 @@ export function ForgotPasswordPage() {
     }
     setError(null)
     setSubmitting(true)
-    await requestPasswordReset(email.trim())
-    setSubmitting(false)
-    setSubmitted(true)
+    try {
+      await requestPasswordReset(email.trim())
+      setSubmitted(true)
+    } catch (err) {
+      setError(messageOf(err))
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (

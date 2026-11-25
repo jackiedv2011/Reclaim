@@ -11,13 +11,15 @@
  * account's saved project (evidence gate, customer approval, amount), and only
  * with the exact subject, message and recipient the customer approved. Each
  * case can be sent once: a row in `gmail_sends` is reserved before Gmail is
- * called, so a double click or a retry can never email a vendor twice.
+ * called, so a double click or a retry can never email a vendor twice. The same
+ * payments in another audit are recognised too, and need the customer's word.
  */
 import type { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 import { HttpError, json, redirect, serializeCookie, type Request, type Response } from './http.ts'
 import { newToken, openSecret, sealSecret } from './crypto.ts'
 import { PLAN_LIMITS, planOf } from './plans.ts'
+import { rowFingerprint } from './uploads.ts'
 import { authorizedFollowUpFacts, authorizedSendFacts, requestGeneration } from './caseFacts.ts'
 
 export const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send'
@@ -31,6 +33,8 @@ const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token'
 const REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke'
 const USERINFO_ENDPOINT = 'https://openidconnect.googleapis.com/v1/userinfo'
 const SEND_ENDPOINT = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send'
+/** Google answers in seconds. Past this the outcome is unknown, and the customer is told so. */
+const GOOGLE_TIMEOUT_MS = 60_000
 
 export interface GmailGrant {
   refreshToken: string
@@ -74,6 +78,7 @@ export function createGmailClient(clientId: string, clientSecret: string, fetchI
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: new URLSearchParams({ ...body, client_id: clientId, client_secret: clientSecret }),
+      signal: AbortSignal.timeout(GOOGLE_TIMEOUT_MS),
     })
     // Never include the response body in errors: it can echo token material.
     if (res.status === 400 || res.status === 401) throw new GmailReconnectError(`Google refused the token request (${res.status}).`)
@@ -120,6 +125,7 @@ export function createGmailClient(clientId: string, clientSecret: string, fetchI
           method: 'POST',
           headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify(threadId ? { raw, threadId } : { raw }),
+          signal: AbortSignal.timeout(GOOGLE_TIMEOUT_MS),
         })
       } catch {
         throw new GmailSendError('Gmail didn’t answer, so Reclaim can’t tell whether the email went out.', 'uncertain')
@@ -128,7 +134,7 @@ export function createGmailClient(clientId: string, clientSecret: string, fetchI
       if (res.status === 400) throw new GmailSendError('Gmail rejected the message. Check the email addresses and try again.', 'rejected')
       if (res.status === 403 || res.status === 429) throw new GmailSendError('Gmail refused to send right now (a permission or sending limit on your Google account). Nothing was sent.', 'rejected')
       if (!res.ok) throw new GmailSendError(`Gmail had a problem (${res.status}), so Reclaim can’t tell whether the email went out.`, 'uncertain')
-      const sent = (await res.json().catch(() => ({}))) as { id?: string; threadId?: string }
+      const sent = ((await res.json().catch(() => null)) ?? {}) as { id?: string; threadId?: string }
       if (!sent.id) throw new GmailSendError('Gmail didn’t return a message id, so Reclaim can’t confirm the email went out.', 'uncertain')
       return { id: sent.id, threadId: sent.threadId ?? null }
     },
@@ -209,6 +215,8 @@ export interface GmailRouteDeps {
   userFor(req: Request): GmailUser | null
   /** The account's saved audit, opened (audits are encrypted at rest), or null. */
   getProject(userId: string, projectId: string): Record<string, unknown> | null
+  /** Every audit on the account that can be opened: the same payments may be in more than one. */
+  listProjects?(userId: string): Record<string, unknown>[]
   /** Per-account send limiter: true while under the limit. */
   allowSend(userId: string): boolean
   /** The clock, for tests. */
@@ -224,6 +232,47 @@ export interface GmailRoutes {
 /** Follow-ups per case, and the least time between two emails on one case. */
 export const MAX_FOLLOW_UPS = 5
 export const MIN_FOLLOW_UP_GAP_MS = 24 * 60 * 60 * 1000
+
+/** A send still marked `sending` after this long has lost its process: its outcome is unknown. */
+export const STALE_SEND_MS = 10 * 60 * 1000
+
+/** Which payments a request was about, whatever audit it came from. */
+interface CasePayments {
+  vendor: string
+  /** One fingerprint per payment row (invoice, date, amount), repeats kept. */
+  payments: string[]
+}
+
+function casePayments(project: Record<string, unknown> | null, findingId: string): CasePayments | null {
+  const env = project?.environment as { records?: Array<Record<string, unknown>>; result?: { findings?: Array<Record<string, unknown>> } } | undefined
+  const finding = env?.result?.findings?.find((f) => f.id === findingId)
+  if (!finding) return null
+  const records = new Map((env?.records ?? []).map((r) => [r.id, r]))
+  const payments: string[] = []
+  for (const ref of (finding.relatedRecords as Array<{ id: string }> | undefined) ?? []) {
+    const r = records.get(ref.id) ?? (ref as unknown as Record<string, unknown>)
+    if (typeof r.paymentDate !== 'string' || typeof r.amountPaid !== 'number') continue
+    payments.push(rowFingerprint({ vendor: '', invoiceNumber: typeof r.invoiceNumber === 'string' ? r.invoiceNumber : null, paymentDate: r.paymentDate, amountPaid: r.amountPaid }))
+  }
+  return payments.length ? { vendor: String(finding.vendor ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ''), payments } : null
+}
+
+/**
+ * The same money asked for again: at least two payments in common, or all of
+ * the smaller case. Sharing only one of several (the original payment, with a
+ * new duplicate of it) is a different request.
+ */
+function samePayments(a: CasePayments, b: CasePayments): boolean {
+  const left = [...b.payments]
+  let shared = 0
+  for (const payment of a.payments) {
+    const at = left.indexOf(payment)
+    if (at === -1) continue
+    left.splice(at, 1)
+    shared += 1
+  }
+  return shared >= 2 || (shared > 0 && shared === Math.min(a.payments.length, b.payments.length))
+}
 
 type ConnectionRow = { realm_id: string; company_name: string; tokens_sealed: string; connected_at: number }
 type SendStatus = 'sending' | 'sent' | 'uncertain'
@@ -252,7 +301,17 @@ export function exportGmail(db: DatabaseSync, userId: string) {
     : [])
   const view = (kind: 'request' | 'follow-up') => (r: ReturnType<typeof rows>[number]) => ({ kind, auditId: r.project_id, findingId: r.finding_id, gmailMessageId: r.message_id, from: r.from_email, to: r.to_email, cc: r.cc ? r.cc.split(',') : [], sentAt: new Date(r.sent_at).toISOString() })
   const sent = [...rows('gmail_sends').map(view('request')), ...rows('gmail_follow_ups').map(view('follow-up'))].sort((a, b) => a.sentAt.localeCompare(b.sentAt))
-  return conn || sent.length ? { connectedAddress: conn?.company_name ?? null, connectedAt: conn ? new Date(conn.connected_at).toISOString() : null, sent } : null
+  const iso = (at: number | null) => (at === null ? null : new Date(at).toISOString())
+  // Sends Gmail never confirmed: they may or may not have reached the vendor.
+  const unconfirmed = (['gmail_sends', 'gmail_follow_ups'] as const).filter((t) => tables.includes(t)).flatMap((table) =>
+    (db.prepare(`SELECT project_id, finding_id, status, from_email, to_email, cc, created_at FROM ${table} WHERE user_id = ? AND status != 'sent' ORDER BY created_at`).all(userId) as Array<{ project_id: string; finding_id: string; status: string; from_email: string; to_email: string; cc: string; created_at: number }>)
+      .map((r) => ({ kind: table === 'gmail_sends' ? 'request' : 'follow-up', auditId: r.project_id, findingId: r.finding_id, status: r.status, from: r.from_email, to: r.to_email, cc: r.cc ? r.cc.split(',') : [], startedAt: iso(r.created_at) })))
+  // Every attempt, including the ones Gmail refused (those leave no send behind).
+  const attempts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'gmail_attempts'").get()
+    ? (db.prepare('SELECT project_id, finding_id, kind, actor, status, at, resolved_at FROM gmail_attempts WHERE user_id = ? ORDER BY id').all(userId) as Array<{ project_id: string; finding_id: string; kind: string; actor: string; status: string; at: number; resolved_at: number | null }>)
+        .map((r) => ({ kind: r.kind, auditId: r.project_id, findingId: r.finding_id, by: r.actor, status: r.status, startedAt: iso(r.at), finishedAt: iso(r.resolved_at) }))
+    : []
+  return conn || sent.length || unconfirmed.length || attempts.length ? { connectedAddress: conn?.company_name ?? null, connectedAt: conn ? new Date(conn.connected_at).toISOString() : null, sent, unconfirmed, attempts } : null
 }
 
 /**
@@ -278,6 +337,8 @@ export function createGmailRoutes(deps: GmailRouteDeps): GmailRoutes {
       amount_minor INTEGER NOT NULL,
       created_at INTEGER NOT NULL,
       sent_at INTEGER,
+      -- Which payments it asked for (casePayments), so another audit of the same ledger is recognised even after this one is deleted.
+      payments TEXT,
       PRIMARY KEY (user_id, project_id, finding_id, generation)
     );
     -- Follow-ups on a sent case, numbered 1, 2, 3… and reserved the same way.
@@ -325,10 +386,28 @@ export function createGmailRoutes(deps: GmailRouteDeps): GmailRoutes {
     for (const [table, columns] of legacy) {
       db.exec(`INSERT INTO ${table} (${columns}) SELECT ${columns} FROM ${table}_legacy; DROP TABLE ${table}_legacy`)
     }
+    if (!(db.prepare("SELECT name FROM pragma_table_info('gmail_sends')").all() as Array<{ name: string }>).some(({ name }) => name === 'payments')) db.exec('ALTER TABLE gmail_sends ADD COLUMN payments TEXT')
     db.exec('COMMIT')
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
+  }
+  // A send is only `sending` while one process waits for Gmail. Any left from an
+  // earlier process were cut off: whether they went out is unknown, which the
+  // customer settles by checking their Sent folder, like any uncertain send.
+  function expireSends(before: number): void {
+    for (const table of ['gmail_sends', 'gmail_follow_ups']) db.prepare(`UPDATE ${table} SET status = 'uncertain' WHERE status = 'sending' AND created_at < ?`).run(before)
+    db.prepare("UPDATE gmail_attempts SET status = 'uncertain', resolved_at = ? WHERE status = 'sending' AND at < ?").run(now(), before)
+  }
+  expireSends(Number.MAX_SAFE_INTEGER)
+  // Requests sent before payments were stored with them: filled in while their audit still exists.
+  for (const row of db.prepare('SELECT user_id, project_id, finding_id, generation FROM gmail_sends WHERE payments IS NULL').all() as Array<{ user_id: string; project_id: string; finding_id: string; generation: number }>) {
+    try {
+      const payments = casePayments(deps.getProject(row.user_id, row.project_id), row.finding_id)
+      if (payments) db.prepare('UPDATE gmail_sends SET payments = ? WHERE user_id = ? AND project_id = ? AND finding_id = ? AND generation = ?').run(JSON.stringify(payments), row.user_id, row.project_id, row.finding_id, row.generation)
+    } catch {
+      // The audit can't be opened; tried again at the next start.
+    }
   }
   const redirectUri = `${deps.appOrigin}${GMAIL_PATH}/callback`
   const sealContext = (userId: string, sub: string) => `gmail:${userId}:${sub}`
@@ -381,6 +460,27 @@ export function createGmailRoutes(deps: GmailRouteDeps): GmailRoutes {
     const row = connection(user.id)
     if (!row) throw new HttpError(409, 'Connect Gmail first.', 'gmail_not_connected')
     return { user, row, gmail }
+  }
+
+  /** An earlier request, from another case on this account, for the same payments to the same vendor. */
+  function earlierRequest(userId: string, projectId: string, findingId: string, mine: CasePayments, to: string): { projectId: string; findingId: string; to: string | null; sentAt: number | null } | null {
+    const matches = (other: CasePayments, otherTo: string | null) => samePayments(mine, other) && (other.vendor === mine.vendor || otherTo?.trim().toLowerCase() === to.toLowerCase())
+    const sends = db.prepare("SELECT project_id, finding_id, to_email, sent_at, payments FROM gmail_sends WHERE user_id = ? AND payments IS NOT NULL AND status IN ('sending', 'sent', 'uncertain') ORDER BY created_at DESC").all(userId) as Array<{ project_id: string; finding_id: string; to_email: string; sent_at: number | null; payments: string }>
+    for (const send of sends) {
+      if (send.project_id === projectId && send.finding_id === findingId) continue
+      if (matches(JSON.parse(send.payments) as CasePayments, send.to_email)) return { projectId: send.project_id, findingId: send.finding_id, to: send.to_email, sentAt: send.sent_at }
+    }
+    // Requests the customer sent themselves and recorded.
+    for (const project of deps.listProjects?.(userId) ?? []) {
+      if (project.mode === 'sample') continue
+      const states = ((project.environment as { caseStates?: Record<string, { recoveryStage?: string | null; recoveryRequestedAt?: number | null; recoveryRecipientEmail?: string | null }> } | undefined)?.caseStates ?? {})
+      for (const [otherFinding, state] of Object.entries(states)) {
+        if ((project.id === projectId && otherFinding === findingId) || !(state?.recoveryRequestedAt || state?.recoveryStage === 'requested' || state?.recoveryStage === 'recovered')) continue
+        const other = casePayments(project, otherFinding)
+        if (other && matches(other, state.recoveryRecipientEmail ?? null)) return { projectId: String(project.id), findingId: otherFinding, to: state.recoveryRecipientEmail ?? null, sentAt: state.recoveryRequestedAt ?? null }
+      }
+    }
+    return null
   }
 
   /** The email fields from the browser, validated. Throws a 400 naming each bad field. */
@@ -442,6 +542,7 @@ export function createGmailRoutes(deps: GmailRouteDeps): GmailRoutes {
     const path = req.url.pathname
     if (path !== GMAIL_PATH && !path.startsWith(`${GMAIL_PATH}/`)) return null
     const method = req.method
+    expireSends(now() - STALE_SEND_MS)
 
     if (path === GMAIL_PATH && method === 'GET') {
       const user = requireUser(req)
@@ -540,11 +641,19 @@ export function createGmailRoutes(deps: GmailRouteDeps): GmailRoutes {
         throw new HttpError(409, 'The vendor email differs from the approved one. Approve the request with this address first.', 'not_approved_version')
       }
 
+      // No await from here to the reservation, so two audits sent together can't both pass.
+      const payments = casePayments(project, findingId)
+      const repeat = payments && input.confirmRepeat !== true ? earlierRequest(user.id, projectId, findingId, payments, to) : null
+      if (repeat) {
+        const when = repeat.sentAt ? ` on ${new Date(repeat.sentAt).toISOString().slice(0, 10)}` : ''
+        return json(409, { message: `These payments were already requested from this vendor in another case${when}. Nothing was sent. Check that request before asking again.`, code: 'gmail_payments_already_requested', earlier: repeat })
+      }
+
       const reserved = earlier?.status === 'uncertain'
-        ? db.prepare("UPDATE gmail_sends SET status = 'sending', from_email = ?, to_email = ?, cc = ?, amount_minor = ?, created_at = ? WHERE user_id = ? AND project_id = ? AND finding_id = ? AND generation = ? AND status = 'uncertain'")
-            .run(row.company_name, to, cc.join(','), Math.round(amount * 100), now(), ...key)
-        : db.prepare("INSERT INTO gmail_sends (user_id, project_id, finding_id, generation, status, from_email, to_email, cc, amount_minor, created_at) VALUES (?, ?, ?, ?, 'sending', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
-            .run(...key, row.company_name, to, cc.join(','), Math.round(amount * 100), now())
+        ? db.prepare("UPDATE gmail_sends SET status = 'sending', from_email = ?, to_email = ?, cc = ?, amount_minor = ?, created_at = ?, payments = ? WHERE user_id = ? AND project_id = ? AND finding_id = ? AND generation = ? AND status = 'uncertain'")
+            .run(row.company_name, to, cc.join(','), Math.round(amount * 100), now(), payments && JSON.stringify(payments), ...key)
+        : db.prepare("INSERT INTO gmail_sends (user_id, project_id, finding_id, generation, status, from_email, to_email, cc, amount_minor, created_at, payments) VALUES (?, ?, ?, ?, 'sending', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
+            .run(...key, row.company_name, to, cc.join(','), Math.round(amount * 100), now(), payments && JSON.stringify(payments))
       if (Number(reserved.changes) !== 1) throw new HttpError(409, 'This request is being sent right now.', 'gmail_send_in_progress')
       const finishAttempt = trackAttempt(user, projectId, findingId, 'request')
       await deliver(ctx, { from: row.company_name, fromName: `${user.first_name} ${user.last_name}`.trim(), to, cc, subject, body, evidenceAttachment: approved.evidenceAttachment }, null, (status, sent) => {
