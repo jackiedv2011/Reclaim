@@ -57,6 +57,8 @@ const trace = (res: Response) => {
 export class QuickBooksReconnectError extends Error {}
 /** The access token was refused; refresh and retry once. */
 export class QuickBooksUnauthorizedError extends Error {}
+/** Intuit is throttling this company (HTTP 429); back off and retry later. */
+export class QuickBooksRateLimitError extends Error {}
 
 const AUTHORIZE_URL = 'https://appcenter.intuit.com/connect/oauth2'
 const TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer'
@@ -104,7 +106,7 @@ export function createQuickBooksClient(clientId: string, clientSecret: string, f
     for (const [k, v] of Object.entries({ ...params, minorversion: MINOR_VERSION })) url.searchParams.set(k, v)
     const res = await fetchImpl(url, { method: 'GET', headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } })
     if (res.status === 401) throw new QuickBooksUnauthorizedError(`QuickBooks refused the access token (401${trace(res)}).`)
-    if (res.status === 429) throw new Error(`QuickBooks is limiting requests for this company (429${trace(res)}).`)
+    if (res.status === 429) throw new QuickBooksRateLimitError(`QuickBooks is limiting requests for this company (429${trace(res)}).`)
     if (!res.ok) throw new Error(`QuickBooks read failed (${res.status}${trace(res)}).`)
     return res.json() as Promise<QboObject>
   }

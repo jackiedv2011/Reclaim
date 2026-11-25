@@ -37,6 +37,7 @@ import { confirmMapping, resolveMappingForUpload, type MappingResolution, type S
 import { FINANCIAL_CONTRACT_VERSION, SOURCE_NORMALIZATION_VERSION } from '../src/contracts/financial.ts'
 import type { ImportCoverage, SourceRecord, SourceRecordKind, SourceRecordStatus, TenantContext } from '../src/contracts/financial.ts'
 import type { APRecord, Finding, ImportRowResult, ImportRowStatus } from '../src/types.ts'
+import type { QuickBooksFacts } from './quickbooksFacts.ts'
 
 export type LedgerKeys = { current: Buffer; previous: Buffer | null } | null
 
@@ -156,6 +157,19 @@ interface ImportDetail {
   fileChecksum: string
   coverage: ImportCoverage
   rowResults: Array<Omit<ImportRowResult, 'raw'>>
+  connector?: ConnectorDetail
+}
+
+/** Where a connector import came from. Sealed with the import; never holds tokens. */
+export interface ConnectorDetail {
+  system: 'quickbooks'
+  realmId: string
+  mode: 'full' | 'changes'
+  /** Epoch ms of the pull a change set is relative to; null for a full pull. */
+  since: number | null
+  pulledAt: number
+  /** Transactions the source says were deleted since `since`. Reported for review; stored records are never rewritten. */
+  removedInSource: Array<{ txnType: string; id: string }>
 }
 
 const OPTIONAL_FIELDS: Array<[keyof APRecord, string]> = [
@@ -277,8 +291,37 @@ export function importCsv(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContext
   if (resolution.status === 'pending_confirmation') throw new LedgerError(409, 'Confirm how these columns map before importing.', 'mapping_unconfirmed', resolution.issues)
 
   const parsed = parseCsv(applyMapping(input.csv, resolution.mapping))
+  return storeParsedImport(db, keys, ctx, {
+    parsed,
+    sourceSystem: 'csv_upload',
+    provenance: 'customer_uploaded',
+    reportType: resolution.proposal.reportType,
+    mapping: { status: resolution.status, mappingId: resolution.mappingId, version: resolution.version, pendingFields: [] },
+    freshAsOf: null,
+    sourceLabel,
+    identityScope: null,
+    connector: null,
+  }, now)
+}
+
+interface StoreParsedInput {
+  parsed: ReturnType<typeof parseCsv>
+  sourceSystem: SourceRecord['sourceSystem']
+  provenance: SourceRecord['provenance']
+  reportType: ImportCoverage['reportType']
+  mapping: ImportCoverage['mapping']
+  freshAsOf: string | null
+  sourceLabel: string
+  /** Prefix on every identity key, e.g. the QuickBooks company, so two companies' "BillPayment 12" never collide. */
+  identityScope: string | null
+  connector: ConnectorDetail | null
+}
+
+/** One transaction: file-level idempotency, cross-import dedup, sealed insert. Shared by uploads and connector syncs. */
+function storeParsedImport(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContext, input: StoreParsedInput, now: number): ImportCsvResult {
+  const { parsed, sourceLabel } = input
   const fileChecksum = parsed.fileChecksum ?? checksum(parsed.records.map(sourceSignature).join('\n'))
-  const fileHash = blind(keys, ctx.tenantId, 'file', fileChecksum)
+  const fileHash = blind(keys, ctx.tenantId, 'file', input.identityScope ? input.identityScope + '|' + fileChecksum : fileChecksum)
 
   db.exec('BEGIN IMMEDIATE')
   try {
@@ -298,7 +341,8 @@ export function importCsv(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContext
     let repeatedWithinImport = 0
 
     for (const record of parsed.records) {
-      const key = record.identityKey ?? recordIdentity(record)
+      const baseKey = record.identityKey ?? recordIdentity(record)
+      const key = input.identityScope ? input.identityScope + '|' + baseKey : baseKey
       const identityHash = blind(keys, ctx.tenantId, 'identity', key)
       let previous = seen.get(identityHash)
       if (previous) repeatedWithinImport++
@@ -333,24 +377,24 @@ export function importCsv(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContext
 
     const coverage = computeImportCoverage({
       importId,
-      sourceSystem: 'csv_upload',
+      sourceSystem: input.sourceSystem,
       parse: { records: parsed.records, detectedColumns: parsed.detectedColumns, skippedCount: parsed.skippedCount, rowResults: parsed.rowResults },
-      reportType: resolution.proposal.reportType,
-      mapping: { status: resolution.status, mappingId: resolution.mappingId, version: resolution.version, pendingFields: [] },
+      reportType: input.reportType,
+      mapping: input.mapping,
       dedup: { newRecords: accepted.length, alreadyImported, repeatedWithinImport },
-      freshAsOf: null,
+      freshAsOf: input.freshAsOf,
     })
     const sortedResults = rowResults.sort((a, b) => a.rowNumber - b.rowNumber).map(withoutRaw)
-    const detail: ImportDetail = { sourceLabel, fileChecksum, coverage, rowResults: sortedResults }
+    const detail: ImportDetail = { sourceLabel, fileChecksum, coverage, rowResults: sortedResults, ...(input.connector ? { connector: input.connector } : {}) }
     db.prepare(`INSERT INTO ledger_imports (id, tenant_id, actor_user_id, source_system, report_type, file_hash, contract_version, normalization_version,
-      rows_total, rows_accepted, rows_rejected, new_records, detail, created_at) VALUES (?, ?, ?, 'csv_upload', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(importId, ctx.tenantId, ctx.actorUserId, coverage.reportType, fileHash, FINANCIAL_CONTRACT_VERSION, SOURCE_NORMALIZATION_VERSION,
+      rows_total, rows_accepted, rows_rejected, new_records, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(importId, ctx.tenantId, ctx.actorUserId, input.sourceSystem, coverage.reportType, fileHash, FINANCIAL_CONTRACT_VERSION, SOURCE_NORMALIZATION_VERSION,
         coverage.rows.total, coverage.rows.accepted, coverage.rows.rejected, accepted.length, seal(keys, JSON.stringify(detail), importContext(ctx.tenantId, importId)), now)
 
     let seq = (db.prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM source_records WHERE tenant_id = ?').get(ctx.tenantId) as { n: number }).n
     const insert = db.prepare(`INSERT INTO source_records (id, tenant_id, import_id, seq, identity_hash, vendor_hash, source_system, provenance, kind, status,
       currency, amount_minor, payment_date, invoice_date, normalization_version, payload, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'csv_upload', 'customer_uploaded', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     for (const { record, key } of accepted) {
       const { kind, status } = kindAndStatus(record)
       const vendorKey = vendorKeyOf(record)
@@ -367,7 +411,7 @@ export function importCsv(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContext
         sourceRow: record.source?.rowNumber ?? record.rowIndex + 2,
         engine: storeEngine(record),
       }
-      insert.run(record.id, ctx.tenantId, importId, ++seq, blind(keys, ctx.tenantId, 'identity', key), blind(keys, ctx.tenantId, 'vendor', vendorKey), kind, status,
+      insert.run(record.id, ctx.tenantId, importId, ++seq, blind(keys, ctx.tenantId, 'identity', key), blind(keys, ctx.tenantId, 'vendor', vendorKey), input.sourceSystem, input.provenance, kind, status,
         record.currency ? record.currency.toUpperCase() : null, toCents(record.amountPaid), isoDate(record.paymentDate), isoDate(record.invoiceDate),
         SOURCE_NORMALIZATION_VERSION, seal(keys, JSON.stringify(payload), recordContext(ctx.tenantId, record.id)), now)
     }
@@ -388,6 +432,7 @@ export interface ImportSummary {
   createdAt: number
   newRecords: number
   coverage: ImportCoverage
+  connector: ConnectorDetail | null
 }
 
 export function listImports(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContext): ImportSummary[] {
@@ -395,7 +440,7 @@ export function listImports(db: DatabaseSync, keys: LedgerKeys, ctx: TenantConte
   const rows = db.prepare('SELECT id, source_system, new_records, detail, created_at FROM ledger_imports WHERE tenant_id = ? ORDER BY created_at, id').all(ctx.tenantId) as Array<{ id: string; source_system: SourceRecord['sourceSystem']; new_records: number; detail: string; created_at: number }>
   return rows.map((r) => {
     const detail = open<ImportDetail>(keys, r.detail, importContext(ctx.tenantId, r.id))
-    return { importId: r.id, sourceSystem: r.source_system, sourceLabel: detail.sourceLabel, createdAt: r.created_at, newRecords: r.new_records, coverage: detail.coverage }
+    return { importId: r.id, sourceSystem: r.source_system, sourceLabel: detail.sourceLabel, createdAt: r.created_at, newRecords: r.new_records, coverage: detail.coverage, connector: detail.connector ?? null }
   })
 }
 
@@ -637,4 +682,51 @@ export function confirmImportMapping(db: DatabaseSync, ctx: TenantContext, body:
     if (err instanceof MappingConflictError) throw new LedgerError(409, 'This mapping cannot be confirmed as it stands.', 'mapping_conflict', err.issues)
     throw err
   }
+}
+
+// ------------------------------------------------------------------ connector imports
+
+export interface QuickBooksPullInput {
+  /** The QuickBooks company (realm) the pull came from. */
+  realmId: string
+  /** CSV from `toLedgerImport`/`syncLedger`: the adapter's fixed column layout. */
+  csv: string
+  facts: QuickBooksFacts
+}
+
+/**
+ * Stores a QuickBooks pull as connector-authenticated source records, scoped to
+ * the tenant and the QuickBooks company. Same transaction, dedup and sealing
+ * as an upload; the identity of every record is prefixed with the realm so two
+ * companies' "BillPayment 12" never collide. Read-only towards QuickBooks: this
+ * only stores what the adapter already pulled. Returns null for an empty change
+ * set (nothing changed since the last pull).
+ *
+ * QuickBooks has no cleared/settled status in its API, so records keep status
+ * `unknown`; deletions in QuickBooks are reported on the import for review and
+ * never rewrite stored records.
+ */
+export function importQuickBooksPull(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContext, input: QuickBooksPullInput, now = Date.now()): ImportCsvResult | null {
+  requirePermission(ctx, 'ledger:import')
+  if (typeof input.realmId !== 'string' || !/^\d{1,32}$/.test(input.realmId)) throw new LedgerError(400, 'Invalid QuickBooks company id.', 'invalid_realm')
+  if (typeof input.csv !== 'string' || input.csv.length > MAX_CSV_CHARS) throw new LedgerError(413, 'That QuickBooks pull is too large to store at once.', 'csv_too_large')
+  const sync = input.facts?.sync
+  if (sync && sync.realmId !== input.realmId) throw new LedgerError(400, 'The pull belongs to a different QuickBooks company.', 'realm_mismatch')
+  const pulledAt = Number.isFinite(input.facts?.pulledAt) ? input.facts.pulledAt : now
+  const dataLines = input.csv.split(/\r?\n/).slice(1).filter((l) => l.trim() !== '').length
+  if (dataLines === 0) return null
+
+  const parsed = parseCsv(input.csv)
+  const mode = sync?.mode ?? 'full'
+  return storeParsedImport(db, keys, ctx, {
+    parsed,
+    sourceSystem: 'quickbooks',
+    provenance: 'connector_authenticated',
+    reportType: 'quickbooks_ledger',
+    mapping: { status: 'known_format', mappingId: null, version: null, pendingFields: [] },
+    freshAsOf: new Date(pulledAt).toISOString(),
+    sourceLabel: mode === 'changes' ? 'QuickBooks changes' : 'QuickBooks full pull',
+    identityScope: `qbo:${input.realmId}`,
+    connector: { system: 'quickbooks', realmId: input.realmId, mode, since: sync?.since ?? null, pulledAt, removedInSource: (sync?.removed ?? []).slice(0, 10_000) },
+  }, now)
 }
