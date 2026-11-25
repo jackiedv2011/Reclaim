@@ -199,8 +199,12 @@ describe('password reset', () => {
     await new Client().post('/api/auth/signup', person('pat@example.com'))
     await new Client().post('/api/auth/forgot-password', { email: 'pat@example.com' })
     await new Client().post('/api/auth/forgot-password', { email: 'pat@example.com' })
-    const links = (app!.db.prepare("SELECT link FROM mailbox WHERE subject LIKE 'Reset%' ORDER BY id").all() as Array<{ link: string }>).map((m) => new URL(m.link).searchParams.get('token'))
-    expect(links).toHaveLength(2)
+    // Reset emails go out after the answer, so the two can arrive a moment later.
+    const links = await vi.waitFor(() => {
+      const sent = (app!.db.prepare("SELECT link FROM mailbox WHERE subject LIKE 'Reset%' ORDER BY id").all() as Array<{ link: string }>).map((m) => new URL(m.link).searchParams.get('token'))
+      expect(sent).toHaveLength(2)
+      return sent
+    })
     expect((await new Client().post('/api/auth/reset-password', { token: links[1], password: 'brand-new-password', confirmPassword: 'brand-new-password' })).status).toBe(200)
     const older = await new Client().post('/api/auth/reset-password', { token: links[0], password: 'another-password', confirmPassword: 'another-password' })
     expect(older.status).toBe(400)
