@@ -1,0 +1,65 @@
+{
+  "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
+  "response": {
+    "model": "spend.summary",
+    "contractVersion": "0.1.1",
+    "metricDefinitionVersion": "spend-v0.1",
+    "tenantId": "tenant_fixture_a",
+    "origin": "legacy_audit_snapshot",
+    "scope": {
+      "from": "2025-01-01",
+      "to": "2025-12-31",
+      "dateBasis": "payment_date",
+      "currencies": []
+    },
+    "freshness": {
+      "computedAt": 1782907200000,
+      "sourceUpdatedAt": 1782907200000,
+      "stale": false,
+      "staleReason": null
+    },
+    "coverage": [
+      {
+        "check": "covered_spend",
+        "status": "not_run",
+        "reasons": [
+          "customer_supplied_source",
+          "period_not_covered",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "net_spend",
+        "status": "not_run",
+        "reasons": [
+          "upstream_contract_pending"
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "import:audit_fixture_q1/batch_9faafaa0de374e785f06fbdea56aa98978b3d099d3fa63ff1af72090e9ff0337",
+        "label": "csv import, 11 rows"
+      },
+      {
+        "id": "import:audit_fixture_q2/batch_b54837420f6a08b870865937dca3576ef7987abc4d0b0243e7e75d7129df20d0",
+        "label": "csv import, 9 rows"
+      }
+    ],
+    "exclusions": [
+      {
+        "code": "cross_audit_overlap",
+        "count": 3,
+        "amounts": [],
+        "detail": "Rows that appeared again in a later saved audit; each was counted once."
+      }
+    ],
+    "warnings": [
+      {
+        "code": "cross_audit_overlap_counted_once",
+        "detail": "3 rows appeared in more than one saved audit and were counted once (matched by vendor, invoice reference, payment date, amount and position in the file)."
+      }
+    ],
+    "result": null
+  }
+}

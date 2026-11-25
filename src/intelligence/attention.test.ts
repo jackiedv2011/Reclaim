@@ -477,3 +477,20 @@ describe('drift guards against the code this layer mirrors', () => {
     for (const label of labels) expect(Object.prototype.hasOwnProperty.call(NEXT_ACTION_KIND, label), label).toBe(true)
   })
 })
+
+describe('adapter next-action labels', () => {
+  it('maps every label the legacy adapter can emit, so none falls into unmapped_case_state', () => {
+    const adapter = readFileSync(resolve(process.cwd(), 'src/intelligence/adapters/legacyAudit.ts'), 'utf8')
+    const labels = [...adapter.matchAll(/label: '([^']+)'/g)].map((m) => m[1])
+    expect(labels.length).toBeGreaterThanOrEqual(4)
+    for (const label of labels) expect(Object.keys(NEXT_ACTION_KIND), label).toContain(label)
+  })
+
+  it('treats a confirmed decision with no recovery stage as missing evidence, not an unknown state', () => {
+    const audit = auditFromCsv('a_conf', ['Fixture Coffee Co,X-1,2026-01-01,2026-01-10,100.00,100.00,net 30,1,COGS,USD,', 'Fixture Coffee Co,X-1,2026-01-01,2026-01-20,100.00,100.00,net 30,1,COGS,USD,'])
+    const dup = findingsOf(audit).find((f) => f.type === 'exact_duplicate')!
+    const source = createLegacyAuditSource('tenant_fixture_a', [withCaseState(audit, dup.id, { ...EMPTY_CASE_STATE, decision: 'confirmed', decidedAt: 1 })])
+    const items = attentionQueue(fixtureContext(), source.cases, Date.UTC(2026, 6, 1)).result!.items
+    expect(items.map((i) => i.kind)).toEqual(['missing_evidence'])
+  })
+})

@@ -209,6 +209,10 @@ export interface AttentionQueueResult {
 /** Every label recoveryNextAction (and the adapter's 'Review finding') can produce, and what it becomes. A test asserts coverage against src/recovery/model.ts. */
 export const NEXT_ACTION_KIND: Readonly<Record<string, AttentionKind | null>> = {
   'Review finding': 'unreviewed_finding',
+  // Adapter labels for decisions without a recovery stage (contract 0.1.1).
+  'Provide information': 'missing_evidence',
+  'Start recovery review': 'missing_evidence',
+  'No action needed': null,
   'Review historical request': 'historical_request_review',
   'File internal note': 'internal_review',
   'Record investigation outcome': 'internal_review',
