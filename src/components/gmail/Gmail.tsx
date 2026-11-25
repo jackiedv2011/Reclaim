@@ -152,6 +152,8 @@ export function GmailSendStep({ pkg, ready, blockedReason, onSent }: { pkg: Gmai
   const [error, setError] = useState<string | null>(null)
   const [uncertain, setUncertain] = useState(false)
   const [checkedSent, setCheckedSent] = useState(false)
+  const [repeat, setRepeat] = useState(false)
+  const [confirmRepeat, setConfirmRepeat] = useState(false)
   if (!status) return null
   if (!status.available) return <p className="wk-panelcard-body wk-field-hint">{status.failed ? 'Could not check Gmail connection.' : 'Gmail sending is not configured.'} Copy the approved draft to send it manually.</p>
 
@@ -167,7 +169,7 @@ export function GmailSendStep({ pkg, ready, blockedReason, onSent }: { pkg: Gmai
         setError('This audit isn’t saved to your account yet, so it can’t be sent. Check your connection and try again.')
         return
       }
-      const result = await sendWithGmail({ projectId: pkg.projectId, findingId: pkg.findingId, generation: pkg.generation, to: pkg.to, cc: [], subject: pkg.subject, body: pkg.body, evidenceAttachment: pkg.evidenceAttachment, amountRequested: pkg.amount, retryUncertain: uncertain && checkedSent ? true : undefined })
+      const result = await sendWithGmail({ projectId: pkg.projectId, findingId: pkg.findingId, generation: pkg.generation, to: pkg.to, cc: [], subject: pkg.subject, body: pkg.body, evidenceAttachment: pkg.evidenceAttachment, amountRequested: pkg.amount, retryUncertain: uncertain && checkedSent ? true : undefined, confirmRepeat: repeat && confirmRepeat ? true : undefined })
       if (result.ok) {
         setConfirming(false)
         onSent(result.receipt)
@@ -175,6 +177,8 @@ export function GmailSendStep({ pkg, ready, blockedReason, onSent }: { pkg: Gmai
       }
       setUncertain(result.code === 'gmail_send_uncertain')
       setCheckedSent(false)
+      setRepeat((was) => was || result.code === 'gmail_payments_already_requested')
+      setConfirmRepeat(false)
       if (result.code === 'gmail_reconnect' || result.code === 'gmail_not_connected') void refresh()
       setError(result.fields ? Object.values(result.fields).join(' ') : result.message)
     } finally {
@@ -243,10 +247,16 @@ export function GmailSendStep({ pkg, ready, blockedReason, onSent }: { pkg: Gmai
                   <span>I checked my Gmail Sent folder and this email isn’t there</span>
                 </label>
               ) : null}
+              {repeat ? (
+                <label className="wk-radio">
+                  <input type="checkbox" checked={confirmRepeat} onChange={(e) => setConfirmRepeat(e.target.checked)} />
+                  <span>I checked the earlier request and still want to ask this vendor again</span>
+                </label>
+              ) : null}
             </div>
             <div className="wk-panel-foot">
               <DialogPrimitive.Close className="wk-btn" data-variant="ghost" data-size="sm" disabled={sending}>Go back and edit</DialogPrimitive.Close>
-              <button type="button" className="wk-btn" data-variant="primary" data-size="sm" disabled={sending || (uncertain && !checkedSent)} onClick={() => void send()}>
+              <button type="button" className="wk-btn" data-variant="primary" data-size="sm" disabled={sending || (uncertain && !checkedSent) || (repeat && !confirmRepeat)} onClick={() => void send()}>
                 <Send aria-hidden="true" />
                 {sending ? 'Sending…' : uncertain ? 'Try again' : `Send ${formatCurrency(pkg.amount)} request`}
               </button>

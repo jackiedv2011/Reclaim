@@ -1,3 +1,4 @@
+import { canonicalCurrency, isoDay, storedDay } from '../src/lib/format.ts'
 import { createServer, type Server } from 'node:http'
 import type { DatabaseSync } from 'node:sqlite'
 import { openDatabase } from './db.ts'
@@ -713,30 +714,85 @@ function isProjectShape(project: Record<string, unknown>): boolean {
 }
 
 /** The legacy whole-project route is for ledger/source changes, never case facts. */
-function caseContentChanged(previous: Record<string, unknown> | null, incoming: Record<string, unknown>): boolean {
-  type CaseEnvironment = { caseStates?: Record<string, unknown>; records?: Array<{ id: string }>; result?: { findings?: Array<{ id: string; evidence?: unknown; classification?: string; potentialAmountMinor?: number | null; relatedRecords?: Array<{ id: string }> }> } }
+type Plain = Record<string, unknown>
+
+/**
+ * What a payment row says, however the version of the app that saved it wrote
+ * it down: dates as days (they were once instants), currency by its code. Its
+ * place in the files it came from is not part of what it says. A transaction ID
+ * may be learned later, but never changed.
+ */
+function samePayment(before: Plain, after: Plain | undefined): boolean {
+  if (!after) return false
+  const day = (value: unknown) => {
+    const date = typeof value === 'string' ? storedDay(value) : null
+    return date && !Number.isNaN(date.getTime()) ? isoDay(date) : value ?? null
+  }
+  const said = (record: Plain) => JSON.stringify([
+    record.vendor, record.invoiceNumber ?? null, day(record.paymentDate), day(record.invoiceDate), record.invoiceAmount ?? null, record.amountPaid,
+    typeof record.currency === 'string' ? canonicalCurrency(record.currency) : null, record.terms ?? null, record.bankAccountLast4 ?? null, record.transactionType ?? null,
+    record.quickbooks ?? null, (record.source as Plain | undefined)?.raw ?? null,
+  ])
+  const learned = (key: string) => before[key] == null || before[key] === after[key]
+  const identified = before.externalTransactionId == null && after.externalTransactionId != null
+  return said(identified ? { ...before, quickbooks: null } : before) === said(identified ? { ...after, quickbooks: null } : after) && ['externalTransactionId', 'company', 'sourceAccount', 'stableSupplierId'].every(learned)
+}
+
+const NEEDS_CHECKING = { requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review' } as const
+
+/** The same finding, or the same finding marked to be checked again because its payments changed. That only ever takes away what was decided. */
+function sameOrToBeChecked(before: Plain, after: Plain | undefined): boolean {
+  if (!after) return false
+  const rows = (finding: Plain) => ((finding.relatedRecords ?? []) as { id: string }[]).map((record) => record.id).sort()
+  const rest = ({ relatedRecords: _rows, ...finding }: Plain) => finding
+  if (JSON.stringify(rows(before)) !== JSON.stringify(rows(after))) return false
+  if (sameJson(rest(before), rest(after))) return true
+  const { suppressionReason: _was, ...old } = rest(before)
+  const { suppressionReason: why, ...now } = rest(after)
+  return typeof why === 'string' && sameJson({ ...old, ...NEEDS_CHECKING }, now)
+}
+
+/** Equal whatever order the keys were written in. */
+function sameJson(a: unknown, b: unknown): boolean {
+  const ordered = (_key: string, value: unknown) => (value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([x], [y]) => (x < y ? -1 : 1))) : value)
+  return JSON.stringify(a, ordered) === JSON.stringify(b, ordered)
+}
+
+function caseContentChanged(previous: Plain | null, incoming: Plain): boolean {
+  type Found = Plain & { id: string; relatedRecords?: Array<{ id: string }> }
+  type CaseEnvironment = { caseStates?: Record<string, Plain>; records?: Array<Plain & { id: string }>; retiredRecords?: Array<Plain & { id: string }>; result?: { findings?: Found[] } }
   const env = (incoming.environment ?? {}) as CaseEnvironment
   if (!previous) return Object.keys(env.caseStates ?? {}).length > 0 || (env.result?.findings ?? []).some((finding) => finding.evidence != null || finding.classification === 'recovery_candidate' || finding.potentialAmountMinor != null)
-  const old = (previous.environment ?? {}) as typeof env
-  if (JSON.stringify(env.caseStates ?? {}) !== JSON.stringify(old.caseStates ?? {})) return true
+  const old = (previous.environment ?? {}) as CaseEnvironment
+  const oldStates = old.caseStates ?? {}
+  const newStates = env.caseStates ?? {}
   const oldFindings = new Map((old.result?.findings ?? []).map((finding) => [finding.id, finding]))
   const newFindings = new Map((env.result?.findings ?? []).map((finding) => [finding.id, finding]))
+  for (const id of new Set([...Object.keys(oldStates), ...Object.keys(newStates)])) {
+    if (sameJson(oldStates[id], newStates[id])) continue
+    if (!oldStates[id] || !newStates[id]) return true
+    const checkAgain = { ...oldStates[id], requiresRevalidation: true }
+    const unapproved = { ...checkAgain, approvedAt: null }
+    if (!sameJson(checkAgain, newStates[id]) && !sameJson(unapproved, newStates[id])) return true
+  }
   const protectedIds = new Set([
-    ...Object.keys(old.caseStates ?? {}),
+    ...Object.keys(oldStates),
     ...(old.result?.findings ?? []).filter((finding) => finding.evidence != null).map((finding) => finding.id),
   ])
-  const oldRecords = new Map((old.records ?? []).map((record) => [record.id, record]))
-  const newRecords = new Map((env.records ?? []).map((record) => [record.id, record]))
+  const byId = (records: Array<Plain & { id: string }>) => new Map(records.map((record) => [record.id, record]))
+  const oldRecords = byId([...(old.retiredRecords ?? []), ...(old.records ?? [])])
+  // A payment taken out of the audit is kept aside, so what was decided on it can still be read.
+  const newRecords = byId([...(env.retiredRecords ?? []), ...(env.records ?? [])])
   for (const id of protectedIds) {
     const before = oldFindings.get(id)
     const after = newFindings.get(id)
-    if (!before || !after || JSON.stringify(before) !== JSON.stringify(after)) return true
+    if (!before || !sameOrToBeChecked(before, after)) return true
     for (const record of before.relatedRecords ?? []) {
       const original = oldRecords.get(record.id)
-      if (!original || JSON.stringify(original) !== JSON.stringify(newRecords.get(record.id))) return true
+      if (!original || !samePayment(original, newRecords.get(record.id))) return true
     }
   }
-  return (env.result?.findings ?? []).some((finding) => JSON.stringify(finding.evidence ?? null) !== JSON.stringify(oldFindings.get(finding.id)?.evidence ?? null))
+  return (env.result?.findings ?? []).some((finding) => !sameJson(finding.evidence ?? null, oldFindings.get(finding.id)?.evidence ?? null))
 }
 
 /** Just the case a command changed, for a client that already holds the rest of the audit. */

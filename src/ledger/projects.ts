@@ -353,7 +353,16 @@ function wireProject(id: string, { base, pending }: { base: CaseBase | null; pen
   const touched = new Map<string, PendingCommand>()
   for (const command of pending) if (!touched.has(command.findingId)) touched.set(command.findingId, command)
   const states = Object.entries(env.caseStates)
-  const caseStates: Record<string, unknown> = base ? base.caseStates : Object.fromEntries(states.filter(([findingId]) => !touched.has(findingId)))
+  const caseStates: Record<string, unknown> = base ? { ...base.caseStates } : Object.fromEntries(states.filter(([findingId]) => !touched.has(findingId)))
+  // Payments that changed under a decision put it up for checking again. That is the one thing a save may say about a case: it only takes away.
+  if (base) {
+    for (const [findingId, state] of states) {
+      const there = base.caseStates[findingId] as CaseState | undefined
+      if (there && state.requiresRevalidation && !there.requiresRevalidation && !touched.has(findingId)) {
+        caseStates[findingId] = { ...there, requiresRevalidation: true, ...(there.approvedAt != null && state.approvedAt == null ? { approvedAt: null } : {}) }
+      }
+    }
+  }
   const decidedThere = (findingId: string) => Boolean((base?.caseStates[findingId] as CaseState | undefined)?.decision)
   const lost = base !== null && states.some(([findingId, state]) => state.decision && !decidedThere(findingId) && !touched.has(findingId))
   const findings = env.result.findings.map((finding): Record<string, unknown> => {
@@ -362,7 +371,9 @@ function wireProject(id: string, { base, pending }: { base: CaseBase | null; pen
     if (server) {
       const hasCase = server.evidence != null || base!.caseStates[finding.id] !== undefined || touched.has(finding.id) || finding.evidence != null || finding.customerDecision != null
       // Different rows make it a different finding: that is for the server to judge, not to paper over.
-      return hasCase && rowIds(server) === rowIds(local) ? server : local
+      if (!hasCase || rowIds(server) !== rowIds(local)) return local
+      const checkAgain = finding.requiresRevalidation && finding.suppressionReason && !server.requiresRevalidation && !touched.has(finding.id)
+      return checkAgain ? { ...server, requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review', suppressionReason: finding.suppressionReason } : server
     }
     const before = touched.get(finding.id)?.before
     return before && rowIds(before) === rowIds(local) ? before : local
@@ -370,7 +381,7 @@ function wireProject(id: string, { base, pending }: { base: CaseBase | null; pen
   const sent = { ...env, caseStates, result: { ...env.result, findings } } as unknown as LedgerEnvironment
   return {
     json: projectJson(project, sent),
-    base: { caseStates, findings: new Map(findings.map((finding) => [String(finding.id), finding])), batches: env.imports.map((batch) => batch.id) },
+    base: { caseStates, findings: new Map(findings.map((finding) => [String(finding.id), finding])), batches: [...env.imports.map((batch) => batch.id), ...(env.removedImports ?? [])] },
     lost,
   }
 }

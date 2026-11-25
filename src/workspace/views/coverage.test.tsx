@@ -80,9 +80,9 @@ describe('the case page', () => {
   })
 
   it('says why a carried-over dismissal applies', () => {
-    let env = load(null, 'a.csv', [HEADER, 'Acme,JOB-7,2025-01-10,,500,USD', 'Acme,JOB-7,2025-02-10,,500,USD'])
+    let env = load(null, 'a.csv', [HEADER, 'Acme,JOB-7,2025-01-10,,500,USD', 'Acme,JOB-7,2025-01-20,,500,USD'])
     env = setCaseState(env, env.result.findings[0].id, markExpected('Paid in instalments', 'intentional'))
-    env = load(env, 'b.csv', [HEADER, 'Acme,JOB-7,2025-03-10,,500,USD'])
+    env = load(env, 'b.csv', [HEADER, 'Acme,JOB-7,2025-01-30,,500,USD'])
     const root = page(env, env.result.findings.find((f) => !f.suppressionReason)!.id)
     expect(root).toHaveTextContent('Carried over from your earlier decision')
     expect(root).toHaveTextContent('Paid in instalments')

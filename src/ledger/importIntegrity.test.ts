@@ -232,7 +232,9 @@ describe('adding and removing files around decisions', () => {
     expect(removed.imports).toHaveLength(1)
     expect(found(removed)).toEqual([])
     expect(removed.retiredRecords).toHaveLength(1)
-    expect(found(mergeImport(removed, file(plain, 'Acme,INV-1,2025-01-20,500')))).toEqual(['exact_duplicate 500'])
+    const again = mergeImport(removed, file(plain, 'Acme,INV-1,2025-01-20,500'))
+    expect(found(again)).toEqual(['exact_duplicate 500'])
+    expect(again.imports[1].id).not.toBe(second.imports[1].id)
   })
 
   it('removing a file keeps the payments another file also lists', () => {

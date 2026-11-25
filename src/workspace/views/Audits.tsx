@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Plus, Sparkles, Upload, Search, Banknote } from 'lucide-react'
 import { useEntitlements } from '@/lib/auth/AuthContext'
 import { formatCurrency, plural } from '@/lib/format'
@@ -20,6 +21,8 @@ interface AuditsProps {
   onStartAudit: () => void
   onAddRecords: () => void
   onRunSample: () => void
+  /** Takes one uploaded file back out of the open audit. */
+  onRemoveImport: (batchId: string) => void
 }
 
 function when(ts: number): string {
@@ -36,7 +39,9 @@ export function Audits({
   onStartAudit,
   onAddRecords,
   onRunSample,
+  onRemoveImport,
 }: AuditsProps) {
+  const [removing, setRemoving] = useState<string | null>(null)
   const s = overviewSummary(env)
   const l = ladder(env)
   const entitlements = useEntitlements()
@@ -210,9 +215,28 @@ export function Audits({
                   <div className="wk-table-sub">
                     {batch.quickbooksSync
                       ? `QuickBooks · ${describeQuickBooksSync(batch.quickbooksSync)}`
-                      : `${batch.mode === 'sample' ? 'Sample data' : 'Uploaded CSV'} · ${batch.recordCount} newly imported · ${batch.skippedCount} rejected · ${(batch.rowResults ?? []).filter((row) => row.status === 'exact_duplicate' || row.status === 'possible_overlap').length} overlapping`}
+                      : `${batch.mode === 'sample' ? 'Sample data' : 'Uploaded file'} · ${batch.recordCount} newly imported · ${batch.skippedCount} rejected · ${(batch.rowResults ?? []).filter((row) => row.status === 'exact_duplicate' || row.status === 'possible_overlap').length} overlapping`}
                   </div>
                   {readingNotes(batch.reading).map((note) => <div className="wk-table-sub" key={note}>{note}</div>)}
+                  {batch.mode === 'upload' && !batch.quickbooks ? (
+                    removing === batch.id ? (
+                      <div className="wk-callout" data-tone="warn" role="group" aria-label={`Remove ${batch.sourceLabel}`} style={{ marginTop: 8 }}>
+                        <div className="wk-callout-body">
+                          <p>
+                            Remove “{batch.sourceLabel}” from this audit? Its payments, and findings nobody has decided on, go with it. Payments another file here also lists stay. Decided findings are kept and marked to be checked again. You can upload the file again afterwards.
+                          </p>
+                          <ul className="wk-callout-actions">
+                            <li><button type="button" className="wk-link" onClick={() => { setRemoving(null); onRemoveImport(batch.id) }}>Remove this file</button></li>
+                            <li><button type="button" className="wk-link" onClick={() => setRemoving(null)}>Keep it</button></li>
+                          </ul>
+                        </div>
+                      </div>
+                    ) : (
+                      <button type="button" className="wk-linklike" style={{ marginTop: 6, fontSize: 12.5 }} aria-label={`Remove ${batch.sourceLabel} from this audit`} onClick={() => setRemoving(batch.id)}>
+                        Remove this file
+                      </button>
+                    )
+                  ) : null}
                   {batch.rowResults?.some((row) => row.status !== 'newly_imported') ? (
                     <details className="wk-table-sub" style={{ marginTop: 6 }}>
                       <summary>Review skipped and uncertain rows</summary>

@@ -25,6 +25,7 @@ import { useAuditRoute, loadPersistedContext, type RouteMode } from '@/audit/use
 import {
   loadEnvironment,
   mergeImport,
+  removeImport,
   inspectImport,
   setCaseState,
   getCaseState,
@@ -249,12 +250,14 @@ export function AuditApp() {
         } else {
           const inspection = inspectImport(base, input)
           if (inspection.duplicateFile) {
-            setEntryError('This exact file is already in this audit. No records were added.')
+            setEntryError('This exact file is already in this audit, so no records were added. To read it differently, remove it first under Audits, then upload it again.')
             setImportDialogOpen(true)
             return
           }
           next = mergeImport(base, input)
-          setImportNotice(null)
+          // Said where it is seen: a payment left out as a repeat should never be left out quietly.
+          const repeats = inspection.rowResults.filter((row) => row.status === 'exact_duplicate' || row.status === 'possible_overlap').length
+          setImportNotice(repeats > 0 ? `${repeats} ${repeats === 1 ? 'row was' : 'rows were'} already in this audit and not added again. Each is listed under Audits.` : null)
         }
         // Said before anything is saved: an audit the account would refuse would otherwise sit in this browser only.
         if (options.persist !== false && next.records.length > 5_000 && serializeEnvironment(next).length > MAX_AUDIT_BYTES - 64 * 1024) {
@@ -299,6 +302,25 @@ export function AuditApp() {
       }
     },
     [navigate, refreshProjects, auth, account, catchUp]
+  )
+
+  const handleRemoveImport = useCallback(
+    (batchId: string) => {
+      catchUp()
+      const env = environmentRef.current
+      const current = projectRef.current
+      const batch = env?.imports.find((b) => b.id === batchId)
+      if (!env || !current || !batch) return
+      const next = removeImport(env, batchId)
+      const saved = saveProject({ ...current, environment: next })
+      projectRef.current = saved
+      environmentRef.current = next
+      setProject(saved)
+      setEnvironment(next)
+      refreshProjects()
+      setImportNotice(`Removed “${batch.sourceLabel}”: ${env.records.length - next.records.length} of its payments are out of this audit.`)
+    },
+    [catchUp, refreshProjects]
   )
 
   const runSampleAudit = useCallback(() => {
@@ -1022,6 +1044,7 @@ export function AuditApp() {
             onStartAudit={() => openImport('new')}
             onAddRecords={() => openImport('add')}
             onRunSample={runSampleAudit}
+            onRemoveImport={handleRemoveImport}
           />
         ) : route.mode === 'findings' ? (
           <Findings env={environment} visible={visible} onOpenCase={handleOpenCase} />

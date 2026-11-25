@@ -78,7 +78,7 @@ describe('the same quantity on every screen and in the export', () => {
   const recoveries = () => show(<Recoveries env={env} onOpenCase={noop} onOpenFindings={noop} />)
   const reports = () => show(<Reports env={env} />)
   const summary = { id: 'p1', name: 'This audit', sourceLabel: 'ledger.csv', mode: 'upload' as const, createdAt: 1, updatedAt: 2, recordCount: env.records.length, openCaseCount: 0, flaggedValue: 999, potentialRecoveryValue: ladder(env).potential, recoveryActiveCount: 0, recoveryActiveValue: 0 }
-  const audits = (active: boolean) => show(<Audits env={env} projects={[summary]} activeProjectId={active ? 'p1' : 'other'} sampleSession={false} onOpenProject={noop} onStartAudit={noop} onAddRecords={noop} onRunSample={noop} />)
+  const audits = (active: boolean) => show(<Audits env={env} projects={[summary]} activeProjectId={active ? 'p1' : 'other'} sampleSession={false} onOpenProject={noop} onStartAudit={noop} onAddRecords={noop} onRunSample={noop} onRemoveImport={() => {}} />)
 
   const [header, ...rows] = findingsExportRows(opportunities(env), env.result.findings)
   const exported = (column: string, currency = 'USD') => sum(rows.filter((r) => r[header.indexOf('Currency')] === currency).map((r) => Number(r[header.indexOf(column)]) || 0))

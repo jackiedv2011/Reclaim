@@ -8,7 +8,7 @@ import { assessRecordReadiness } from '@/audit/dataReadiness'
 import { clearEnvironment, mergeImport, recordEvidence, setCaseState } from '@/ledger/store'
 import { attestDuplicate } from '@/recovery/testEvidence'
 import { confirmCase, markRecoveryRequested } from '@/ledger/caseState'
-import { createProject } from '@/ledger/projects'
+import { createProject, listProjects } from '@/ledger/projects'
 import type { RouteMode } from '@/audit/useAuditRoute'
 import type { Finding } from '@/types'
 
@@ -851,5 +851,52 @@ describe('non-claim findings in the recovery flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close internal review' }))
     goToMode('Overview')
     expect(stageValue('Recovered')).toBe(formatCurrency(0))
+  })
+})
+
+describe('correcting an upload', () => {
+  const upload = async (name: string, text: string) => {
+    fireEvent.change(await screen.findByLabelText(/upload a csv ledger/i), { target: { files: [new File([text], name, { type: 'text/csv' })] } })
+  }
+
+  it('a file can be taken back out and uploaded again, and a repeat row is said out loud', async () => {
+    window.history.pushState({}, '', '/audit?entry=upload')
+    render(<AuditApp />)
+    const header = 'vendor,invoice_number,payment_date,amount_paid'
+    await upload('first.csv', `${header}\nAcme,INV-1,2025-01-10,500\nSolo,S-1,2025-01-11,5`)
+    fireEvent.click(await screen.findByRole('button', { name: 'Run the audit' }))
+    await screen.findAllByText(/2 payments/)
+    fireEvent.click(screen.getAllByRole('button', { name: /^Audits/ })[0])
+    fireEvent.click(await screen.findByRole('button', { name: 'Add records to this audit' }))
+    await upload('second.csv', `${header}\nAcme,INV-1,2025-01-10,500\nAcme,INV-1,2025-01-20,500`)
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to audit' }))
+    expect(await screen.findByText(/1 row was already in this audit and not added again/)).toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('button', { name: /^Audits/ })[0])
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove second.csv from this audit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove this file' }))
+    expect(await screen.findByText('Removed “second.csv”: 1 of its payments are out of this audit.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove second.csv from this audit' })).not.toBeInTheDocument()
+    expect(listProjects()[0].recordCount).toBe(2)
+  })
+
+  it('an audit left with no payments still opens and takes a new file', async () => {
+    window.history.pushState({}, '', '/audit?entry=upload')
+    render(<AuditApp />)
+    const header = 'vendor,invoice_number,payment_date,amount_paid'
+    await upload('only.csv', `${header}\nAcme,INV-1,2025-01-10,500`)
+    fireEvent.click(await screen.findByRole('button', { name: 'Run the audit' }))
+    await screen.findAllByText(/1 payments?/)
+    fireEvent.click(screen.getAllByRole('button', { name: /^Audits/ })[0])
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove only.csv from this audit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove this file' }))
+    await screen.findByText(/Removed “only.csv”/)
+    fireEvent.click(screen.getAllByRole('button', { name: /^(Overview|Dashboard)/ })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: /^Findings/ })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: /^Reports/ })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: /^Audits/ })[0])
+    fireEvent.click(await screen.findByRole('button', { name: 'Add records to this audit' }))
+    await upload('only.csv', `${header}\nAcme,INV-1,2025-01-10,500`)
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to audit' }))
+    await waitFor(() => expect(listProjects()[0].recordCount).toBe(1))
   })
 })

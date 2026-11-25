@@ -34,6 +34,8 @@ export interface GmailSendRequest {
   amountRequested: number
   /** Only after the customer checked their Sent folder following an unconfirmed send. */
   retryUncertain?: boolean
+  /** Only after the customer was told these payments were already requested in another case. */
+  confirmRepeat?: boolean
 }
 
 export type GmailSendResult =

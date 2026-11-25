@@ -8,7 +8,8 @@ import { AuditApp } from '@/AuditApp'
 import { AuthProvider, useAuth } from '@/lib/auth/AuthContext'
 import { getSampleLedger, sampleLedgerCsv } from '@/data/sampleLedger'
 import { parseCsv } from '@/lib/csv'
-import { mergeImport, setCaseState } from '@/ledger/store'
+import { mergeImport, recordEvidence, removeImport, serializeEnvironment, setCaseState, type LedgerEnvironment } from '@/ledger/store'
+import { attestDuplicate } from '@/recovery/testEvidence'
 import { confirmCase } from '@/ledger/caseState'
 import { createProject, deleteProject, hasMemoryOnlyProjects, listLegacyProjects, listProjects, loadAccountProjects, loadProject, overflowSettled, saveProject } from '@/ledger/projects'
 import { setOverflowStore, type OverflowStore } from '@/ledger/overflowStore'
@@ -474,5 +475,93 @@ describe('deleting the account', () => {
     projectSync.retry()
     await projectSync.flush()
     expect((await onServer()).map((p) => p.id)).toEqual([project.id])
+  })
+})
+
+describe('files added and removed around decisions', () => {
+  const rows = (...lines: string[]) => ({ sourceLabel: `${lines[0]}.csv`, mode: 'upload' as const, parsed: parseCsv(['vendor,invoice_number,payment_date,amount_paid', ...lines].join('\n')) })
+  const pair = ['Acme,INV-1,2025-01-10,500', 'Acme,INV-1,2025-01-20,500']
+
+  /** An audit whose finding was decided, saved to the account. */
+  async function decided(evidence = false) {
+    await signedIn()
+    const project = create('decided', mergeImport(null, rows(...pair)))
+    await projectSync.flush()
+    const finding = project.environment.result.findings[0]
+    if (evidence) {
+      const facts = attestDuplicate(finding).evidence!
+      saveProject({ ...project, environment: recordEvidence(project.environment, finding.id, facts) }, { sync: false })
+      projectSync.command(project.id, finding.id, 'evidence', facts)
+      await projectSync.flush()
+    }
+    const now = loadProject(project.id)!
+    saveProject({ ...now, environment: setCaseState(now.environment, finding.id, confirmCase('Seen')) }, { sync: false })
+    projectSync.command(project.id, finding.id, 'decision', { decision: 'confirmed', reason: 'Seen' })
+    await projectSync.flush()
+    expect(projectSync.issues).toEqual([])
+    return { id: project.id, finding: finding.id }
+  }
+  const save = async (id: string, change: (env: LedgerEnvironment) => LedgerEnvironment) => {
+    const project = loadProject(id)!
+    saveProject({ ...project, environment: change(project.environment) })
+    await projectSync.flush()
+    expect(projectSync.issues).toEqual([])
+    return (await onServer()).find((p) => p.id === id)!
+  }
+
+  it.each([false, true])('unrelated payments save, and the decision stands (evidence %s)', async (evidence) => {
+    const { id, finding } = await decided(evidence)
+    const stored = await save(id, (env) => mergeImport(env, rows('Beta,B-1,2025-02-01,9', 'Beta,B-2,2025-02-03,19')))
+    expect(stored.environment.records).toHaveLength(4)
+    expect(stored.environment.caseStates[finding]).toMatchObject({ decision: 'confirmed' })
+    expect(stored.environment.caseStates[finding].requiresRevalidation).toBeFalsy()
+  })
+
+  it.each([false, true])('another payment of the decided invoice saves, and the decision is marked to be checked again (evidence %s)', async (evidence) => {
+    const { id, finding } = await decided(evidence)
+    const stored = await save(id, (env) => mergeImport(env, rows('Acme,INV-1,2025-01-25,500')))
+    expect(stored.environment.records).toHaveLength(3)
+    expect(stored.environment.caseStates[finding]).toMatchObject({ decision: 'confirmed', requiresRevalidation: true })
+  })
+
+  it('a removed file saves, keeping what was decided on it to be checked again', async () => {
+    const { id, finding } = await decided()
+    const stored = await save(id, (env) => removeImport(env, env.imports[0].id))
+    expect(stored.environment.records).toHaveLength(0)
+    expect(stored.environment.retiredRecords).toHaveLength(2)
+    expect(stored.environment.caseStates[finding]).toMatchObject({ decision: 'confirmed', requiresRevalidation: true })
+  })
+
+  it('an audit saved by an earlier version, dates as instants, still saves after a decision', async () => {
+    const { id } = await decided()
+    const row = live.app.db.prepare('SELECT payload FROM projects WHERE id = ?').get(id) as { payload: string }
+    const old = JSON.parse(row.payload)
+    for (const record of old.environment.records) {
+      record.paymentDate = new Date(`${record.paymentDate}T00:00:00`).toISOString()
+      record.identityKey = 'old'
+    }
+    live.app.db.prepare('UPDATE projects SET payload = ? WHERE id = ?').run(JSON.stringify(old), id)
+    const stored = await save(id, (env) => mergeImport(env, rows('Beta,B-1,2025-02-01,9')))
+    expect(stored.environment.records.map((r: { paymentDate: string }) => r.paymentDate)).toEqual(['2025-01-10', '2025-01-20', '2025-02-01'])
+  })
+
+  it('nothing else about a decided finding can ride along with an added file', async () => {
+    const { id, finding } = await decided()
+    for (const tamper of [
+      (env: any) => (env.result.findings.find((f: any) => f.id === finding).dollarImpact = 99999),
+      (env: any) => (env.result.findings.find((f: any) => f.id === finding).classification = 'recovery_candidate'),
+      (env: any) => (env.caseStates[finding].recoveryStage = 'requested'),
+      (env: any) => (env.caseStates[finding].decision = 'expected'),
+      (env: any) => delete env.caseStates[finding],
+      (env: any) => (env.records[0].amountPaid = 99999),
+      (env: any) => (env.records = env.records.slice(1)),
+    ]) {
+      const [stored] = await onServer()
+      const revision = (await live.api('/api/projects')).body.revisions[id]
+      const env = JSON.parse(serializeEnvironment(loadProject(id)!.environment))
+      tamper(env)
+      const res = await live.api(`/api/projects/${id}`, { method: 'PUT', headers: { 'If-Match': String(revision) }, json: { ...stored, environment: env } })
+      expect([res.status, res.body.code], String(tamper)).toEqual([409, 'case_command_required'])
+    }
   })
 })

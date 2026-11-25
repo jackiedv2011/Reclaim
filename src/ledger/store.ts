@@ -47,6 +47,8 @@ export interface LedgerEnvironment {
    */
   retiredRecords?: APRecord[]
   imports: ImportBatch[]
+  /** Files taken back out on purpose, so a copy without them is not mistaken for one that lost them. */
+  removedImports?: string[]
   result: DetectionResult
   /** Keyed by finding id. Stable because finding ids are derived from stable record ids. */
   caseStates: Record<string, CaseState>
@@ -300,7 +302,9 @@ export function mergeImport(env: LedgerEnvironment | null, input: MergeImportInp
   const base = env ?? createEmptyEnvironment()
   const inspection = inspectImport(base,input)
   if(inspection.duplicateFile) return base
-  const batchId = `batch_${inspection.fileChecksum}`
+  // A file put back after being removed is a new import: the removal of the first must never count against it.
+  const timesRemoved = (base.removedImports ?? []).filter((id) => id.startsWith(`batch_${inspection.fileChecksum}`)).length
+  const batchId = `batch_${inspection.fileChecksum}${timesRemoved > 0 ? `_${timesRemoved + 1}` : ''}`
   let seq = base.nextRecordSeq
 
   const qbo = input.quickbooks
@@ -378,7 +382,7 @@ export function removeImport(env: LedgerEnvironment, batchId: string): LedgerEnv
     return kept
   })
   const next = rebuildLedger(env, records, batch, env.nextRecordSeq, gone, removed)
-  return { ...next, imports: env.imports.filter((b) => b.id !== batchId), newFindingIds: [] }
+  return { ...next, imports: env.imports.filter((b) => b.id !== batchId), removedImports: [...new Set([...(env.removedImports ?? []), batchId])], newFindingIds: [] }
 }
 
 /**
@@ -402,7 +406,7 @@ export function rebuildLedger(base: LedgerEnvironment, allRecords: APRecord[], b
       if(state) caseStates[f.id]={...state,requiresRevalidation:true,approvedAt:null}
     }
     // Nothing about a decided finding changed, so nothing about it is rewritten: the account compares it with what was decided.
-    if (!changed && (base.caseStates[f.id] || previous.evidence)) return { ...previous, relatedRecords: f.relatedRecords }
+    if (!changed && (base.caseStates[f.id] || previous.evidence)) return { ...previous, relatedRecords: previous.relatedRecords.map((r) => f.relatedRecords.find((now) => now.id === r.id) ?? r) }
     const current={ ...f, createdAt: previous.createdAt, evidence: previous.evidence, customerDecision: previous.customerDecision }
     const gate=evaluateEligibility(current,current.evidence,base.result.findings)
     return gate.eligible ? {...current,...gate,classification:'recovery_candidate',class:'recoverable'} : {...current,...gate,requiresRevalidation:changed||previous.requiresRevalidation}
