@@ -5,7 +5,7 @@ import { resolveVendors } from './vendorResolution.ts'
 import { checksum, normalizeReference, vendorTransformations, recordIdentity } from './sourceIdentity.ts'
 
 /** Header spellings seen in QuickBooks, Xero, Bill and hand-built AP exports, after normalizeHeader. */
-const COLUMN_ALIASES: Record<string, string> = {
+export const COLUMN_ALIASES: Record<string, string> = {
   vendor: 'vendor',
   vendor_name: 'vendor',
   supplier: 'vendor',
