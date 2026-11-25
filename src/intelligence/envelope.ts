@@ -80,6 +80,18 @@ export function envelope<T>(input: EnvelopeInput<T>): ReadModelEnvelope<T> {
   }
 }
 
+/**
+ * Adds coverage reasons a read model could not see itself (e.g. saved audits
+ * that could not be read) to its primary coverage item, so an answer built
+ * without them never reads as complete. A not_run item stays not_run.
+ */
+export function withExtraCoverage<T>(env: ReadModelEnvelope<T>, reasons: readonly string[] | undefined): ReadModelEnvelope<T> {
+  if (!reasons || reasons.length === 0) return env
+  const [first, ...rest] = env.coverage.length ? env.coverage : [{ check: 'data_sources', status: 'supported' as const, reasons: [] }]
+  const merged = [...new Set([...first.reasons, ...reasons])].sort()
+  return { ...env, coverage: [{ ...first, status: first.status === 'not_run' ? 'not_run' : 'limited', reasons: merged }, ...rest] }
+}
+
 // ---------------------------------------------------------------- money helpers
 
 export function normalizeCurrency(raw: string | null | undefined): string {

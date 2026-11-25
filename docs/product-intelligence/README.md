@@ -178,7 +178,22 @@ npx tsc -p tsconfig.app.json --noEmit && npx tsc -p tsconfig.server.json --noEmi
 
 ## 10. Independent review
 
-REVIEW_SECTION
+An independent reviewer read the security-critical paths without being shown this report's conclusions: routes, adapter, assistant, attention proposals, insights and job context, and the memory store. It confirmed its findings with throwaway probes, which it deleted afterwards.
+
+**Result: no high-severity issue.** Tenant isolation, read-only behaviour, the permission model, input validation and money separation were checked and found sound. All findings below are fixed on this branch, each with a regression test, except L2's root cause, which is in Sid's file.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| M1 | Medium | When the assistant explained an insight, its figures lost their labels. Outstanding, promised and customer-recorded amounts read as anonymous numbers, and the "not money received / not matched" caveats were lost. | Each insight figure now carries its source metric. The assistant names it with fixed wording that keeps the caveat; unknown sources read as "an unlabelled figure". Insight text is still never echoed. |
+| M2 | Medium | Saved audits that could not be read were dropped silently from the attention, vendor, baseline and assistant answers. With no cases, approval and evidence questions answered "none waiting" (an implied all-clear). | `withExtraCoverage` is applied to every envelope the server returns and to the assistant's internal reads. With zero cases, approval and evidence questions now return `insufficient_data`. |
+| L1 | Low | A malformed percent-encoded path parameter caused a 500. | Now 400. |
+| L2 | Low | `ProjectStore.list()` fails as a whole when one row cannot be decrypted, so every intelligence route returned 500 for that user. | Routes now return a typed 503 `saved_audit_unreadable`. Root fix requested from Sid as S-10; it also affects the existing `GET /api/projects`. |
+| L3 | Low | An action proposal for a case subject could target a stale duplicate of a case saved in two audits. | A case subject now resolves to the canonical (most advanced) copy, with a `case_subject_folded` note. |
+
+**Noted, not changed:**
+- An invalid attention cursor falls back to page 1 with a warning, while other routes return 400.
+- The assistant's body-size check runs after the global body limit.
+- Bare domains (no scheme) survive display-name sanitising. That matters only if a client ever turns text into links.
 
 ## 11. Pilot questions and metrics (after authorization only)
 

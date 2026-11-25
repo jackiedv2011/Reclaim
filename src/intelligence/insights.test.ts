@@ -262,12 +262,12 @@ describe('insights over tenant A saved audits (hand-calculated)', () => {
     expect(findInsight(ctxA, dA, '../../etc', NOW)).toBeNull()
   })
 
-  it('offers the assistant a tenant-checked lookup with reason-code limits and plain figures', () => {
+  it('offers the assistant a tenant-checked lookup with reason-code limits and figures keyed by their source metric', () => {
     const lookup = insightLookup(dA, NOW)
     const first = env.result!.items[0]
     const view = lookup(ctxA, first.id)!
     expect(view).toMatchObject({ id: first.id, tenantId: 'tenant_a', rule: first.rule, limitsText: first.limits })
-    expect(view.figures).toEqual(first.figures.map((f) => f.money))
+    expect(view.figures).toEqual(first.figures.map((f) => ({ ...f.money, metric: `${f.source.model}.${f.source.field}` })))
     expect(view.limits).toEqual(expect.arrayContaining(['customer_supplied_source', 'snapshot_not_continuous']))
     expect(() => lookup(fixtureContext('tenant_b'), first.id)).toThrow(IntelligenceAccessError)
     expect(lookup(ctxA, 'ins_nothing_000000000000')).toBeNull()

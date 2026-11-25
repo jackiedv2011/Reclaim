@@ -13,7 +13,7 @@
 import { HttpError, json, type Request, type Response } from './http.ts'
 import type { ProjectStore } from './projectStore.ts'
 import { SINGLE_USER_PERMISSIONS, NO_RETURN_MATCHING, type ReturnMatchPort, type TenantContext } from '../src/intelligence/contracts.ts'
-import { IntelligenceAccessError } from '../src/intelligence/envelope.ts'
+import { IntelligenceAccessError, withExtraCoverage } from '../src/intelligence/envelope.ts'
 import { createLegacyAuditSource, type LegacyAuditSource, type StoredAudit } from '../src/intelligence/adapters/legacyAudit.ts'
 import { attentionQueue, ATTENTION_CATEGORIES, type AttentionCategory } from '../src/intelligence/attention.ts'
 import { importCoverageSummary, IntelligenceQueryError, spendByCategory, spendByVendor, spendSummary, spendTrend, type SpendQuery } from '../src/intelligence/spend.ts'
@@ -156,7 +156,15 @@ export function createIntelligenceRoutes(deps: IntelligenceDeps) {
 
   /** Only this tenant's audits; the adapter refuses any other tenant's context as a second check. */
   function sourceFor(ctx: TenantContext): LegacyAuditSource {
-    const audits = deps.projects.list(ctx.tenantId) as unknown as StoredAudit[]
+    let audits: StoredAudit[]
+    try {
+      audits = deps.projects.list(ctx.tenantId) as unknown as StoredAudit[]
+    } catch {
+      // ProjectStore.list fails as a whole when one saved audit cannot be decrypted (the same
+      // failure affects GET /api/projects). Per-row reading is requested from the CTO; until then
+      // say so plainly rather than answer from a partial, unlabelled set.
+      throw new HttpError(503, 'A saved audit could not be read, so account-wide views are unavailable.', 'saved_audit_unreadable')
+    }
     const revisions = Object.fromEntries(audits.map((a) => [a.id, deps.projects.revision(ctx.tenantId, a.id)]))
     return createLegacyAuditSource(ctx.tenantId, audits, { revisions })
   }
@@ -171,7 +179,13 @@ export function createIntelligenceRoutes(deps: IntelligenceDeps) {
     if (!user) throw new HttpError(401, 'You need to log in.', 'unauthenticated')
     if (!deps.allowRead(user.id)) throw new HttpError(429, 'Too many requests. Try again shortly.', 'rate_limited')
     const ctx = tenantContextFor(user)
-    const param = rest.match(match.pattern)?.[1] ?? null
+    const rawParam = rest.match(match.pattern)?.[1] ?? null
+    let param: string | null = null
+    try {
+      param = rawParam === null ? null : decodeURIComponent(rawParam)
+    } catch {
+      throw new HttpError(400, 'Invalid path.', 'validation')
+    }
     if (req.method === 'POST' && !(req.headers['content-type'] ?? '').includes('application/json')) throw new HttpError(415, 'Send JSON.')
     const readBody = async () => {
       const text = await req.text()
@@ -183,8 +197,12 @@ export function createIntelligenceRoutes(deps: IntelligenceDeps) {
       }
     }
     try {
-      const body = await match.handler({ ctx, source: sourceFor(ctx), returns, query: req.url.searchParams, now: now(), param: param === null ? null : decodeURIComponent(param), body: readBody })
-      return json(200, body)
+      const source = sourceFor(ctx)
+      const body = await match.handler({ ctx, source, returns, query: req.url.searchParams, now: now(), param, body: readBody })
+      // Every read model learns about unreadable saved audits, including the ones that cannot see them.
+      const reasons = unreadable(source).extraCoverageReasons
+      const isEnvelope = (b: unknown): b is ReadModelEnvelope<unknown> => typeof b === 'object' && b !== null && Array.isArray((b as { coverage?: unknown }).coverage) && 'contractVersion' in b
+      return json(200, isEnvelope(body) ? withExtraCoverage(body, reasons) : body)
     } catch (error) {
       if (error instanceof IntelligenceAccessError) throw new HttpError(error.code === 'forbidden' ? 403 : 404, error.code === 'forbidden' ? 'Not permitted.' : 'Not found.', error.code)
       if (error instanceof AssistantRequestError) throw new HttpError(error.code === 'not_found' ? 404 : 400, error.message, error.code)

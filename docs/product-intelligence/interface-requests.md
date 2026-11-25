@@ -20,6 +20,7 @@ Each request says what the consumer needs, not how the owner should build it. Th
 | S-7 | **Persistence migration** for business memory (proposed DDL in `docs/product-intelligence/business-memory.md`), and for insight dismiss state. Include both in account export and delete (`server/account.ts`). | Memory is in-memory only today. No write route is exposed until it persists. | `InMemoryFeedbackStore` for tests; no HTTP write route. |
 | S-8 | **Organisations and roles** to replace `TenantContext.source = 'single_user_session'`. | Permissions such as `cases:approve` (separation of duties) cannot exist until then. | Tenant = user; actor = same user; fixed permission set. |
 | S-9 | **Shared entrypoints**: approve the small, flag-gated wiring of `server/intelligence.ts` in `server/app.ts` and `server/config.ts` (separate commit on this branch; flag `RECLAIM_INTELLIGENCE_API`, default off). | Read models need a server-derived tenant context. | Off by default; easy to drop the commit. |
+| S-10 | **Per-row audit reading**: a `ProjectStore` method that returns the readable audits plus the ids that failed to decrypt, instead of `list()` failing as a whole. Found in review; it also affects the existing `GET /api/projects`. | One damaged or wrong-key row currently makes every account-wide view unavailable for that user. | Intelligence routes return a typed 503 `saved_audit_unreadable` instead of a bare 500. |
 
 ## To Jagan (recovery orchestration, jobs, AI)
 

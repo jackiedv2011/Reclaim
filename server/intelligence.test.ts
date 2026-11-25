@@ -214,4 +214,20 @@ describe('intelligence API', () => {
     const bob = await signedIn(person('Max', 'max@example.test'))
     expect((await bob.client.post('/api/intelligence/assistant/ask', { question: 'Why does this insight exist?', subject: { insightId: items[0].id } })).status).toBe(404)
   })
+
+  it('marks every read model limited when a saved audit cannot be read, and never 500s on bad input or bad rows', async () => {
+    const owner = await signedIn(person('Nia', 'nia@example.test'))
+    store.upsert(owner.userId, { id: 'broken', name: 'broken', sourceLabel: 'x.csv', mode: 'upload', createdAt: 1, updatedAt: 2, environment: null })
+    for (const path of ['attention', 'vendors', 'baselines', 'insights', 'recovery', 'spend/summary']) {
+      const res = await owner.client.get(`/api/intelligence/${path}`)
+      expect(res.status, path).toBe(200)
+      expect(JSON.stringify(res.body.coverage), path).toContain('unreadable_saved_audit')
+    }
+    expect((await owner.client.get('/api/intelligence/vendors/%E0%A4%A')).status).toBe(400)
+    // A sealed payload that cannot be opened: a clear, typed refusal instead of a bare 500.
+    app.db.prepare("INSERT INTO projects (user_id, id, name, source_label, mode, created_at, updated_at, payload) VALUES (?, 'sealed', '', '', 'upload', 1, 2, 'v1.not-a-real-sealed-payload')").run(owner.userId)
+    const sealed = await owner.client.get('/api/intelligence/attention')
+    expect(sealed.status).toBe(503)
+    expect(JSON.stringify(sealed.body)).toContain('saved_audit_unreadable')
+  })
 })

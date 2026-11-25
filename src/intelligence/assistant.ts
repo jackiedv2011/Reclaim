@@ -48,9 +48,9 @@ import {
   type SourceRef,
   type TenantContext,
 } from './contracts.ts'
-import { IntelligenceAccessError, isCalendarDate, requirePermission } from './envelope.ts'
+import { IntelligenceAccessError, isCalendarDate, requirePermission, withExtraCoverage } from './envelope.ts'
 import { NET_UNAVAILABLE_REASON, SPEND_METRIC_VERSION, importCoverageSummary, spendByVendor, spendSummary, type SpendOptions, type SpendSummary } from './spend.ts'
-import {
+import { foldCases,
   RECOVERY_DEFINITIONS,
   RECOVERY_METRIC_VERSION,
   caseContributions,
@@ -229,7 +229,36 @@ export interface InsightLike {
   coverage: CoverageItem[]
   /** Reason codes (preferred) describing the insight's limits. */
   limits: string[]
-  figures?: MoneyAmount[]
+  /** `metric` is `<model>.<field>` of the read model the figure was copied from. */
+  figures?: Array<MoneyAmount & { metric?: string }>
+}
+
+/**
+ * Fixed wording per insight figure source, keyed by the source field. The
+ * insight's own labels are not echoed; an unknown source is said to be
+ * unlabelled rather than guessed. Customer-recorded and promised figures keep
+ * their caveats so they cannot be read as money matched or received.
+ */
+const INSIGHT_FIGURE_PHRASES: Readonly<Record<string, { metric: string; phrase: string }>> = {
+  amountMinor: { metric: 'insight.payment_amount', phrase: 'a payment in the covered records' },
+  medianPaymentMinor: { metric: 'insight.vendor_median_payment', phrase: "the vendor's median payment" },
+  upperBoundMinor: { metric: 'insight.vendor_usual_range_top', phrase: "the top of the vendor's usual range" },
+  amount: { metric: 'insight.recurring_amount', phrase: 'the recurring amount' },
+  'rows[].grossPaymentsMinor': { metric: 'insight.vendor_gross_payments', phrase: 'recorded payments to this vendor' },
+  'recentChange[].recentGrossMinor': { metric: 'insight.latest_window_payments', phrase: 'payments in the latest window' },
+  'recentChange[].priorGrossMinor': { metric: 'insight.prior_window_payments', phrase: 'payments in the prior window' },
+  approvedOutstanding: { metric: 'recovery.approved_outstanding', phrase: 'still open on the request' },
+  promised: { metric: 'recovery.promised', phrase: 'what the supplier said it would return (a statement, not money received)' },
+  customerRecordedReturns: { metric: 'recovery.customer_recorded_returns', phrase: 'returns you recorded (not matched to a bank or accounting record)' },
+}
+
+function insightFigurePhrase(metric: string | undefined): { metric: string; phrase: string } {
+  if (typeof metric === 'string' && metric.length <= 120) {
+    // Model names may contain dots ('recovery.overview'), so match the longest known field suffix.
+    const field = Object.keys(INSIGHT_FIGURE_PHRASES).filter((f) => metric.endsWith(`.${f}`)).sort((a, b) => b.length - a.length)[0]
+    if (field) return INSIGHT_FIGURE_PHRASES[field]
+  }
+  return { metric: 'insight.figure', phrase: 'an unlabelled figure' }
 }
 
 export interface AccountAssistantDeps {
@@ -844,8 +873,13 @@ function resolveSubject(run: Run): ResolvedSubject {
   if ('caseId' in s) {
     requirePermission(run.ctx, 'cases:read')
     const snapshots = call('cases', () => run.deps.cases.listCases(run.ctx, run.now))
-    const snap = snapshots.find((c) => c.caseId === s.caseId)
-    if (!snap) throw notFound()
+    const named = snapshots.find((c) => c.caseId === s.caseId)
+    if (!named) throw notFound()
+    // The same check saved in two audits is one case: answer and propose on the copy
+    // the account-wide views count (the most advanced), never a stale duplicate.
+    const canonicalId = foldCases(snapshots).canonicalOf.get(named.caseId) ?? named.caseId
+    const snap = snapshots.find((c) => c.caseId === canonicalId) ?? named
+    if (snap.caseId !== named.caseId) run.b.note('case_subject_folded', 'This check is saved in more than one audit; the answer uses the copy furthest along.')
     return { caseSnapshot: snap, insight: null }
   }
   if ('insightId' in s) {
@@ -1137,7 +1171,7 @@ function vendorDifferences(run: Run, prior: Period, recent: Period): string[] {
 function vendorRecentChange(run: Run, vendorKey: string, sentences: string[]): Section {
   const { b, ctx, deps, now } = run
   b.subjectUsed = true
-  const env = b.use(call('vendor_profiles', () => vendorProfile(ctx, deps.financial, deps.cases, deps.memory, vendorKey, now)))
+  const env = b.use(call('vendor_profiles', () => withExtraCoverage(vendorProfile(ctx, deps.financial, deps.cases, deps.memory, vendorKey, now), run.options.extraCoverageReasons)))
   const profile = env.result
   if (!profile) {
     sentences.push('This vendor is not in the covered records.')
@@ -1189,7 +1223,7 @@ function vendorContext(run: Run): Section {
     }
     vendorKey = found.vendorKey
   }
-  const env = b.use(call('vendor_profiles', () => vendorProfile(ctx, deps.financial, deps.cases, deps.memory, vendorKey!, now)))
+  const env = b.use(call('vendor_profiles', () => withExtraCoverage(vendorProfile(ctx, deps.financial, deps.cases, deps.memory, vendorKey!, now), run.options.extraCoverageReasons)))
   const profile = env.result
   if (!profile) {
     sentences.push('This vendor is not in the covered records.')
@@ -1254,8 +1288,13 @@ function insightExplanation(run: Run, resolved: ResolvedSubject): Section {
   sentences.push(rule ? `This insight was raised by the rule ${rule}.` : 'This insight was raised by a rule this assistant does not recognise.')
   const figures = (insight.figures ?? []).filter((m) => m && typeof m.currency === 'string' && Number.isSafeInteger(m.amountMinor))
   if (figures.length) {
-    for (const m of figures) b.figure('insight.figure', m)
-    sentences.push(`Figures calculated by the rule: ${formatMoneyList(figures.map((m) => ({ currency: safeCurrency(m.currency), amountMinor: m.amountMinor })))}.`)
+    const parts = figures.map((m) => {
+      const named = insightFigurePhrase(m.metric)
+      const amount = { currency: safeCurrency(m.currency), amountMinor: m.amountMinor }
+      b.figure(named.metric, amount)
+      return `${named.phrase}: ${formatMoneyList([amount])}`
+    })
+    sentences.push(`Figures the rule copied from the read models, each kept separate: ${parts.join('; ')}.`)
   }
   const limited = insight.coverage.filter((c) => c && c.status !== 'supported')
   for (const c of insight.coverage) {
@@ -1286,12 +1325,19 @@ function insightExplanation(run: Run, resolved: ResolvedSubject): Section {
 
 // ---------------------------------------------------------------- attention-based intents
 
-function queueItems(run: Run): { items: AttentionItem[]; env: ReadModelEnvelope<unknown>; truncated: boolean } {
+function queueItems(run: Run): { items: AttentionItem[]; env: ReadModelEnvelope<unknown>; truncated: boolean; casesConsidered: number } {
   const { b, ctx, deps, now } = run
-  const env = b.use(call('cases', () => attentionQueue(ctx, deps.cases, now, { limit: 200 })))
+  const env = b.use(call('cases', () => withExtraCoverage(attentionQueue(ctx, deps.cases, now, { limit: 200 }), run.options.extraCoverageReasons)))
   b.allowCases(call('cases', () => deps.cases.listCases(ctx, now)))
   const result = env.result
-  return { items: result?.items ?? [], env, truncated: Boolean(result?.nextCursor) }
+  return { items: result?.items ?? [], env, truncated: Boolean(result?.nextCursor), casesConsidered: result?.casesConsidered ?? 0 }
+}
+
+/** With no cases at all there is nothing to report on: say so instead of answering "none waiting". */
+function noCasesSection(run: Run, sentences: string[]): Section {
+  sentences.push('There are no cases in the covered records yet, so nothing can be waiting on you. Import a payment file to start.')
+  if (run.options.extraCoverageReasons?.length) sentences.push('Some saved audits could not be read and are not included.')
+  return { status: 'insufficient_data', sentences, routeHint: SCREENS.audits }
 }
 
 function itemName(item: AttentionItem): string {
@@ -1316,6 +1362,7 @@ function missingEvidence(run: Run, resolved: ResolvedSubject): Section {
   const { b } = run
   const sentences = claimSentences(run)
   const q = queueItems(run)
+  if (q.casesConsidered === 0) return noCasesSection(run, sentences)
   const { items, scope } = scopeItems(run, q.items, resolved)
   const waiting = items.filter((i) => i.kind === 'missing_evidence')
   const unreviewed = items.filter((i) => i.kind === 'unreviewed_finding')
@@ -1343,6 +1390,7 @@ function approvalsPending(run: Run, resolved: ResolvedSubject): Section {
   const { b } = run
   const sentences = claimSentences(run)
   const q = queueItems(run)
+  if (q.casesConsidered === 0) return noCasesSection(run, sentences)
   const { items, scope } = scopeItems(run, q.items, resolved)
   const approvals = items.filter((i) => i.category === 'requires_approval')
   const ready = items.filter((i) => i.kind === 'ready_to_send')
@@ -1514,7 +1562,7 @@ function actionRequest(run: Run, resolved: ResolvedSubject): Section {
     b.subjectUsed = true
     const snap = resolved.caseSnapshot
     b.allowCases([snap])
-    b.use(call('cases', () => attentionQueue(run.ctx, run.deps.cases, run.now, { limit: 1 })))
+    b.use(call('cases', () => withExtraCoverage(attentionQueue(run.ctx, run.deps.cases, run.now, { limit: 1 }), run.options.extraCoverageReasons)))
     const item = attentionItemFor(run.ctx, snap, run.now)
     const p = proposalItem(run, action, snap.caseId, snap.vendor.displayName, item && matches(item) ? item : null)
     if (item && !matches(item)) p.refusal = { code: 'not_available', detail: 'That step does not apply to this case in its current state.' }

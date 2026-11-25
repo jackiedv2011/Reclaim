@@ -601,6 +601,23 @@ describe('insight_explanation', () => {
     expect(a.routeHint).toMatchObject({ screen: 'insight:ins_1', existing: false })
   })
 
+  it('names each insight figure with fixed wording, keeping promised and customer-recorded amounts apart', async () => {
+    const figures = [
+      { currency: 'USD', amountMinor: 60000, metric: 'recovery.overview.approvedOutstanding' },
+      { currency: 'USD', amountMinor: 60000, metric: 'recovery.overview.promised' },
+      { currency: 'USD', amountMinor: 40000, metric: 'recovery.overview.customerRecordedReturns' },
+      { currency: 'USD', amountMinor: 100, metric: 'something.unknown <script>' },
+    ]
+    const deps = { ...depsA(), insightLookup: () => insight({ figures }) }
+    const a = await askAccount(ctxA, deps, 'Why was this raised?', NOW, { subject: { insightId: 'ins_1' } })
+    expect(a.figures.map((f) => f.metric)).toEqual(['recovery.approved_outstanding', 'recovery.promised', 'recovery.customer_recorded_returns', 'insight.figure'])
+    expect(a.answer).toContain('still open on the request: USD 600.00')
+    expect(a.answer).toContain('what the supplier said it would return (a statement, not money received): USD 600.00')
+    expect(a.answer).toContain('returns you recorded (not matched to a bank or accounting record): USD 400.00')
+    expect(a.answer).toContain('an unlabelled figure: USD 1.00')
+    expect(a.answer).not.toContain('script')
+  })
+
   it('without an insight subject asks which insight', async () => {
     const deps = { ...depsA(), insightLookup: () => insight() }
     expect((await askAccount(ctxA, deps, 'Why am I seeing this insight?', NOW)).status).toBe('needs_clarification')
@@ -775,5 +792,36 @@ describe('optional AI interpretation (fake gateways only)', () => {
     const ctx = fixtureContext('tenant_a', ['financial:read', 'cases:read'] as Permission[])
     await expect(askAccount(ctx, { ...depsA(), ai }, 'hmm', NOW)).rejects.toBeInstanceOf(IntelligenceAccessError)
     expect(ai.calls).toHaveLength(0)
+  })
+})
+
+describe('review fixes: no silent all-clear, folded case subjects', () => {
+  it('says there are no cases (insufficient data) instead of "nothing waiting" when the account has none, and carries unreadable-audit coverage', async () => {
+    const empty = depsFrom('tenant_a', [])
+    for (const q of ['What needs my approval?', 'Which cases need evidence?']) {
+      const a = await askAccount(ctxA, empty, q, NOW, { extraCoverageReasons: ['unreadable_saved_audit'] })
+      expect(a.status).toBe('insufficient_data')
+      expect(a.answer).toContain('could not be read')
+    }
+    const withCases = await askAccount(ctxA, approvalDeps().deps, 'What needs my approval?', NOW, { extraCoverageReasons: ['unreadable_saved_audit'] })
+    expect(withCases.status).toBe('answered')
+    expect(JSON.stringify(withCases.coverage)).toContain('unreadable_saved_audit')
+  })
+
+  it('answers about the most advanced copy when a case subject names a stale duplicate in another audit', async () => {
+    // The same CSV saved twice: in a1 the duplicate has been approved and requested; a0 is an untouched copy.
+    const stale = auditFromCsv('a0', TENANT_A_Q1, { updatedAt: T0 })
+    let advanced = auditFromCsv('a1', TENANT_A_Q1, { updatedAt: T0 })
+    const dup = findingsOf(advanced).find((f) => f.type === 'exact_duplicate')!
+    let state = approveRecovery({ ...EMPTY_CASE_STATE, decision: 'confirmed', decidedAt: 1, recoveryStage: 'confirmed' }, { at: 2, knownBeforeReclaim: false })
+    state = startRecoveryRequest(state, 1410.25, 3)
+    advanced = withCaseState(advanced, dup.id, state)
+    const deps = depsFrom('tenant_a', [stale, advanced], { a0: 1, a1: 3 })
+    const a = await askAccount(ctxA, deps, 'Approve this request', NOW, { subject: { caseId: `a0/${dup.id}` } })
+    expect(a.uncertainty.map((u) => u.code)).toContain('case_subject_folded')
+    const items = a.proposal?.items ?? []
+    expect(items.map((i) => i.caseId)).toEqual([`a1/${dup.id}`])
+    // The canonical copy is already requested, so nothing proposes approving it again.
+    expect(items.some((i) => i.commandProposal?.action === 'approve')).toBe(false)
   })
 })

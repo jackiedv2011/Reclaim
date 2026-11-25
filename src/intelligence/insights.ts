@@ -1606,7 +1606,8 @@ export interface InsightCitationView {
   coverage: CoverageItem[]
   limits: string[]
   limitsText: string
-  figures: MoneyAmount[]
+  /** `metric` = `<source model>.<source field>`, so a consumer can name each figure with its own fixed wording. */
+  figures: Array<MoneyAmount & { metric: string }>
 }
 
 export function toCitationView(insight: Insight): InsightCitationView {
@@ -1620,7 +1621,7 @@ export function toCitationView(insight: Insight): InsightCitationView {
     coverage: insight.coverage.map((c) => ({ ...c, reasons: [...c.reasons] })),
     limits: [...new Set(insight.coverage.filter((c) => c.status !== 'supported').flatMap((c) => c.reasons))].sort(compareText),
     limitsText: insight.limits,
-    figures: insight.figures.map((f) => ({ ...f.money })),
+    figures: insight.figures.map((f) => ({ ...f.money, metric: `${f.source.model}.${f.source.field}` })),
   }
 }
 
