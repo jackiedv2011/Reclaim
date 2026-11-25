@@ -1,8 +1,8 @@
 import Papa from 'papaparse'
-import type { APRecord, ParseResult, ImportRowResult } from '@/types'
-import { parseCurrency, parseDate, normalizeVendor } from '@/lib/format'
-import { resolveVendors } from '@/lib/vendorResolution'
-import { checksum, normalizeReference, vendorTransformations, recordIdentity } from './sourceIdentity'
+import type { APRecord, ParseResult, ImportRowResult } from '../types.ts'
+import { parseCurrency, parseDate, normalizeVendor } from './format.ts'
+import { resolveVendors } from './vendorResolution.ts'
+import { checksum, normalizeReference, vendorTransformations, recordIdentity } from './sourceIdentity.ts'
 
 /** Header spellings seen in QuickBooks, Xero, Bill and hand-built AP exports, after normalizeHeader. */
 const COLUMN_ALIASES: Record<string, string> = {

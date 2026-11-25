@@ -1,5 +1,5 @@
-import { damerauLevenshteinDistance } from '@/lib/stringDistance'
-import { normalizeAccountLast4 } from '@/lib/format'
+import { damerauLevenshteinDistance } from './stringDistance.ts'
+import { normalizeAccountLast4 } from './format.ts'
 
 export type ConfidenceTier = 'auto_merge' | 'needs_review' | 'no_match'
 
