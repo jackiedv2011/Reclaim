@@ -313,12 +313,12 @@ describe('AI tasks through the gateway', () => {
   it('refuses a standing field-set consent for document extraction', async () => {
     const doc = (await upload(alice.client, MALICIOUS_TEXT)).body.document
     await enableAi(alice.client)
+    // The gateway will not even grant a standing consent for this task.
     const standing = await alice.client.post('/api/ai/tasks/extract_document_facts/consent', { scope: 'field_set' })
+    expect(standing).toMatchObject({ status: 400, body: { code: 'ai_consent_scope' } })
     answers.extract_document_facts = { facts: [] }
     const viaGateway = await alice.client.post('/api/ai/tasks/extract_document_facts/run', { projectId: 'p1', findingId, input: { documentId: doc.id } })
-    expect(viaGateway).toMatchObject({ status: 409, body: { code: 'ai_packet_consent_only' } })
-    const viaRoute = await alice.client.post(`/api/documents/${doc.id}/extract/ai`, { consentId: standing.body.consent.id })
-    expect(viaRoute).toMatchObject({ status: 409, body: { code: 'ai_packet_consent_required' } })
+    expect(viaGateway).toMatchObject({ status: 409, body: { code: 'ai_consent_required' } })
     expect((await alice.client.post(`/api/documents/${doc.id}/extract/ai`, {})).body.code).toBe('ai_packet_consent_required')
     expect(mock.calls).toHaveLength(0)
   })

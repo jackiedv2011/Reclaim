@@ -161,8 +161,9 @@ export class AiPolicyStore {
       const problem = usable(c)
       return problem ? { ok: false, code: 'ai_consent_stale', reason: problem } : { ok: true, consent: c! }
     }
-    const standing = (this.db.prepare("SELECT * FROM ai_consents WHERE user_id = ? AND task = ? AND scope = 'field_set' AND revoked_at IS NULL ORDER BY created_at DESC").all(tenantId, want.task) as unknown as ConsentRow[])
-      .find((c) => usable(c) === null)
+    // Without a named consent: a one-time consent for exactly this packet first, then a standing one.
+    const candidates = this.db.prepare("SELECT * FROM ai_consents WHERE user_id = ? AND task = ? AND revoked_at IS NULL AND used_at IS NULL AND (scope = 'field_set' OR packet_hash = ?) ORDER BY scope = 'packet' DESC, created_at DESC").all(tenantId, want.task, want.packetHash) as unknown as ConsentRow[]
+    const standing = candidates.find((c) => usable(c) === null)
     return standing ? { ok: true, consent: standing } : { ok: false, code: 'ai_consent_required', reason: 'Review what this task sends and give consent first.' }
   }
 

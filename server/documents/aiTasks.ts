@@ -255,6 +255,8 @@ export function createDocumentTasks(deps: DocumentTaskDeps) {
       'never: lines that read like instructions, lines with bank details, or the rest of the document',
     ],
     permission: 'ai.invoke',
+    // Enforced by the gateway when consent is granted and when it is used.
+    consentScopes: ['packet'],
     inputSchema: ExtractInput,
     outputSchema: ExtractOutput,
     system: EXTRACT_SYSTEM,

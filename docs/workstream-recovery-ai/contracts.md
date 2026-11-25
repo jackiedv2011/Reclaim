@@ -47,7 +47,7 @@ HTTP (all signed-in, tenant-scoped):
 | `GET /api/ai/invocations` | | ledger rows |
 | `POST /api/ai/draft` (existing browser contract, unchanged shape) | as before | `{ subject, body, invocationId }`; `403 ai_off`, `409 ai_consent_required` |
 
-Registered tasks: `draft_recovery_request` (J1). J4 adds `classify_supplier_reply`; J5 adds `extract_document_facts`, `summarize_case_evidence`, `second_look`. Groups register their tasks from their own `create*Routes`.
+Registered tasks: `draft_recovery_request` (J1), `classify_supplier_reply` (J4), `summarize_case_evidence`, `second_look`, `extract_document_facts` (J5; packet consent only via `consentScopes: ['packet']`). Groups register their tasks from their own `create*Routes`. A run without `consentId` uses an unused one-time consent for exactly that packet, else a standing one.
 
 Validators (`server/aiGateway/validators.ts`): money in `$`, `USD`, `US$`, "dollars", `k`/`million`, other currencies and percentages; links and bare domains; emails and phone numbers; bank details (IBAN, routing/account wording, long digit runs); commitments; legal threats and accusations (outbound); written dates; unknown `[[TOKENS]]`; forged record ids.
 
@@ -70,7 +70,19 @@ Lifecycle: `pending → executing → executed | failed`; `pending → rejected 
 | `POST /api/approvals/:id/reject` | `{ note }` |
 | `POST /api/approvals/:id/edit` | `{ payload }` → new proposal, old one `superseded` |
 
+## Jobs (J3) — details in `J3-jobs.md`
+
+One SQLite job runner (`server/jobs/runner.ts`): idempotency key per tenant+kind, leases, one running job per tenant, bounded backoff, dead-letter, timeout, cancellation, refs-only payloads. Handlers: `recovery.scan`, `recovery.reminder`, `recovery.prepare_follow_up` (proposes `send_follow_up`, origin `job`), `recovery.collect_evidence`, `notify.digest` (fake transport only). Other workstreams register with `jobSystemFor(db).register(kind, def)`. No scheduler runs. HTTP: `GET /api/jobs`, `POST /api/jobs/scan`, `POST /api/jobs/:id/cancel`, `GET /api/notifications`, `POST /api/notifications/:id/read`, `GET|PUT /api/notifications/preferences`. Tables: `jobs, job_events, notifications, notification_preferences`.
+
+## Inbound replies (J4) — details in `J4-inbound.md`
+
+Per-case reply address `reply+<token>@<inboundDomain>` (token hash stored). Signed fixture webhook `POST /api/inbound/webhook/:provider` (HMAC over `timestamp.body`, ±5 min, replay + duplicate guards, 1 MB). Quarantine on failed DMARC/DKIM, sender domain ≠ recorded recipient domain, revoked/old-generation token, case not `requested`. Accepted replies → deterministic classification → `vendor_update` proposal (origin `inbound`). Opt-in AI reading via `POST /api/inbound/messages/:id/classify`. Reads: `GET /api/inbound/messages`, `/:id`; routes: `POST|GET /api/inbound/routes`, `POST /api/inbound/routes/revoke`. Off unless `settings.inboundWebhookSecret` / `inboundDomain` are passed. Tables: `inbound_routes, inbound_webhook_seen, inbound_messages`.
+
+## Documents & evidence intelligence (J5) — details in `J5-documents.md`
+
+`POST /api/documents` (JSON base64, ≤ 2 MB, magic-byte sniffing; text/CSV parsed, PDF stored as `unsupported_format`), `GET /api/documents`, `DELETE /api/documents/:id`, `POST /api/documents/:id/extract` (deterministic, line provenance) and `/extract/ai`, `POST /api/documents/:id/facts/:factId/handoff` → `FactVerifier` (**FIXTURE** until Sid). `GET /api/recovery/cases/:projectId/:findingId/evidence` (cited summary + second look + documents + facts), `POST …/summary/ai`, `POST …/second-look/ai`. Tables: `documents, proposed_facts`.
+
 ## Requests to other founders
 
-- **Sid** — (1) tenancy/roles to replace `server/tenant.ts`; (2) a typed `ReturnMatch` result (proposed/verified, partial, reversed) we turn into `return_match` settlement proposals — we will not match money ourselves; (3) validated facts for overpayment and unapplied-credit gates; (4) a `verifyProposedFacts()` entry point for document extraction (J5); (5) migration review of the new tables: `ai_policies, ai_consents, ai_invocations, action_proposals, action_proposal_events` (+ J3–J5 tables); (6) a settlement-reversal transition in the case model (we won't edit `caseState.ts`/`financials.ts`).
+- **Sid** — (1) tenancy/roles to replace `server/tenant.ts`; (2) a typed `ReturnMatch` result (proposed/verified, partial, reversed) we turn into `return_match` settlement proposals — we will not match money ourselves; (3) validated facts for overpayment and unapplied-credit gates; (4) a `verifyProposedFacts()` entry point for document extraction (J5); (5) migration review of the new tables listed in `HANDOFF.md`; (6) a settlement-reversal transition in the case model (we won't edit `caseState.ts`/`financials.ts`).
 - **Aditya** — approval inbox UI over `/api/approvals`; AI settings + consent preview screen over `/api/ai/policy`, `/preview`, `/consent`; the "Draft with AI" button can now be enabled before approval (`RecoveryPanels.tsx` still requires approval first) and should show the `ai_off` / `ai_consent_required` messages.
