@@ -64,9 +64,9 @@ Production: `npm run build && NODE_ENV=production APP_ORIGIN=https://… npm sta
 | Vendor bank-account change | Needs review | Prompts an internal verification step |
 | Unusually large vendor payment | Needs review | Prompts a contract or purchase-order check |
 
-## Expected CSV format
+## Expected file format
 
-Required columns are `vendor`, `payment_date`, and `amount_paid`. Other fields strengthen the analysis when available. Files with these headings (or the common spellings in `src/lib/csvMapping.ts`) import straight away. For any other headings, the upload shows the file's own columns and asks which is which; it also asks when dates could be day first or month first, and when every payment is negative. Title lines above the headings are skipped.
+Required columns are `vendor`, `payment_date`, and `amount_paid`. Other fields strengthen the analysis when available. Files with these headings (or the common spellings in `src/lib/csvMapping.ts`) import straight away. For any other headings, the upload shows the file's own columns and asks which is which; it also asks when dates could be day first or month first, and when every payment is negative. Title lines above the headings are skipped. Excel workbooks (`.xlsx`) and reports grouped by vendor are read too.
 
 | Column | Notes |
 | --- | --- |

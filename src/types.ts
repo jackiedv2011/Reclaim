@@ -23,7 +23,7 @@ export interface SourceProvenance {
 }
 /** What Reclaim did to read a file beyond taking recognised headings as they are. Absent when there was nothing to do. */
 export interface ImportReading {
-  /** Spreadsheet row the headings were on. */
+  /** Spreadsheet row the headings were on; 0 when the file has none. */
   headerRow: number
   /** Non-blank lines above the headings that were left out. */
   titleLines: number
@@ -31,8 +31,14 @@ export interface ImportReading {
   columns?: Record<string, string>
   /** How dates like 04/03/2026 were read, when that was not simply month first. */
   dateOrder?: DateOrder
-  /** Every amount paid was negative and the person said they are payments. */
+  /** Most amounts paid were negative and the person said they are payments. */
   signFlipped?: true
+  /** Each payment's vendor came from the line above its group. */
+  vendorGrouped?: true
+  /** Amounts were written 1.234,56. */
+  decimalComma?: true
+  /** The workbook sheet the rows came from. */
+  sheet?: { name: string; others: string[] }
 }
 export interface ImportRowResult {
   rowNumber: number
@@ -153,4 +159,6 @@ export interface ParseResult {
   /** Header cells present in the file that didn't match any recognized column. */
   unrecognizedHeaders: string[]
   reading?: ImportReading
+  /** Problems with the file itself, such as a quotation mark that is never closed. */
+  warnings?: string[]
 }

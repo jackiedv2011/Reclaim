@@ -45,6 +45,11 @@ describe('parseDate', () => {
     expect(parseDate('1 Sept 2026')).toEqual(new Date(2026, 8, 1))
   })
 
+  it('reads past a time of day, and YYYYMMDD', () => {
+    for (const raw of ['03/04/2026 12:00:00 AM', '3/4/2026 10:15', '4 Mar 2026 10:15 pm', '2026-03-04 00:00:00', '20260304', '03.04.2026']) expect(parseDate(raw), raw).toEqual(new Date(2026, 2, 4))
+    for (const raw of ['20261304', '12345678', '2026030', '03/04.2026']) expect(parseDate(raw), raw).toBeNull()
+  })
+
   it('rejects a month-name date that does not exist or is incomplete', () => {
     for (const raw of ['31 Feb 2026', 'Mar 2026', '4 Mar', '4 Foo 2026', '4 Mars 2026', '4 constructor 2026', 'Total Mar 4 2026', 'Acme 12 2026 Ltd']) expect(parseDate(raw), raw).toBeNull()
   })

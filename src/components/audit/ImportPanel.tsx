@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { AlertCircle, AlertTriangle, CheckCircle2, Columns3, Download, FileText, HelpCircle, ShieldCheck, Sparkles, Upload, X } from 'lucide-react'
 import { parseCsv } from '@/lib/csv'
-import { canMatchColumns, readCsvTable, readingNotes, readsWithoutAsking, recognizedColumns, type CsvTable } from '@/lib/csvMapping'
+import Papa from 'papaparse'
+import { canMatchColumns, dataRows, headingsOf, readCsvTable, readingNotes, readsWithoutAsking, recognizedColumns, tableOf, type CsvTable } from '@/lib/csvMapping'
+import { WorkbookError, readWorkbook, spreadsheetKind } from '@/lib/xlsx'
 import { ColumnMatch, type ColumnChoices } from './ColumnMatch'
 import type { ParseResult } from '@/types'
 import { assessDataReadiness, assessFatalFile } from '@/audit/dataReadiness'
@@ -69,6 +71,7 @@ interface PendingUpload {
   parsed: ParseResult
   /** The file and the choices made about it, so the person can go back to them. Not for QuickBooks pulls. */
   table?: CsvTable
+  sheets?: CsvTable[]
   choices?: ColumnChoices
   quickbooks?: QuickBooksFacts
   quickbooksPreview?: ReturnType<QuickBooksImportContext['preview']>
@@ -77,6 +80,8 @@ interface PendingUpload {
 interface MatchingUpload {
   file: File
   table: CsvTable
+  /** Every sheet of a workbook that could hold payments. */
+  sheets: CsvTable[]
   choices: ColumnChoices | null
   notice: string | null
 }
@@ -87,8 +92,30 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+/** Text as the file meant it: UTF-16 and UTF-8 by their marks, and older Windows exports that are neither. */
+function decodeText(bytes: Uint8Array): string {
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes)
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes)
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+  } catch {
+    return new TextDecoder('windows-1252').decode(bytes)
+  }
+}
+
+/** The workbook's sheets as tables, the likeliest to hold payments first. */
+async function workbookTables(bytes: Uint8Array): Promise<CsvTable[]> {
+  const sheets = await readWorkbook(bytes)
+  const tables = sheets.map((sheet) => {
+    const others = sheets.filter((other) => other !== sheet).map((other) => other.name)
+    return tableOf(Papa.unparse(sheet.rows), sheet.rows, [], { name: sheet.name, others })
+  })
+  const rank = (table: CsvTable) => (readsWithoutAsking(table).ask ? 0 : 1e9) + (canMatchColumns(table) ? dataRows(table).length : -1)
+  return tables.map((table) => ({ table, rank: rank(table) })).sort((a, b) => b.rank - a.rank).map(({ table }) => table)
+}
+
 /**
- * The one piece of UI that turns a CSV into ledger-ready records — reused as
+ * The one piece of UI that turns a CSV or Excel export into ledger-ready records — reused as
  * the full-page first-time entry (AuditEntry) and as a lightweight "Add
  * records" dialog for a returning user. Never gates a returning user; it
  * only ever produces an ImportInput for the caller to merge into the ledger.
@@ -110,10 +137,14 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
     if (pending) confirmRef.current?.focus()
   }, [pending])
 
+  const reads = useRef(0)
+
   async function handleFile(file: File, quickbooks?: QuickBooksFacts) {
+    // A second file chosen while the first is still being read replaces it.
+    const read = (reads.current += 1)
     setParseError(null)
-    if (/\.(xlsx|xlsm|xls|numbers|ods)$/i.test(file.name)) {
-      setParseError('Spreadsheet files can’t be read directly yet. In Excel or Sheets, use File → Save As / Download → CSV, then upload that file.')
+    if (/\.(numbers|ods|xlsb)$/i.test(file.name)) {
+      setParseError('That spreadsheet format can’t be read. Use File → Save As / Download → CSV or Excel (.xlsx), then upload that file.')
       return
     }
     if (file.size > MAX_UPLOAD_BYTES) {
@@ -121,21 +152,34 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
       return
     }
     try {
-      const text = await file.text()
-      // A ZIP header (every .xlsx) or NUL bytes mean this is not a text CSV, whatever it is named.
-      if (text.startsWith('PK\u0003\u0004') || text.slice(0, 4096).includes('\u0000')) {
-        setParseError('That file isn’t a CSV. Export the ledger as CSV (comma-separated values) and upload that.')
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      let tables: CsvTable[]
+      if (spreadsheetKind(bytes)) {
+        tables = (await workbookTables(bytes)).filter((table, index) => index === 0 || canMatchColumns(table))
+      } else {
+        const text = decodeText(bytes)
+        // NUL bytes mean this is not a text CSV, whatever it is named.
+        if (text.slice(0, 4096).includes('\u0000')) {
+          setParseError('That file isn’t a CSV or an Excel workbook. Export the ledger as CSV or .xlsx and upload that.')
+          return
+        }
+        tables = [readCsvTable(text)]
+      }
+      if (reads.current !== read) return
+      if (tables.length === 0) {
+        setParseError('That workbook has no rows in any visible sheet.')
         return
       }
-      const table = readCsvTable(text)
+      const table = tables[0]
+      const match = (notice: string | null) => setMatching({ file, table, sheets: tables, choices: null, notice })
       // QuickBooks pulls are written by Reclaim itself; there is never anything to ask about them.
-      const asIs = quickbooks ? { ask: false as const, dateOrder: undefined } : readsWithoutAsking(table)
-      if (asIs.ask && canMatchColumns(table)) {
-        setMatching({ file, table, choices: null, notice: null })
+      const asIs = readsWithoutAsking(table)
+      if (!quickbooks && canMatchColumns(table) && (asIs.ask || table.warnings.length > 0 || tables.length > 1)) {
+        match(null)
         return
       }
-      const dateOrder = asIs.ask ? undefined : asIs.dateOrder
-      const parsed = parseCsv(table, dateOrder ? { dateOrder } : {})
+      const choices = quickbooks || asIs.ask ? {} : { dateOrder: asIs.dateOrder, amountStyle: asIs.amountStyle }
+      const parsed = parseCsv(table, choices)
       // A QuickBooks change pull can carry no payment rows (nothing changed, or only voids); that is still an answer.
       if (parsed.records.length === 0 && !(quickbooks && parsed.skippedCount === 0)) {
         const guidance = assessFatalFile(parsed)
@@ -151,14 +195,21 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
         } else {
           const first = parsed.rowResults?.find((row) => row.status === 'rejected')
           const why = `Reclaim recognised the headings, but no row had a vendor, a payment date and an amount paid under them.${first ? ` Row ${first.rowNumber}: ${first.reason}.` : ''}`
-          if (canMatchColumns(table)) setMatching({ file, table, choices: null, notice: `${why} Check that each field points at the right column.` })
+          if (!quickbooks && canMatchColumns(table)) match(`${why} Check that each field points at the right column.`)
           else setParseError(`${why} Check the required format below.`)
         }
         return
       }
-      setPending({ file, parsed, ...(quickbooks ? {} : { table, choices: { headerIndex: table.headerIndex, columns: recognizedColumns(table.rows[table.headerIndex] ?? []), ...(dateOrder ? { dateOrder } : {}) } }), ...(quickbooks ? { quickbooks, ...(quickbooksContext ? { quickbooksPreview: quickbooksContext.preview(parsed, quickbooks) } : {}) } : {}) })
-    } catch {
-      setParseError('Could not read that file. Please upload a valid CSV.')
+      setPending({
+        file,
+        parsed,
+        ...(quickbooks
+          ? { quickbooks, ...(quickbooksContext ? { quickbooksPreview: quickbooksContext.preview(parsed, quickbooks) } : {}) }
+          : { table, sheets: tables, choices: { headerIndex: table.headerIndex, columns: recognizedColumns(headingsOf(table)), ...choices } }),
+      })
+    } catch (error) {
+      if (reads.current !== read) return
+      setParseError(error instanceof WorkbookError ? error.message : 'Could not read that file. Please upload a valid CSV or Excel (.xlsx) file.')
     }
   }
 
@@ -178,21 +229,24 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
   if (matching) {
     return (
       <ColumnMatch
+        key={`${reads.current}-${matching.table.sheet?.name ?? ''}`}
         table={matching.table}
+        sheets={matching.sheets.flatMap((table) => table.sheet?.name ?? [])}
+        onSheet={(name) => setMatching({ ...matching, table: matching.sheets.find((table) => table.sheet?.name === name) ?? matching.table, choices: null, notice: null })}
         filename={matching.file.name}
         initial={matching.choices}
         notice={matching.notice}
         onCancel={() => setMatching(null)}
         onDone={(parsed, choices) => {
           setMatching(null)
-          setPending({ file: matching.file, parsed, table: matching.table, choices })
+          setPending({ file: matching.file, parsed, table: matching.table, sheets: matching.sheets, choices })
         }}
       />
     )
   }
 
   if (pending) {
-    const { table, choices } = pending
+    const { table, choices, sheets = table ? [table] : [] } = pending
     const notes = readingNotes(pending.parsed.reading)
     const readiness = assessDataReadiness(pending.parsed)
     const recordCount = pending.parsed.records.length
@@ -245,6 +299,13 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
           </div>
         ) : null}
 
+        {(pending.parsed.warnings ?? []).map((warning) => (
+          <div className="wk-callout" data-tone="danger" role="alert" key={warning}>
+            <AlertCircle aria-hidden="true" />
+            <div className="wk-callout-body"><p>{warning}</p></div>
+          </div>
+        ))}
+
         {notes.length > 0 ? (
           <div className="wk-import-reading">
             <span className="wk-label">How Reclaim read this file</span>
@@ -254,7 +315,7 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
 
         {table && choices ? (
           <div className="wk-import-links">
-            <button type="button" className="wk-link" onClick={() => { setPending(null); setMatching({ file: pending.file, table, choices, notice: null }) }}>
+            <button type="button" className="wk-link" onClick={() => { setPending(null); setMatching({ file: pending.file, table, sheets, choices, notice: null }) }}>
               <Columns3 aria-hidden="true" />
               Check the column matches
             </button>
@@ -346,20 +407,20 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
           <Upload />
         </span>
         <div className="wk-drop-copy">
-          <strong>{isDragging ? 'Drop the file to read it' : 'Drop a CSV here, or choose a file'}</strong>
-          <span>Accepts .csv exports from QuickBooks, Xero, or your own AP ledger</span>
+          <strong>{isDragging ? 'Drop the file to read it' : 'Drop a CSV or Excel file here, or choose one'}</strong>
+          <span>Accepts .csv and .xlsx exports from QuickBooks, Xero, BILL, NetSuite or your own ledger</span>
         </div>
         <input
           ref={fileInputRef}
           type="file"
-          accept=".csv"
+          accept=".csv,.txt,.tsv,.xlsx,.xlsm"
           onChange={handleInputChange}
           aria-label="Upload a CSV ledger"
         />
         {/* A click here bubbles to the zone, which opens the picker once. */}
         <button type="button" className="wk-btn" data-variant="primary" autoFocus={autoFocusUpload}>
           <Upload aria-hidden="true" />
-          Upload CSV
+          Upload file
         </button>
       </div>
 
@@ -422,7 +483,7 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
           <DialogPrimitive.Content className="wk wk-panel wk-flow-panel" data-size="wide">
             <header className="wk-panel-head">
               <div>
-                <DialogPrimitive.Title className="wk-display wk-h2">Required CSV format</DialogPrimitive.Title>
+                <DialogPrimitive.Title className="wk-display wk-h2">Expected columns</DialogPrimitive.Title>
                 <DialogPrimitive.Description className="wk-dim">
                   Files with these headings import straight away. With any others, Reclaim shows you the columns and asks which is which. Dates can be 2026-03-04, 04/03/2026 or 4 Mar 2026. Amounts may include $ and commas.
                 </DialogPrimitive.Description>

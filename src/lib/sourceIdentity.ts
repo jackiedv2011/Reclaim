@@ -1,5 +1,5 @@
 import type { APRecord, SourceProvenance } from '@/types'
-import { normalizeVendor } from './format'
+import { isoDay, normalizeVendor, toCents } from './format'
 
 /** SHA-256 over UTF-8. Synchronous because CSV parsing and ledger merges are synchronous. */
 export function checksum(value: string): string {
@@ -75,14 +75,33 @@ export function vendorTransformations(raw:string):string[] {
 export function sourceCell(source: SourceProvenance | undefined, field: string): string | undefined {
   if (!source?.raw) return undefined
   const key = source.columns ? source.columns[field] : field
-  return key === undefined ? undefined : source.raw[key]
+  return key !== undefined && Object.hasOwn(source.raw, key) ? source.raw[key] : undefined
 }
 export function sourceSignature(record: APRecord): string {
   const raw=record.source?.raw
-  return JSON.stringify(raw ? Object.keys(raw).sort().map(k=>[k,raw[k]]) : [record.vendor,record.invoiceNumber,record.paymentDate.toISOString(),record.invoiceAmount,record.amountPaid,record.currency??null,record.terms,record.bankAccountLast4,record.category])
+  return JSON.stringify(raw ? Object.keys(raw).sort().map(k=>[k,raw[k]]) : [record.vendor,record.invoiceNumber,isoDay(record.paymentDate),record.invoiceAmount,record.amountPaid,record.currency??null,record.terms,record.bankAccountLast4,record.category])
 }
 export function recordIdentity(record:APRecord):string {
   return record.externalTransactionId
-    ? JSON.stringify(['external',record.company??null,record.sourceAccount??null,record.externalTransactionId])
-    : JSON.stringify(['raw', record.company??null,record.sourceAccount??null,sourceCell(record.source,'vendor')??record.vendor,sourceCell(record.source,'invoice_number')??record.invoiceNumber,record.paymentDate.toISOString(),record.amountPaid,record.currency??null,record.transactionType??null])
+    // One payment can settle several bills, so the payment's ID alone does not identify a row.
+    ? JSON.stringify(['external',record.company??null,record.sourceAccount??null,record.externalTransactionId,normalizeReference(record.invoiceNumber).value])
+    // A vendor taken from the line above its group has an empty cell of its own.
+    : JSON.stringify(['raw', record.company??null,record.sourceAccount??null,sourceCell(record.source,'vendor')||record.vendor,sourceCell(record.source,'invoice_number')??record.invoiceNumber,isoDay(record.paymentDate),record.amountPaid,record.currency??null,record.transactionType??null])
+}
+
+const clean = (value: string | null | undefined) => (value ?? '').trim().toLowerCase()
+const agree = (a: string | null | undefined, b: string | null | undefined) => !clean(a) || !clean(b) || clean(a) === clean(b)
+
+/** What makes two rows from different files look like one payment, however each file was mapped or spelled. */
+export function paymentKey(record: APRecord): string {
+  return JSON.stringify([normalizeVendor(record.vendor), normalizeReference(record.invoiceNumber).value, isoDay(record.paymentDate), toCents(record.amountPaid)])
+}
+/** The same cells, whatever was made of them: catches a file whose dates were read the other way round last time. */
+export function cellsKey(record: APRecord): string | null {
+  const date = sourceCell(record.source, 'payment_date')
+  return date === undefined ? null : JSON.stringify([normalizeVendor(record.vendor), normalizeReference(record.invoiceNumber).value, date.trim(), toCents(Math.abs(record.amountPaid))])
+}
+/** Whether what both rows say about company, account and currency allows them to be the same payment. */
+export function couldBeSamePayment(a: APRecord, b: APRecord): boolean {
+  return agree(a.company, b.company) && agree(a.sourceAccount, b.sourceAccount) && agree(a.currency, b.currency) && agree(a.externalTransactionId, b.externalTransactionId)
 }

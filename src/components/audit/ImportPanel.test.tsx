@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { buildXlsx, plainRows } from '@/test/buildXlsx'
 import { ImportPanel, type ImportInput } from '@/components/audit/ImportPanel'
 
 function mount() {
@@ -11,16 +12,22 @@ function mount() {
 }
 
 describe('upload guard rails', () => {
-  it('an .xlsx file gets told to export as CSV, not "no columns recognized"', async () => {
+  it('a file that only looks like a workbook says so, and what to do', async () => {
     const { upload, onImport } = mount()
     upload(new File(['PK\u0003\u0004binary'], 'ledger.xlsx'))
-    expect(await screen.findByRole('alert')).toHaveTextContent(/save as .* csv/i)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/isn’t a readable Excel workbook.*save it as CSV/)
     expect(onImport).not.toHaveBeenCalled()
+  })
+
+  it('an old .xls or locked workbook is told apart', async () => {
+    const { upload } = mount()
+    upload(new File([new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 1, 2])], 'ledger.xls'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/old \.xls file or a password-protected workbook/)
   })
 
   it('a binary file renamed to .csv is recognized as not a CSV', async () => {
     const { upload } = mount()
-    upload(new File(['PK\u0003\u0004\u0000\u0000[Content_Types].xml'], 'ledger.csv'))
+    upload(new File(['\u0000\u0001binary'], 'ledger.csv'))
     expect(await screen.findByRole('alert')).toHaveTextContent(/isn’t a csv/i)
   })
 
@@ -34,7 +41,7 @@ describe('upload guard rails', () => {
     const { upload } = mount()
     const big = new File(['x'], 'huge.csv')
     Object.defineProperty(big, 'size', { value: 60 * 1024 * 1024 })
-    const text = vi.spyOn(big, 'text')
+    const text = vi.spyOn(big, 'arrayBuffer')
     upload(big)
     expect(await screen.findByRole('alert')).toHaveTextContent(/60\.0 MB/)
     expect(text).not.toHaveBeenCalled()
@@ -142,7 +149,7 @@ describe('matching columns', () => {
     expect(continueButton()).toBeDisabled()
     await user.click(screen.getByRole('radio', { name: /Yes, flip the sign.*-1,200\.00 is read as 1,200\.00, a payment/ }))
     await user.click(continueButton())
-    expect(screen.getByText('Negative amounts read as payments (sign flipped).')).toBeInTheDocument()
+    expect(screen.getByText('Negative amounts read as payments (every sign flipped).')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Run the audit' }))
     expect(imported(onImport).records.map((r) => r.amountPaid)).toEqual([1200, 80])
     expect(imported(onImport).records[0].source?.raw?.amount_paid).toBe('-1,200.00')
@@ -214,5 +221,72 @@ describe('matching columns', () => {
     upload(csv('Contact,Date,Amount', 'Acme,2026-03-04,10.00'))
     await user.click(await screen.findByRole('button', { name: 'Choose a different file' }))
     expect(screen.getByLabelText(/upload a csv ledger/i)).toBeInTheDocument()
+  })
+
+  it('reads an Excel workbook with known headings straight through, dates and all', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    const rows = '<row r="1"><c r="A1" t="inlineStr"><is><t>Vendor</t></is></c><c r="B1" t="inlineStr"><is><t>Payment Date</t></is></c><c r="C1" t="inlineStr"><is><t>Amount Paid</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Acme</t></is></c><c r="B2" s="1"><v>46085</v></c><c r="C2"><v>1200.5</v></c></row>'
+    upload(new File([buildXlsx([{ name: 'Payments', rows }]) as BlobPart], 'payments.xlsx'))
+    await user.click(await screen.findByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records[0]).toMatchObject({ vendor: 'Acme', amountPaid: 1200.5, paymentDate: new Date(2026, 2, 4) })
+    expect(imported(onImport).records[0].source).toMatchObject({ rowNumber: 2, raw: { payment_date: '2026-03-04', amount_paid: '1200.5' } })
+  })
+
+  it('a workbook with several sheets asks which to read', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    const sheet = (vendor: string) => plainRows([['Vendor', 'Payment Date', 'Amount Paid'], [vendor, '2026-03-04', 10], [vendor, '2026-03-05', 20]])
+    upload(new File([buildXlsx([{ name: 'January', rows: sheet('Acme') }, { name: 'Notes', rows: plainRows([['hello']]) }, { name: 'February', rows: sheet('Beta') }]) as BlobPart], 'payments.xlsx'))
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Read the sheet' }), 'February')
+    await user.click(continueButton())
+    expect(screen.getByText('Read from the sheet “February”; left out: “January”, “Notes”.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records.map((r) => r.vendor)).toEqual(['Beta', 'Beta'])
+  })
+
+  it('a report grouped by vendor says so, and can be told otherwise', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(csv(',Date,Memo,Amount', 'Acme,,,', ',2026-01-05,,100.00', ',2026-01-20,,50.00', 'Total for Acme,,,150.00'))
+    const box = await screen.findByRole('checkbox', { name: /Each vendor’s name is written once/ })
+    expect(box).toBeChecked()
+    await user.click(continueButton())
+    expect(screen.getByText('Vendor names taken from the line above each group of payments.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records.map((r) => r.vendor)).toEqual(['Acme', 'Acme'])
+  })
+
+  it('a file with no headings keeps its first payment', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(csv('Acme,2026-01-05,100.00', 'Beta,2026-01-06,200.00'))
+    expect(await screen.findByRole('combobox', { name: 'Headings are on row' })).toHaveValue('0')
+    await user.selectOptions(select('Vendor'), '0')
+    await user.click(continueButton())
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records.map((r) => r.vendor)).toEqual(['Acme', 'Beta'])
+  })
+
+  it('an older Windows export keeps its accents apart', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(new File([new Uint8Array([...'vendor,payment_date,amount_paid\nM'].map((c) => c.charCodeAt(0)).concat([0xfc], [...'ller,2026-01-05,1\n'].map((c) => c.charCodeAt(0))))], 'old.csv'))
+    await user.click(await screen.findByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records[0].vendor).toBe('Müller')
+  })
+
+  it('a second file chosen while the first is being read replaces it', async () => {
+    const { upload } = mount()
+    const slow = csv('Contact,Date,Amount', 'Slow,2026-03-04,10.00')
+    let release = () => {}
+    const bytes = slow.arrayBuffer()
+    slow.arrayBuffer = () => new Promise((resolve) => { release = () => void bytes.then(resolve) })
+    upload(slow)
+    upload(csv('Contact,Date,Amount', 'Fast,2026-03-04,10.00'))
+    expect((await screen.findAllByText('Fast')).length).toBeGreaterThan(0)
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.queryByText('Slow')).not.toBeInTheDocument()
   })
 })

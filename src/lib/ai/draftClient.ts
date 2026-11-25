@@ -1,3 +1,4 @@
+import { isoDay } from '@/lib/format'
 import type { CaseState, RecoveryMethod } from '@/ledger/caseState'
 import type { Finding } from '@/types'
 import { FINDING_TYPE_LABELS } from '@/lib/labels'
@@ -46,7 +47,7 @@ export function buildDraftRequest(
   state: CaseState,
   options: { amountRequested: number; method: RecoveryMethod; userContext: string; sender: SenderProfile; projectId: string }
 ): DraftRequest {
-  const iso = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null)
+  const iso = (d: Date | null) => (d ? isoDay(d) : null)
   return {
     projectId: options.projectId,
     findingId: finding.id,

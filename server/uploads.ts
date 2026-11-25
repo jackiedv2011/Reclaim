@@ -1,3 +1,5 @@
+import { storedDay } from '../src/lib/format.ts'
+
 /**
  * Repeat-upload detection for the Free track, shared by the server (which
  * enforces it) and the browser (which warns before anything is sent).
@@ -18,8 +20,8 @@ export interface FingerprintRow {
 }
 
 function isoDay(value: string | Date): string {
-  const date = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(date.getTime())) return String(value)
+  const date = storedDay(value)
+  if (!date || Number.isNaN(date.getTime())) return String(value)
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 

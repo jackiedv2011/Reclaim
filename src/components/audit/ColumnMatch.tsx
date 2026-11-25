@@ -1,8 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { AlertCircle, ArrowRight, X } from 'lucide-react'
 import { parseCsv, type ParseOptions } from '@/lib/csv'
-import { FIELD_LABELS, OPTIONAL_FIELDS, REQUIRED_FIELDS, columnName, dataRows, dateOrderEvidence, invoiceAmountsAllNegative, isBlankRow, negativePayments, suggestColumns, type ColumnMap, type CsvField, type CsvTable } from '@/lib/csvMapping'
-import { parseCurrency, parseDate, type DateOrder } from '@/lib/format'
+import { FIELD_LABELS, NO_HEADINGS, OPTIONAL_FIELDS, REQUIRED_FIELDS, amountStyleOf, columnCount, columnName, dataRows, dateOrderEvidence, headingsOf, isBlankRow, negativePayments, suggestColumns, type ColumnMap, type CsvField, type CsvTable } from '@/lib/csvMapping'
+import { parseDate, parseMoney, type DateOrder } from '@/lib/format'
 import type { ParseResult } from '@/types'
 
 const FIELD_HELP: Partial<Record<CsvField, string>> = {
@@ -16,7 +16,7 @@ const FIELD_HELP: Partial<Record<CsvField, string>> = {
 }
 
 const PREVIEW_ROWS = 5
-const HEADER_CHOICES = 15
+const HEADER_CHOICES = 40
 
 /** Choices a person has made about a file; the same shape parseCsv takes. */
 export type ColumnChoices = ParseOptions & { headerIndex: number; columns: ColumnMap }
@@ -33,31 +33,46 @@ interface ColumnMatchProps {
   /** Choices to come back to, when the person returns to this step. */
   initial: ColumnChoices | null
   notice: string | null
+  /** The workbook's sheets, when there is more than one to choose from. */
+  sheets?: string[]
+  onSheet?: (name: string) => void
   onCancel: () => void
   onDone: (parsed: ParseResult, choices: ColumnChoices) => void
 }
 
 /** The step between choosing a file and confirming it, for a file Reclaim can't read without asking something. */
-export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone }: ColumnMatchProps) {
+export function ColumnMatch({ table, filename, initial, notice, sheets, onSheet, onCancel, onDone }: ColumnMatchProps) {
   const id = useId()
   const [headerIndex, setHeaderIndex] = useState(initial?.headerIndex ?? table.headerIndex)
   const suggestion = useMemo(() => suggestColumns(table, headerIndex), [table, headerIndex])
   const [columns, setColumns] = useState<ColumnMap>(initial?.columns ?? suggestion.columns)
   const [chosenOrder, setChosenOrder] = useState<DateOrder | null>(() =>
     // An order the file proved was never the person's answer, so it must not stand in for one.
-    initial?.dateOrder && dateOrderEvidence(table, initial.columns, initial.headerIndex).order === null ? initial.dateOrder : null
+    initial?.dateOrder && dateOrderEvidence(table, initial.columns, initial.headerIndex, initial.vendorGrouped).order === null ? initial.dateOrder : null
   )
   const [sign, setSign] = useState<'flip' | 'keep' | null>(initial?.flipSign === undefined ? null : initial.flipSign ? 'flip' : 'keep')
+  const [grouped, setGrouped] = useState(initial?.vendorGrouped ?? suggestion.vendorGrouped)
   const [problem, setProblem] = useState<string | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   useEffect(() => headingRef.current?.focus(), [])
 
-  const headings = useMemo(() => table.rows[headerIndex] ?? [], [table, headerIndex])
+  const headings = useMemo(() => headingsOf(table, headerIndex), [table, headerIndex])
+  const columnIndexes = useMemo(() => Array.from({ length: columnCount(table, headerIndex) }, (_, index) => index), [table, headerIndex])
   const rows = useMemo(() => dataRows(table, headerIndex), [table, headerIndex])
-  const evidence = useMemo(() => dateOrderEvidence(table, columns, headerIndex), [table, columns, headerIndex])
+  const evidence = useMemo(() => dateOrderEvidence(table, columns, headerIndex, grouped), [table, columns, headerIndex, grouped])
   const dateOrder = evidence.order ?? chosenOrder
-  const negative = useMemo(() => negativePayments(table, columns, dateOrder ?? 'month-first', headerIndex), [table, columns, dateOrder, headerIndex])
-  const invoicesNegative = useMemo(() => invoiceAmountsAllNegative(table, columns, headerIndex), [table, columns, headerIndex])
+  const amountStyle = useMemo(() => amountStyleOf(table, columns, headerIndex), [table, columns, headerIndex])
+  const negative = useMemo(() => negativePayments(table, columns, { dateOrder: dateOrder ?? 'month-first', amountStyle, headerIndex, vendorGrouped: grouped }), [table, columns, dateOrder, amountStyle, headerIndex, grouped])
+  const invoicesNegative = useMemo(() => {
+    const index = columns.invoice_amount
+    return index !== undefined && rows.some((row) => (parseMoney(row[index], amountStyle)?.amount ?? 0) < 0)
+  }, [rows, columns, amountStyle])
+  // Rows that pay something but name nobody: the question of a grouped report only comes up when there are some.
+  const vendorMissing = useMemo(() => {
+    const { vendor, payment_date: date, amount_paid: paid } = columns
+    if (vendor === undefined || date === undefined || paid === undefined) return 0
+    return rows.filter((row) => (row[vendor] ?? '').trim() === '' && parseMoney(row[paid], amountStyle) && (parseDate(row[date], 'month-first') || parseDate(row[date], 'day-first'))).length
+  }, [rows, columns, amountStyle])
 
   const preview = useMemo(() => {
     const shown: { rowNumber: number; cells: string[] }[] = []
@@ -66,11 +81,11 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
     }
     return shown
   }, [table, headerIndex])
-  const titleLines = table.rows.slice(0, headerIndex).filter((row) => row.some((cell) => cell.trim() !== ''))
+  const titleLines = table.rows.slice(0, Math.max(0, headerIndex)).filter((row) => row.some((cell) => cell.trim() !== ''))
   const headerChoices = useMemo(() => {
     const indexes: number[] = []
     for (let index = 0; index < table.rows.length && indexes.length < HEADER_CHOICES; index += 1) if (!isBlankRow(table.rows[index])) indexes.push(index)
-    return indexes.includes(headerIndex) ? indexes : [...indexes, headerIndex]
+    return headerIndex === NO_HEADINGS || indexes.includes(headerIndex) ? indexes : [...indexes, headerIndex]
   }, [table, headerIndex])
   const fieldOf = useMemo(() => new Map((Object.entries(columns) as [CsvField, number][]).map(([field, index]) => [index, field])), [columns])
 
@@ -80,7 +95,9 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
 
   function chooseHeader(index: number) {
     setHeaderIndex(index)
-    setColumns(suggestColumns(table, index).columns)
+    const next = suggestColumns(table, index)
+    setColumns(next.columns)
+    setGrouped(next.vendorGrouped)
     setChosenOrder(null)
     setSign(null)
     setProblem(null)
@@ -97,13 +114,14 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
     // An answer about one column's dates or signs says nothing about another's.
     if (next.payment_date !== columns.payment_date || next.invoice_date !== columns.invoice_date) setChosenOrder(null)
     if (next.amount_paid !== columns.amount_paid) setSign(null)
+    if (next.vendor !== columns.vendor) setGrouped(false)
     setColumns(next)
     setProblem(null)
   }
 
   function finish() {
     if (missing.length > 0 || dateOrder === null) return
-    const choices: ColumnChoices = { headerIndex, columns, dateOrder, ...(negative ? { flipSign: sign === 'flip' } : {}) }
+    const choices: ColumnChoices = { headerIndex, columns, dateOrder, amountStyle, ...(grouped && vendorMissing > 0 ? { vendorGrouped: true } : {}), ...(negative ? { flipSign: sign === 'flip' } : {}) }
     const parsed = parseCsv(table, choices)
     if (parsed.records.length === 0) {
       const first = parsed.rowResults?.find((row) => row.status === 'rejected')
@@ -135,7 +153,7 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
           onChange={(event) => chooseColumn(field, event.target.value)}
         >
           <option value="">{required ? 'Choose a column' : 'Not in this file'}</option>
-          {headings.map((_, index) => {
+          {columnIndexes.map((index) => {
             const example = rows.find((row) => (row[index] ?? '').trim() !== '')?.[index].trim()
             return (
               <option key={index} value={index}>
@@ -150,14 +168,14 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
     )
   }
 
-  const headingsKnown = REQUIRED_FIELDS.every((field) => suggestion.recognized.includes(field)) && Object.keys(suggestion.ambiguous).length === 0
+  const headingsKnown = REQUIRED_FIELDS.every((field) => suggestion.recognized.includes(field)) && !(['payment_date', 'amount_paid', 'invoice_date', 'invoice_amount'] as const).some((field) => suggestion.ambiguous[field])
   const asks = evidence.question !== null || negative !== null
   const optionalMatched = OPTIONAL_FIELDS.filter((field) => columns[field] !== undefined).length
   // Decided once, from how the file arrived, so the section never closes under the person's hands.
   const [optionalOpen] = useState(OPTIONAL_FIELDS.some((field) => suggestion.ambiguous[field] || suggestion.suggested.includes(field)))
   const orderExample = evidence.example
   const readings = (['month-first', 'day-first'] as const).map((order) => ({ order, date: orderExample ? parseDate(orderExample, order) : null }))
-  const negativeExample = negative ? parseCurrency(negative.example) : null
+  const negativeExample = negative ? parseMoney(negative.example, amountStyle)?.amount ?? null : null
 
   return (
     <div className="wk wk-import" data-state="matching">
@@ -178,12 +196,24 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
       ) : null}
 
       <div className="wk-match-section">
+        {sheets && sheets.length > 1 && onSheet ? (
+          <div className="wk-match-head">
+            <span className="wk-label">This workbook has {sheets.length} sheets with rows</span>
+            <label className="wk-match-row">
+              Read the sheet
+              <select className="wk-input" value={table.sheet?.name} onChange={(event) => onSheet(event.target.value)}>
+                {sheets.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+            </label>
+          </div>
+        ) : null}
         <div className="wk-match-head">
           <span className="wk-label">First rows of the file</span>
           <label className="wk-match-row">
             Headings are on row
             <select className="wk-input" value={headerIndex + 1} onChange={(event) => chooseHeader(Number(event.target.value) - 1)}>
               {headerChoices.map((index) => <option key={index} value={index + 1}>{index + 1}</option>)}
+              <option value={0}>No headings</option>
             </select>
           </label>
         </div>
@@ -197,7 +227,7 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
             <thead>
               <tr>
                 <th scope="col">Row</th>
-                {headings.map((_, index) => {
+                {columnIndexes.map((index) => {
                   const field = fieldOf.get(index)
                   return (
                     <th scope="col" key={index} data-matched={field ? true : undefined}>
@@ -212,7 +242,7 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
               {preview.map((row) => (
                 <tr key={row.rowNumber}>
                   <th scope="row">{row.rowNumber}</th>
-                  {headings.map((_, index) => <td key={index} data-matched={fieldOf.has(index) ? true : undefined}>{row.cells[index] ?? ''}</td>)}
+                  {columnIndexes.map((index) => <td key={index} data-matched={fieldOf.has(index) ? true : undefined}>{row.cells[index] ?? ''}</td>)}
                 </tr>
               ))}
             </tbody>
@@ -222,13 +252,32 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
 
       <div className="wk-match-grid">{REQUIRED_FIELDS.map((field) => fieldSelect(field, true))}</div>
 
+      {vendorMissing > 0 ? (
+        <label className="wk-match-check">
+          <input type="checkbox" checked={grouped} onChange={(event) => { setGrouped(event.target.checked); setProblem(null) }} />
+          <span>
+            Each vendor’s name is written once, above its payments
+            <small>{vendorMissing} payment{vendorMissing === 1 ? ' has' : 's have'} no vendor of {vendorMissing === 1 ? 'its' : 'their'} own. {grouped ? 'They take the name on the last line above that has one.' : 'They are skipped unless you tick this.'}</small>
+          </span>
+        </label>
+      ) : null}
+
+      {table.warnings.map((warning) => (
+        <div className="wk-callout" data-tone="danger" role="alert" key={warning}>
+          <AlertCircle aria-hidden="true" />
+          <div className="wk-callout-body"><p>{warning}</p></div>
+        </div>
+      ))}
+
       {evidence.question ? (
         <fieldset className="wk-match-question">
           <legend>Which way round are the dates?</legend>
           <p className="wk-match-note">
             {evidence.question === 'mixed'
               ? `The file has both: ${evidence.monthFirst} date${evidence.monthFirst === 1 ? ' only works' : 's only work'} month first and ${evidence.dayFirst} only day first. Rows that don’t fit your answer are skipped and listed.`
-              : 'Every date in this file could be read either way, so Reclaim can’t tell from the file alone.'}
+              : evidence.monthFirst + evidence.dayFirst > 0
+                  ? `Nearly every date in this file could be read either way. ${evidence.monthFirst + evidence.dayFirst} only ${evidence.monthFirst + evidence.dayFirst === 1 ? 'works' : 'work'} ${evidence.dayFirst > 0 ? 'day' : 'month'} first, which is too few to be sure.`
+                  : 'Every date in this file could be read either way, so Reclaim can’t tell from the file alone.'}
           </p>
           <div className="wk-match-options">
             {readings.map(({ order, date }) => (
@@ -248,14 +297,17 @@ export function ColumnMatch({ table, filename, initial, notice, onCancel, onDone
         <fieldset className="wk-match-question">
           <legend>Are these negative amounts payments?</legend>
           <p className="wk-match-note">
-            {negative.count === 1 ? 'The only amount paid in this file is negative.' : `All ${negative.count} amounts paid in this file are negative.`} Reclaim reads a negative amount as a refund or credit and never checks it as a payment, so left as it is this file would find nothing.
+            {negative.positive === 0
+              ? negative.negative === 1 ? 'The only amount paid in this file is negative.' : `All ${negative.negative} amounts paid in this file are negative.`
+              : `${negative.negative} of the ${negative.negative + negative.positive} amounts paid in this file are negative.`}{' '}
+            Reclaim reads a negative amount as a refund or credit and never checks it as a payment, so {negative.positive === 0 ? 'left as it is this file would find nothing.' : 'left as they are those rows would not be checked.'}
           </p>
           <div className="wk-match-options">
             <label className="wk-radio">
               <input type="radio" name={`${id}-sign`} checked={sign === 'flip'} onChange={() => setSign('flip')} />
               <span>
                 Yes, flip the sign
-                <small>{negative.example} is read as {new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(-negativeExample)}, a payment{invoicesNegative ? '. Invoice amounts, which are all negative too, are flipped the same way' : ''}. Each record keeps the amount as your file wrote it.</small>
+                <small>{negative.example} is read as {new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(-negativeExample)}, a payment{negative.positive > 0 ? `. The ${negative.positive} positive amount${negative.positive === 1 ? '' : 's'} become${negative.positive === 1 ? 's' : ''} money back to you` : ''}{invoicesNegative ? '. Negative invoice amounts are flipped the same way' : ''}. Each record keeps the amount as your file wrote it.</small>
               </span>
             </label>
             <label className="wk-radio">

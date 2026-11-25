@@ -35,6 +35,81 @@ export function parseCurrency(raw: string | null | undefined): number | null {
   return Number.isFinite(value) ? value : null
 }
 
+/**
+ * How a file writes decimals: "1,234.56", "1.234,56", or the first with
+ * three-decimal amounts ("1.500") refused because the file holds both.
+ */
+export type AmountStyle = 'point' | 'comma' | 'point-strict'
+
+const CURRENCY_MARKS: Record<string, string | null> = { $: null, 'us$': 'USD', 'ca$': 'CAD', 'c$': 'CAD', 'a$': 'AUD', 'au$': 'AUD', 'nz$': 'NZD', '€': 'EUR', '£': 'GBP' }
+const CURRENCY_CODE = 'usd|eur|gbp|cad|aud|nzd|chf|sek|nok|dkk|inr|sgd|hkd|zar|mxn|brl|jpy|cny'
+const MARK = `(?:us\\$|ca\\$|c\\$|au\\$|a\\$|nz\\$|\\$|€|£|${CURRENCY_CODE})`
+const MARK_FIRST = new RegExp(`^(${MARK})(?![a-z])`, 'i')
+const MARK_LAST = new RegExp(`(?<![a-z])(${MARK})$`, 'i')
+
+/**
+ * An amount with the currency written beside it, when there is one. A currency
+ * is never dropped: "€100" is 100 and EUR, so it can't pass for dollars.
+ * Accepts what exports write for a negative: -5, 5-, (5), and a typographic
+ * minus. CR and DR are refused, because which of them is money out depends on
+ * whose books they are.
+ */
+export function parseMoney(raw: string | null | undefined, style: AmountStyle = 'point'): { amount: number; currency: string | null } | null {
+  if (raw === null || raw === undefined) return null
+  let text = raw.replace(/[\u2212\u2012\u2013]/g, '-').replace(/[\s\u00a0\u202f]/g, '')
+  if (text === '' || /^n\/?a$/i.test(text)) return null
+  let negative = false
+  const sign = (pattern: RegExp) => {
+    const match = text.match(pattern)
+    if (!match || negative) return
+    negative = true
+    text = match[1]
+  }
+  sign(/^\((.*)\)$/)
+  sign(/^-(.*)$/)
+  sign(/^(.*)-$/)
+  const mark = text.match(MARK_FIRST) ?? text.match(MARK_LAST)
+  let currency: string | null = null
+  if (mark) {
+    const found = mark[1].toLowerCase()
+    currency = Object.hasOwn(CURRENCY_MARKS, found) ? CURRENCY_MARKS[found] : found.toUpperCase()
+    text = text.match(MARK_FIRST) ? text.slice(mark[0].length) : text.slice(0, -mark[0].length)
+    sign(/^-(.*)$/)
+    sign(/^(.*)-$/)
+  }
+  if (style === 'comma') {
+    if (!/^(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?$|^,\d+$/.test(text)) return null
+    text = text.replace(/\./g, '').replace(',', '.')
+  } else {
+    if (!/^(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)$/.test(text)) return null
+    if (style === 'point-strict' && /^\d{1,3}\.\d{3}$/.test(text)) return null
+    text = text.replace(/,/g, '')
+  }
+  const value = Number(text)
+  return Number.isFinite(value) ? { amount: negative && value !== 0 ? -value : value, currency } : null
+}
+
+/** A calendar day as YYYY-MM-DD. Days have no time zone, so they are never stored as an instant. */
+export function isoDay(date: Date): string {
+  return `${String(date.getFullYear()).padStart(4, '0')}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+/**
+ * The calendar day a stored date stands for. Older audits stored local midnight
+ * as an instant ("2026-01-05T05:00:00.000Z" from New York, "2026-01-04T23:00…"
+ * from Paris); the hour says which side of UTC it was written on, so the day
+ * comes back as it was typed wherever it is opened.
+ */
+export function storedDay(value: string | Date | null | undefined): Date | null {
+  if (value === null || value === undefined) return null
+  if (value instanceof Date) return value
+  const day = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (day) return new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]))
+  const instant = new Date(value)
+  if (Number.isNaN(instant.getTime())) return null
+  return new Date(instant.getUTCFullYear(), instant.getUTCMonth(), instant.getUTCDate() + (instant.getUTCHours() >= 11 ? 1 : 0))
+}
+
 /** Whole cents, so two amounts compare the way a bookkeeper reads them rather than as floats. */
 export function toCents(value: number): number {
   return Math.round(value * 100)
@@ -60,10 +135,13 @@ function fullYear(raw: string): number {
   return raw.length === 2 ? (Number(raw) < 70 ? 2000 : 1900) + Number(raw) : Number(raw)
 }
 
+/** A time after a date says nothing about the day. */
+const withoutTime = (value: string) => value.replace(/(?:[T ]|,\s*)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:[ap]\.?m\.?)?$/i, '')
+
 /** The parts of a date written only in numbers whose day and month could be either way round, as they stand in the cell. */
 export function numericDateParts(raw: string | null | undefined): { first: number; second: number; year: string } | null {
-  const match = raw?.trim().match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4}|\d{2})$/)
-  return match ? { first: Number(match[1]), second: Number(match[2]), year: match[3] } : null
+  const match = raw === null || raw === undefined ? null : withoutTime(raw.trim()).match(/^(\d{1,2})([/.-])(\d{1,2})\2(\d{4}|\d{2})$/)
+  return match ? { first: Number(match[1]), second: Number(match[3]), year: match[4] } : null
 }
 
 const GAP = '(?:\\s*[-/,]\\s*|\\.?,?\\s+)'
@@ -90,8 +168,8 @@ function parseMonthNameDate(value: string): Date | null {
 /**
  * Parse a date cell as a local date (avoids UTC off-by-one). Accepts the
  * formats accounting exports actually use: ISO `YYYY-MM-DD` (with or without a
- * time suffix), `YYYY/MM/DD`, a month written as a word, and an all-number
- * `04/03/2026`, which is read in `order`. The caller decides the order for the
+ * time suffix), `YYYY/MM/DD`, `YYYYMMDD`, a month written as a word, and an
+ * all-number `04/03/2026` (or with dots or dashes), which is read in `order`. The caller decides the order for the
  * whole file (see dateOrderEvidence in csvMapping.ts); a date that does not
  * exist in that order is null, so the row is reported as skipped rather than
  * quietly read the other way round.
@@ -104,13 +182,16 @@ export function parseDate(raw: string | null | undefined, order: DateOrder = 'mo
   const iso = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/)
   if (iso) return buildLocalDate(Number(iso[1]), Number(iso[2]), Number(iso[3]))
 
+  const compact = trimmed.match(/^((?:19|20)\d{2})(\d{2})(\d{2})$/)
+  if (compact) return buildLocalDate(Number(compact[1]), Number(compact[2]), Number(compact[3]))
+
   const numeric = numericDateParts(trimmed)
   if (numeric) {
     const [month, day] = order === 'month-first' ? [numeric.first, numeric.second] : [numeric.second, numeric.first]
     return buildLocalDate(fullYear(numeric.year), month, day)
   }
 
-  return parseMonthNameDate(trimmed)
+  return parseMonthNameDate(withoutTime(trimmed))
 }
 
 export function daysBetween(a: Date, b: Date): number {

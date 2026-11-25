@@ -1,6 +1,6 @@
 import Papa from 'papaparse'
 import type { ImportReading } from '@/types'
-import { numericDateParts, parseCurrency, parseDate, type DateOrder } from '@/lib/format'
+import { numericDateParts, parseDate, parseMoney, type AmountStyle, type DateOrder } from '@/lib/format'
 
 /** Header spellings seen in QuickBooks, Xero, Bill and hand-built AP exports, after headingKey. These import with nothing to confirm. */
 const COLUMN_ALIASES: Record<string, CsvField> = {
@@ -117,20 +117,36 @@ const HEADING_HINTS: Partial<Record<CsvField, readonly string[]>> = {
 const HEADING_WORDS = new Set(['date', 'amount', 'debit', 'credit', 'balance', 'total', 'memo', 'description', 'account', 'split', 'status', 'processdate', 'duedate', 'posting', 'method', 'bank', 'num', 'no', 'check', 'checkno', 'class', 'period'])
 
 const AMOUNT_WORD = /(^|_)(amount|amt|debit|credit|total|paid|payment|payments|value|balance|gross|net|sum|subtotal|tax|cost|price|spent|withdrawal|withdrawals)(_|$)/
-const IDENTIFIER_WORD = /(^|_)(no|num|number|id|ref|reference|check|cheque|account|acct|phone|zip|postcode|code|qty|quantity|year|line|row)(_|$)/
+/** A number that names something. "Payment No" is one; "Check Amount" is not. */
+const IDENTIFIER_HEADING = /(^|_)(no|num|number|id|ref|reference|code|zip|postcode|phone|year|line|row|qty|quantity)$|^(check|cheque|account|acct)$/
+/** Dates and amounts of money still owed. They may be what a file offers, but they are never proposed as a payment. */
+const UNPAID_HEADING = /(^|_)(due|balance|outstanding|open|unpaid|remaining|expected)(_|$)/
 
-/** Title lines are only looked for this far down. */
-const HEADER_SCAN_ROWS = 30
-const SAMPLE_ROWS = 200
+/** Title lines are only looked for this far down, and never past the first payment. */
+const HEADER_SCAN_ROWS = 200
+const SAMPLE_CELLS = 200
 /** A column counts as dates or amounts when most of its filled cells read that way; total and note lines are the exceptions. */
 const COLUMN_SHARE = 0.6
+/** Below this share of the dates, a few that only work one way look more like typing mistakes than proof. */
+const PROOF_SHARE = 0.1
+/** A date that contradicts this many others is a mistake in its row, not a question about the file. */
+const OUTVOTED = 20
+/** Payments missing a vendor, past which the vendor is probably written once above each group. */
+const GROUPED_SHARE = 0.3
+
+/** The file has no heading row: every row is data and columns go by their letters. */
+export const NO_HEADINGS = -1
 
 export interface CsvTable {
   text: string
   /** Every row of the file, blank lines included, so position + 1 is the row number a spreadsheet shows. */
   rows: string[][]
-  /** Position of the row the headings were found on. */
+  /** Position of the row the headings were found on, or NO_HEADINGS. */
   headerIndex: number
+  /** Things about the file itself a person has to know, such as a quotation mark that is never closed. */
+  warnings: string[]
+  /** The sheet of a workbook this came from, and the others it left out. */
+  sheet?: { name: string; others: string[] }
 }
 
 /** "Invoice No.", " PAYMENT DATE ", "Invoice #" → invoice_no, payment_date, invoice. */
@@ -154,40 +170,90 @@ export function isBlankRow(row: string[]): boolean {
 
 const isEmptyRow = (row: string[]) => row.every((cell) => cell.trim() === '')
 const readsAsDate = (cell: string) => parseDate(cell, 'month-first') !== null || parseDate(cell, 'day-first') !== null
+const readsAsAmount = (cell: string) => parseMoney(cell) !== null || parseMoney(cell, 'comma') !== null
+
+/** A row with a date in one cell and an amount in another: a payment, whatever its columns are called. */
+function looksLikeData(row: string[]): boolean {
+  const filled = row.filter((cell) => cell.trim() !== '')
+  if (filled.length < REQUIRED_FIELDS.length) return false
+  return filled.some((cell, index) => readsAsDate(cell) && filled.some((other, at) => at !== index && !readsAsDate(other) && readsAsAmount(other)))
+}
+
+const DELIMITERS = [',', '\t', ';', '|']
+
+/** Papa Parse judges the first ten lines, which can all be titles. When that finds no table, take the delimiter that makes one. */
+function delimiterOf(text: string): string {
+  const guess = Papa.parse<string[]>(text, { preview: HEADER_SCAN_ROWS, skipEmptyLines: true })
+  const tableRows = (rows: string[][]) => rows.filter((row) => row.length >= REQUIRED_FIELDS.length).length
+  if (tableRows(guess.data) * 2 >= guess.data.length) return guess.meta.delimiter
+  let best = guess.meta.delimiter
+  let most = tableRows(guess.data)
+  for (const delimiter of DELIMITERS) {
+    const count = tableRows(Papa.parse<string[]>(text, { delimiter, preview: HEADER_SCAN_ROWS, skipEmptyLines: true }).data)
+    if (count > most) {
+      best = delimiter
+      most = count
+    }
+  }
+  return best
+}
 
 export function readCsvTable(text: string): CsvTable {
-  // The delimiter is worked out with blank lines ignored, then every line is kept so row numbers match the file.
-  const { delimiter } = Papa.parse<string[]>(text, { preview: 1, skipEmptyLines: true }).meta
-  const rows = Papa.parse<string[]>(text, { delimiter, skipEmptyLines: false }).data
-  while (rows.length > 0 && isBlankRow(rows[rows.length - 1])) rows.pop()
-  return { text, rows, headerIndex: findHeaderRow(rows) }
+  // Some exports mix line endings; with one kind throughout, no row is run into the next. Line breaks inside cells are single already.
+  const even = /\r\n/.test(text) && /[^\r]\n/.test(text) ? text.replace(/\r\n/g, '\n') : text
+  // Every line is kept, blank ones too, so row numbers match the file.
+  const parsed = Papa.parse<string[]>(even, { delimiter: delimiterOf(even), skipEmptyLines: false })
+  const unclosed = parsed.errors.find((error) => error.code === 'MissingQuotes')
+  const warnings = unclosed ? [`A quotation mark on row ${(unclosed.row ?? 0) + 1} is never closed, so everything after it was read as part of one cell. Fix that row and upload the file again.`] : []
+  return tableOf(text, parsed.data, warnings)
+}
+
+/** A table from rows already split into cells: a CSV's, or a worksheet's. */
+export function tableOf(text: string, rows: string[][], warnings: string[] = [], sheet?: CsvTable['sheet']): CsvTable {
+  const kept = [...rows]
+  while (kept.length > 0 && isBlankRow(kept[kept.length - 1])) kept.pop()
+  return { text, rows: kept, headerIndex: findHeaderRow(kept), warnings, ...(sheet ? { sheet } : {}) }
 }
 
 /**
  * Exports often start with a company name, a report title and a date range.
- * The heading row is the one that reads most like headings; a line holding a
- * date or a number is never one. When nothing looks like headings at all, it
- * is the first line wide enough to be a table.
+ * The heading row is above the first payment: the first row naming everything
+ * a payment needs, or else the one that reads most like headings, or else the
+ * last wide line of text. Nothing at or below the first payment is considered,
+ * so a second block further down can never turn real payments into "title
+ * lines". When the file opens with payments, it has no headings.
  */
 function findHeaderRow(rows: string[][]): number {
-  const candidates: number[] = []
-  for (let index = 0; index < rows.length && index < HEADER_SCAN_ROWS; index += 1) if (!isEmptyRow(rows[index])) candidates.push(index)
-  if (candidates.length === 0) return 0
-
-  let best = candidates[0]
-  let bestScore = 0
-  let firstWide: number | null = null
-  for (const index of candidates) {
+  const texts: number[] = []
+  let first: number | null = null
+  let foundData = false
+  for (let index = 0; index < rows.length && index < HEADER_SCAN_ROWS; index += 1) {
+    if (isEmptyRow(rows[index])) continue
+    first ??= index
     const cells = rows[index].filter((cell) => cell.trim() !== '')
-    if (cells.length < 2 || cells.some((cell) => readsAsDate(cell) || parseCurrency(cell) !== null)) continue
-    if (cells.length >= REQUIRED_FIELDS.length && firstWide === null) firstWide = index
-    const score = headingScore(cells)
+    const known = new Set(cells.map(recognizedField).filter((field) => field !== null))
+    if (REQUIRED_FIELDS.every((field) => known.has(field))) return index
+    if (looksLikeData(rows[index])) {
+      foundData = true
+      break
+    }
+    if (cells.length >= 2 && (known.size >= 2 || !cells.some((cell) => readsAsDate(cell) || readsAsAmount(cell)))) texts.push(index)
+  }
+  if (first === null) return 0
+  const wide = texts.filter((index) => rows[index].filter((cell) => cell.trim() !== '').length >= REQUIRED_FIELDS.length)
+  const pool = wide.length > 0 ? wide : texts
+  let best: number | null = null
+  let bestScore = 0
+  for (const index of pool) {
+    const score = headingScore(rows[index].filter((cell) => cell.trim() !== ''))
     if (score > bestScore) {
       best = index
       bestScore = score
     }
   }
-  return bestScore > 0 ? best : firstWide ?? best
+  if (best !== null) return best
+  if (pool.length > 0) return foundData ? pool[pool.length - 1] : pool[0]
+  return foundData ? NO_HEADINGS : first
 }
 
 function headingScore(cells: string[]): number {
@@ -202,6 +268,23 @@ function headingScore(cells: string[]): number {
     }
   }
   return fields.size * 2 + hinted
+}
+
+/** The row of headings; empty when the file has none. */
+export function headingsOf(table: CsvTable, headerIndex = table.headerIndex): string[] {
+  return headerIndex === NO_HEADINGS ? [] : table.rows[headerIndex] ?? []
+}
+
+/** How many columns the file has: its headings, or wider if its rows are. */
+export function columnCount(table: CsvTable, headerIndex = table.headerIndex): number {
+  let width = headingsOf(table, headerIndex).length
+  for (let position = headerIndex + 1; position < table.rows.length; position += 1) {
+    const row = table.rows[position]
+    let last = row.length
+    while (last > width && row[last - 1].trim() === '') last -= 1
+    if (last > width) width = last
+  }
+  return width
 }
 
 /** The columns whose headings Reclaim knows, taking the first of each. */
@@ -258,6 +341,8 @@ export interface ColumnSuggestion {
   suggested: CsvField[]
   /** Left empty because more than one column could be it. */
   ambiguous: Partial<Record<CsvField, number[]>>
+  /** The vendor is written once above each group of payments rather than on every row. */
+  vendorGrouped: boolean
 }
 
 export function dataRows(table: CsvTable, headerIndex = table.headerIndex): string[][] {
@@ -266,16 +351,18 @@ export function dataRows(table: CsvTable, headerIndex = table.headerIndex): stri
 
 /** Which column supplies which field, as far as the headings and cells say. Two possible date or amount columns are never chosen between. */
 export function suggestColumns(table: CsvTable, headerIndex = table.headerIndex): ColumnSuggestion {
-  const headings = table.rows[headerIndex] ?? []
+  const headings = headingsOf(table, headerIndex)
   const rows = dataRows(table, headerIndex)
+  const width = columnCount(table, headerIndex)
+  const heading = (index: number) => headings[index] ?? ''
   const columns: ColumnMap = {}
   const recognized: CsvField[] = []
   const suggested: CsvField[] = []
   const ambiguous: ColumnSuggestion['ambiguous'] = {}
 
   const byField = new Map<CsvField, number[]>()
-  headings.forEach((heading, index) => {
-    const field = recognizedField(heading)
+  headings.forEach((name, index) => {
+    const field = recognizedField(name)
     if (field) byField.set(field, [...(byField.get(field) ?? []), index])
   })
   for (const [field, indexes] of byField) {
@@ -287,40 +374,80 @@ export function suggestColumns(table: CsvTable, headerIndex = table.headerIndex)
     }
   }
 
-  const unclaimed = headings.map((_, index) => index).filter((index) => recognizedField(headings[index]) === null)
+  const unclaimed = Array.from({ length: width }, (_, index) => index).filter((index) => recognizedField(heading(index)) === null)
   const suggest = (field: CsvField, candidates: number[]) => {
     if (byField.has(field)) return
-    if (candidates.length === 1) {
+    if (candidates.length > 1) ambiguous[field] = candidates
+    else if (candidates.length === 1 && !UNPAID_HEADING.test(headingKey(heading(candidates[0])))) {
       columns[field] = candidates[0]
       suggested.push(field)
-    } else if (candidates.length > 1) ambiguous[field] = candidates
+    }
   }
-  const hinted = (field: CsvField) => unclaimed.filter((index) => HEADING_HINTS[field]?.includes(headingKey(headings[index]).replaceAll('_', '')))
+  const hinted = (field: CsvField) => unclaimed.filter((index) => HEADING_HINTS[field]?.includes(headingKey(heading(index)).replaceAll('_', '')))
 
-  const sample = rows.slice(0, SAMPLE_ROWS)
-  const filled = (index: number) => sample.map((row) => (row[index] ?? '').trim()).filter((cell) => cell !== '')
+  // The first filled cells of each column, however far down they start: a refunds column may be empty for hundreds of rows.
+  const samples = new Map<number, string[]>()
+  const filled = (index: number): string[] => {
+    const known = samples.get(index)
+    if (known) return known
+    const cells: string[] = []
+    for (const row of rows) {
+      const cell = (row[index] ?? '').trim()
+      if (cell !== '') cells.push(cell)
+      if (cells.length >= SAMPLE_CELLS) break
+    }
+    samples.set(index, cells)
+    return cells
+  }
   const mostly = (cells: string[], test: (cell: string) => boolean) => cells.length > 0 && cells.filter(test).length / cells.length >= COLUMN_SHARE
-  const dates = unclaimed.filter((index) => mostly(filled(index), readsAsDate))
+  const dates = unclaimed.filter((index) => !IDENTIFIER_HEADING.test(headingKey(heading(index))) && mostly(filled(index), readsAsDate))
   const amounts = unclaimed.filter((index) => {
-    if (dates.includes(index)) return false
+    const key = headingKey(heading(index))
+    if (dates.includes(index) || IDENTIFIER_HEADING.test(key)) return false
     const cells = filled(index)
-    if (!mostly(cells, (cell) => parseCurrency(cell) !== null)) return false
-    const key = headingKey(headings[index])
-    return AMOUNT_WORD.test(key) || (!IDENTIFIER_WORD.test(key) && cells.some((cell) => /[.$,()-]/.test(cell)))
+    if (cells.length === 0) return false
+    // An amount heading counts even when its cells can't be read: choosing around it would be a guess.
+    if (AMOUNT_WORD.test(key) && mostly(cells, (cell) => /\d/.test(cell))) return true
+    return mostly(cells, readsAsAmount) && cells.some((cell) => /[.$€£,()-]/.test(cell))
   })
+  const text = (index: number) => !dates.includes(index) && !amounts.includes(index)
 
   suggest('payment_date', dates)
   suggest('amount_paid', amounts)
-  suggest('vendor', hinted('vendor').filter((index) => !dates.includes(index) && !amounts.includes(index)))
-  suggest('invoice_number', hinted('invoice_number').filter((index) => !dates.includes(index) && !amounts.includes(index)))
-  suggest('transaction_type', hinted('transaction_type'))
-  return { columns, recognized, suggested, ambiguous }
+  suggest('vendor', hinted('vendor').filter(text))
+  suggest('invoice_number', hinted('invoice_number').filter(text))
+  suggest('transaction_type', hinted('transaction_type').filter(text))
+
+  const { payment_date: date, amount_paid: paid } = columns
+  let vendorGrouped = false
+  if (date !== undefined && paid !== undefined) {
+    const payments = rows.filter((row) => readsAsDate((row[date] ?? '').trim()) && readsAsAmount((row[paid] ?? '').trim()))
+    const missing = (index: number) => payments.filter((row) => (row[index] ?? '').trim() === '').length
+    const grouped = (index: number) => payments.length > 0 && missing(index) / payments.length >= GROUPED_SHARE && rows.some((row) => (row[index] ?? '').trim() !== '' && !/^(grand )?total\b/i.test(row[index].trim()))
+    if (columns.vendor !== undefined) vendorGrouped = grouped(columns.vendor)
+    else if (!ambiguous.vendor && !byField.has('vendor')) {
+      const index = unclaimed.find((candidate) => candidate !== date && candidate !== paid && heading(candidate).trim() === '' && grouped(candidate))
+      if (index !== undefined) {
+        columns.vendor = index
+        suggested.push('vendor')
+        vendorGrouped = true
+      }
+    }
+  }
+  return { columns, recognized, suggested, ambiguous, vendorGrouped }
+}
+
+/** Rows that could import: an amount, and a vendor of their own or, in a grouped file, from above. Totals and notes say nothing about how a file is written. */
+function paymentLike(table: CsvTable, columns: ColumnMap, headerIndex: number, vendorGrouped: boolean): string[][] {
+  const { vendor, amount_paid: paid } = columns
+  if (paid === undefined) return dataRows(table, headerIndex)
+  return dataRows(table, headerIndex).filter((row) => readsAsAmount((row[paid] ?? '').trim()) && (vendorGrouped || vendor === undefined || (row[vendor] ?? '').trim() !== ''))
 }
 
 export interface DateOrderEvidence {
   /** The order the file itself proves, or null when a person has to say. */
   order: DateOrder | null
-  /** Why there is no proven order: every date works both ways, or different dates prove different orders. */
+  /** Why there is no proven order: nearly every date works both ways, or different dates prove different orders. */
   question: 'ambiguous' | 'mixed' | null
   /** Dates that only work month first / only day first. */
   monthFirst: number
@@ -331,16 +458,17 @@ export interface DateOrderEvidence {
 
 /**
  * Which way round all-number dates are written, judged over the whole file: one
- * export writes every date the same way, so a single 25/02/2026 settles what
- * 04/03/2026 means. A two-digit year settles nothing — 25/02/03 may be a year
- * first — so those files are asked about.
+ * export writes every date the same way, so dates like 25/02/2026 settle what
+ * 04/03/2026 means. One of them among dozens that work both ways settles
+ * nothing, because it may be a typing mistake; nor does a two-digit year,
+ * because 25/02/03 may be a year first. Those files are asked about.
  */
-export function dateOrderEvidence(table: CsvTable, columns: ColumnMap, headerIndex = table.headerIndex): DateOrderEvidence {
+export function dateOrderEvidence(table: CsvTable, columns: ColumnMap, headerIndex = table.headerIndex, vendorGrouped = false): DateOrderEvidence {
   let monthFirst = 0
   let dayFirst = 0
   let unsettled = 0
   let example: string | null = null
-  for (const row of dataRows(table, headerIndex)) {
+  for (const row of paymentLike(table, columns, headerIndex, vendorGrouped)) {
     for (const field of ['payment_date', 'invoice_date'] as const) {
       const index = columns[field]
       const cell = index === undefined ? undefined : row[index]
@@ -349,78 +477,101 @@ export function dateOrderEvidence(table: CsvTable, columns: ColumnMap, headerInd
       const { first, second, year } = parts
       if (first <= 12 && second > 12) monthFirst += 1
       else if (first > 12 && second <= 12 && year.length === 4) dayFirst += 1
-      else if (first > 12 && second <= 12) {
-        unsettled += 1
-        example ??= cell.trim()
-      } else if (first !== second && first <= 12) {
+      else if (second <= 12 && first !== second) {
         unsettled += 1
         example ??= cell.trim()
       }
     }
   }
   const evidence = { monthFirst, dayFirst, example }
-  if (monthFirst > 0 && dayFirst > 0) return { ...evidence, order: null, question: 'mixed' }
-  if (dayFirst > 0) return { ...evidence, order: 'day-first', question: null }
-  if (monthFirst > 0) return { ...evidence, order: 'month-first', question: null }
-  return unsettled > 0 ? { ...evidence, order: null, question: 'ambiguous' } : { ...evidence, order: 'month-first', question: null }
+  const proofs = Math.max(monthFirst, dayFirst)
+  const against = Math.min(monthFirst, dayFirst)
+  if (proofs === 0) return unsettled > 0 ? { ...evidence, order: null, question: 'ambiguous' } : { ...evidence, order: 'month-first', question: null }
+  if (against > 0 && against * OUTVOTED > proofs) return { ...evidence, order: null, question: 'mixed' }
+  if (unsettled > 0 && proofs < (proofs + unsettled) * PROOF_SHARE) return { ...evidence, order: null, question: 'ambiguous' }
+  return { ...evidence, order: dayFirst > monthFirst ? 'day-first' : 'month-first', question: null }
 }
 
-const amountsIn = (rows: string[][], index: number | undefined) =>
-  index === undefined ? [] : rows.map((row) => parseCurrency(row[index])).filter((amount): amount is number => amount !== null && amount !== 0)
-
-/** Every invoice amount the file gives is negative too, so flipping payments without them would break the comparison. */
-export function invoiceAmountsAllNegative(table: CsvTable, columns: ColumnMap, headerIndex = table.headerIndex): boolean {
-  const amounts = amountsIn(dataRows(table, headerIndex), columns.invoice_amount)
-  return amounts.length > 0 && amounts.every((amount) => amount < 0)
+/** How the file writes decimals. A decimal comma has to be proven by more than one amount, with nothing against it. */
+export function amountStyleOf(table: CsvTable, columns: ColumnMap, headerIndex = table.headerIndex): AmountStyle {
+  let comma = 0
+  let point = 0
+  for (const row of dataRows(table, headerIndex)) {
+    for (const index of [columns.amount_paid, columns.invoice_amount]) {
+      const cell = index === undefined ? '' : (row[index] ?? '').trim()
+      if (cell === '') continue
+      const asPoint = parseMoney(cell) !== null
+      const asComma = parseMoney(cell, 'comma') !== null
+      if (asComma && !asPoint) comma += 1
+      else if (asPoint && !asComma) point += 1
+    }
+  }
+  if (comma === 0) return 'point'
+  return comma >= 2 && point === 0 ? 'comma' : 'point-strict'
 }
 
 export interface NegativePayments {
-  count: number
+  negative: number
+  positive: number
   /** The first negative amount, as the file writes it. */
   example: string
 }
 
-/** Set when every row that would import pays a negative amount. Such a file holds no payments as far as detection is concerned. */
-export function negativePayments(table: CsvTable, columns: ColumnMap, dateOrder: DateOrder, headerIndex = table.headerIndex): NegativePayments | null {
+/** Set when most of the rows that would import pay a negative amount: the export probably writes payments as negatives. */
+export function negativePayments(table: CsvTable, columns: ColumnMap, options: { dateOrder: DateOrder; amountStyle?: AmountStyle; headerIndex?: number; vendorGrouped?: boolean }): NegativePayments | null {
   const { vendor, payment_date: date, amount_paid: paid } = columns
   if (vendor === undefined || date === undefined || paid === undefined) return null
-  let count = 0
+  let negative = 0
+  let positive = 0
   let example: string | null = null
-  for (const row of dataRows(table, headerIndex)) {
-    const amount = parseCurrency(row[paid])
-    if (!amount || !(row[vendor] ?? '').trim() || !parseDate(row[date], dateOrder)) continue
-    if (amount > 0) return null
-    count += 1
-    example ??= row[paid].trim()
+  for (const row of dataRows(table, options.headerIndex ?? table.headerIndex)) {
+    const amount = parseMoney(row[paid], options.amountStyle)?.amount
+    if (!amount || !parseDate(row[date], options.dateOrder) || (!options.vendorGrouped && !(row[vendor] ?? '').trim())) continue
+    if (amount > 0) positive += 1
+    else {
+      negative += 1
+      example ??= row[paid].trim()
+    }
   }
-  return example === null ? null : { count, example }
+  return example !== null && negative > positive ? { negative, positive, example } : null
+}
+
+export interface ReadingChoices {
+  dateOrder: DateOrder
+  amountStyle: AmountStyle
 }
 
 /**
  * Whether a file can be imported as it stands: every required heading is
- * recognised once, its dates can only be read one way, and it holds payments.
- * When so, `dateOrder` is the order to read it in.
+ * recognised once, its dates and amounts can only be read one way, every
+ * payment names its vendor, and it holds payments. When so, how to read it.
  */
-export function readsWithoutAsking(table: CsvTable): { ask: false; dateOrder: DateOrder } | { ask: true } {
-  const { columns, recognized, ambiguous } = suggestColumns(table)
-  if (REQUIRED_FIELDS.some((field) => !recognized.includes(field)) || Object.keys(ambiguous).length > 0) return { ask: true }
+export function readsWithoutAsking(table: CsvTable): ({ ask: false } & ReadingChoices) | { ask: true } {
+  const { columns, recognized, ambiguous, vendorGrouped } = suggestColumns(table)
+  if (table.headerIndex === NO_HEADINGS || vendorGrouped) return { ask: true }
+  if (REQUIRED_FIELDS.some((field) => !recognized.includes(field)) || NEVER_GUESSED.some((field) => ambiguous[field])) return { ask: true }
   const { order } = dateOrderEvidence(table, columns)
-  if (order === null || negativePayments(table, columns, order)) return { ask: true }
-  return { ask: false, dateOrder: order }
+  const amountStyle = amountStyleOf(table, columns)
+  if (order === null || negativePayments(table, columns, { dateOrder: order, amountStyle })) return { ask: true }
+  return { ask: false, dateOrder: order, amountStyle }
 }
 
-/** A table with enough columns to hold a vendor, a date and an amount, and at least one row under its headings. */
+/** A table with enough columns to hold a vendor, a date and an amount, and at least one row of data. */
 export function canMatchColumns(table: CsvTable): boolean {
-  return (table.rows[table.headerIndex] ?? []).length >= REQUIRED_FIELDS.length && dataRows(table).length > 0
+  return columnCount(table) >= REQUIRED_FIELDS.length && dataRows(table).length > 0
 }
 
 /** How the file was read, when that took more than recognising its headings. */
 export function readingNotes(reading: ImportReading | undefined): string[] {
   if (!reading) return []
   const notes: string[] = []
+  if (reading.sheet) notes.push(`Read from the sheet “${reading.sheet.name}”${reading.sheet.others.length > 0 ? `; left out: ${reading.sheet.others.map((name) => `“${name}”`).join(', ')}` : ''}.`)
+  if (reading.headerRow === 0) notes.push('Read without a heading row; columns go by their letters.')
   if (reading.titleLines > 0) notes.push(`Headings found on row ${reading.headerRow}; ${reading.titleLines} line${reading.titleLines === 1 ? '' : 's'} above them skipped.`)
   if (reading.columns) notes.push(`Columns matched by hand: ${(Object.entries(reading.columns) as [CsvField, string][]).map(([field, heading]) => `${FIELD_LABELS[field].toLowerCase()} from “${heading}”`).join(', ')}.`)
   if (reading.dateOrder) notes.push(`Dates read ${reading.dateOrder === 'day-first' ? 'day first' : 'month first'}.`)
-  if (reading.signFlipped) notes.push('Negative amounts read as payments (sign flipped).')
+  if (reading.vendorGrouped) notes.push('Vendor names taken from the line above each group of payments.')
+  if (reading.decimalComma) notes.push('Amounts read with a decimal comma (1.234,56 is 1,234.56).')
+  if (reading.signFlipped) notes.push('Negative amounts read as payments (every sign flipped).')
   return notes
 }
