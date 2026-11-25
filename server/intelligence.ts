@@ -21,6 +21,7 @@ import { recoveryByVendor, recoveryOverview } from '../src/intelligence/recovery
 import { vendorProfile, vendorProfiles } from '../src/intelligence/vendorProfiles.ts'
 import { vendorBaselines } from '../src/intelligence/baselines.ts'
 import { InMemoryFeedbackStore } from '../src/intelligence/memory.ts'
+import { askAccount, AssistantRequestError } from '../src/intelligence/assistant.ts'
 import type { ReadModelEnvelope } from '../src/intelligence/contracts.ts'
 
 export const INTELLIGENCE_PREFIX = '/api/intelligence/'
@@ -42,6 +43,8 @@ export interface RouteInput {
   now: number
   /** Captured route parameter, e.g. a vendor key. */
   param: string | null
+  /** JSON body for POST routes (content type checked by the router). */
+  body: () => Promise<unknown>
 }
 
 type Handler = (input: RouteInput) => unknown
@@ -115,6 +118,15 @@ const ROUTES: Array<{ method: 'GET' | 'POST'; pattern: RegExp; handler: Handler 
     },
   },
   { method: 'GET', pattern: /^baselines$/, handler: ({ ctx, source, now }) => vendorBaselines(ctx, source.financial, now) },
+  {
+    method: 'POST',
+    pattern: /^assistant\/ask$/,
+    handler: async ({ ctx, source, returns, now, body }) => {
+      const input = (await body()) as { question?: unknown; subject?: unknown } | null
+      if (!input || typeof input !== 'object') throw new HttpError(400, 'Send a question.', 'validation')
+      return askAccount(ctx, { financial: source.financial, cases: source.cases, returns, memory: new InMemoryFeedbackStore() }, input.question, now, { subject: input.subject, ...unreadable(source), sourceUpdatedAt: source.newestUpdateAt })
+    },
+  },
   { method: 'GET', pattern: /^recovery\/vendors$/, handler: ({ ctx, source, returns, query, now }) => recoveryByVendor(ctx, source.cases, returns, now, page(query), unreadable(source)) },
 ]
 
@@ -144,11 +156,22 @@ export function createIntelligenceRoutes(deps: IntelligenceDeps) {
     if (!deps.allowRead(user.id)) throw new HttpError(429, 'Too many requests. Try again shortly.', 'rate_limited')
     const ctx = tenantContextFor(user)
     const param = rest.match(match.pattern)?.[1] ?? null
+    if (req.method === 'POST' && !(req.headers['content-type'] ?? '').includes('application/json')) throw new HttpError(415, 'Send JSON.')
+    const readBody = async () => {
+      const text = await req.text()
+      if (text.length > 4000) throw new HttpError(413, 'Request too large.', 'validation')
+      try {
+        return JSON.parse(text) as unknown
+      } catch {
+        throw new HttpError(400, 'Malformed JSON.', 'validation')
+      }
+    }
     try {
-      const body = await match.handler({ ctx, source: sourceFor(ctx), returns, query: req.url.searchParams, now: now(), param: param === null ? null : decodeURIComponent(param) })
+      const body = await match.handler({ ctx, source: sourceFor(ctx), returns, query: req.url.searchParams, now: now(), param: param === null ? null : decodeURIComponent(param), body: readBody })
       return json(200, body)
     } catch (error) {
       if (error instanceof IntelligenceAccessError) throw new HttpError(error.code === 'forbidden' ? 403 : 404, error.code === 'forbidden' ? 'Not permitted.' : 'Not found.', error.code)
+      if (error instanceof AssistantRequestError) throw new HttpError(error.code === 'not_found' ? 404 : 400, error.message, error.code)
       if (error instanceof IntelligenceQueryError || error instanceof RangeError) throw new HttpError(400, error.message, 'validation')
       throw error
     }
