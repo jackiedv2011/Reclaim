@@ -127,8 +127,9 @@ const HEADER_SCAN_ROWS = 200
 const SAMPLE_CELLS = 200
 /** A column counts as dates or amounts when most of its filled cells read that way; total and note lines are the exceptions. */
 const COLUMN_SHARE = 0.6
-/** Below this share of the dates, a few that only work one way look more like typing mistakes than proof. */
+/** One or two dates that only work one way, among this many times more that work both, look like typing mistakes. Three agreeing don't. */
 const PROOF_SHARE = 0.25
+const PROOF_ENOUGH = 3
 /** A date that contradicts this many others is a mistake in its row, not a question about the file. */
 const OUTVOTED = 20
 /** Payments missing a vendor, past which the vendor is probably written once above each group. */
@@ -435,7 +436,7 @@ export function suggestColumns(table: CsvTable, headerIndex = table.headerIndex)
     const missing = (index: number) => payments.filter((row) => (row[index] ?? '').trim() === '').length
     const often = (index: number) => payments.length > 0 && missing(index) / payments.length >= GROUPED_SHARE
     // A name alone on its line. Blank vendors without one are just blank: bank fees, say, which belong to nobody above them.
-    const namedLines = (index: number) => rows.some((row) => (row[index] ?? '').trim() !== '' && !/^(grand )?total\b/i.test(row[index].trim()) && row.filter((cell) => cell.trim() !== '').length === 1)
+    const namedLines = (index: number) => rows.some((row, at) => (row[index] ?? '').trim() !== '' && row.filter((cell) => cell.trim() !== '').length === 1 && at + 1 < rows.length && (rows[at + 1][index] ?? '').trim() === '' && payments.includes(rows[at + 1]))
     const grouped = (index: number) => often(index) && namedLines(index)
     if (columns.vendor !== undefined) {
       vendorMissing = often(columns.vendor)
@@ -505,7 +506,7 @@ export function dateOrderEvidence(table: CsvTable, columns: ColumnMap, headerInd
   const against = Math.min(monthFirst, dayFirst)
   if (proofs === 0) return unsettled > 0 ? { ...evidence, order: null, question: 'ambiguous' } : { ...evidence, order: 'month-first', question: null }
   if (against > 0 && against * OUTVOTED > proofs) return { ...evidence, order: null, question: 'mixed' }
-  if (unsettled > 0 && proofs < (proofs + unsettled) * PROOF_SHARE) return { ...evidence, order: null, question: 'ambiguous' }
+  if (proofs < PROOF_ENOUGH && proofs <= (proofs + unsettled) * PROOF_SHARE) return { ...evidence, order: null, question: 'ambiguous' }
   return { ...evidence, order: dayFirst > monthFirst ? 'day-first' : 'month-first', question: null }
 }
 
@@ -527,6 +528,8 @@ export function amountStyleOf(table: CsvTable, columns: ColumnMap, headerIndex =
   let point = 0
   let groupedByComma = 0
   let threeDecimals: string | null = null
+  // A worksheet's numbers are numbers already; only text can be written either way.
+  const typed = table.sheet !== undefined
   for (const row of dataRows(table, headerIndex)) {
     for (const index of [columns.amount_paid, columns.invoice_amount]) {
       const cell = index === undefined ? '' : (row[index] ?? '').trim()
@@ -536,12 +539,13 @@ export function amountStyleOf(table: CsvTable, columns: ColumnMap, headerIndex =
       if (asComma && !asPoint) comma += 1
       else if (asPoint && !asComma) point += 1
       else if (asPoint && /\d,\d{3}(?!\d)/.test(cell)) groupedByComma += 1
-      else if (asPoint && parseMoney(cell, 'point-strict') === null) threeDecimals ??= cell
+      else if (asPoint && !typed && parseMoney(cell, 'point-strict') === null && !/(^|\D)0\.\d{3}/.test(cell)) threeDecimals ??= cell
     }
   }
   if (comma >= 2 && point === 0 && groupedByComma === 0) return { style: 'comma', example: null }
-  if (comma > 0) return { style: 'point-strict', example: null }
-  return threeDecimals !== null && point === 0 && groupedByComma === 0 ? { style: null, example: threeDecimals } : { style: 'point', example: null }
+  const unsettled = threeDecimals !== null && point === 0 && groupedByComma === 0
+  if (comma > 0 && !unsettled) return { style: 'point-strict', example: null }
+  return unsettled ? { style: null, example: threeDecimals } : { style: 'point', example: null }
 }
 
 export interface NegativePayments {
@@ -579,7 +583,7 @@ export interface ReadingChoices {
 function rowsAboveHeadings(table: CsvTable): boolean {
   return table.rows.slice(0, Math.max(0, table.headerIndex)).some((row) => {
     const filled = row.filter((cell) => cell.trim() !== '')
-    return filled.length >= REQUIRED_FIELDS.length && filled.some((cell) => readsAsAmount(cell))
+    return filled.length >= REQUIRED_FIELDS.length && filled.some((cell) => readsAsAmount(cell) && /[.,]\d{2}\b|[$€£]/.test(cell))
   })
 }
 

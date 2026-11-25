@@ -119,14 +119,23 @@ describe('the same payment is recognised however the next file is written', () =
     expect(both.records.map((r) => r.amountPaid)).toEqual([100, -100])
   })
 
-  it('by its transaction ID when the invoice is added, corrected or left out', () => {
+  it('by its transaction ID when the invoice is added or left out', () => {
     const t = `${plain},transaction_id`
-    for (const [then, now] of [['Acme,,2026-01-05,100,T1', 'Acme,INV-1,2026-01-05,100,T1'], ['Acme,INV-1,2026-01-05,100,T1', 'Acme,INV-1A,2026-01-05,100,T1'], ['Acme,INV-1,2026-01-05,100,T1', 'Acme,,2026-01-05,100,T1']]) {
+    for (const [then, now] of [['Acme,,2026-01-05,100,T1', 'Acme,INV-1,2026-01-05,100,T1'], ['Acme,INV-1,2026-01-05,100,T1', 'Acme,,2026-01-05,100,T1']]) {
       expect(mergeImport(mergeImport(null, file(t, then)), file(t, now, 'Z,Z,2026-01-09,1,T9')).records, now).toHaveLength(2)
     }
     expect(mergeImport(mergeImport(null, file(t, 'Acme,INV-1,2026-01-05,100,T1')), file('vendor,payment_date,amount_paid,transaction_id', 'Acme,2026-01-05,100,T1')).records).toHaveLength(1)
     const bills = mergeImport(null, file(t, 'Acme,INV-1,2026-01-05,500,P1'))
     expect(mergeImport(bills, file(t, 'Acme,INV-1,2026-01-05,500,P1', 'Acme,INV-2,2026-01-05,500,P1')).records).toHaveLength(2)
+  })
+
+  it('but an ID never outvotes a different vendor, bill or day', () => {
+    const t = `${plain},transaction_id`
+    const batch = mergeImport(null, file(t, 'Acme,A-1,2026-01-05,100,RUN5'))
+    expect(mergeImport(batch, file(t, 'Beta,B-1,2026-01-05,100,RUN5')).records).toHaveLength(2)
+    expect(mergeImport(batch, file(t, 'Acme,A-2,2026-01-05,100,RUN5')).records).toHaveLength(2)
+    const numbered = mergeImport(null, file('vendor,payment_date,amount_paid,transaction_id', 'Acme,2026-01-05,100,1', 'Beta,2026-01-06,200,2'))
+    expect(mergeImport(numbered, file('vendor,payment_date,amount_paid,transaction_id', 'Beta,2026-02-05,300,1', 'Acme,2026-02-06,400,2', 'Acme,2026-02-07,100,1')).records).toHaveLength(5)
   })
 
   it('when one file has no invoice column at all, but not when its invoice is blank', () => {
@@ -227,6 +236,14 @@ describe('adding and removing files around decisions', () => {
     const left = removeImport(b, b.imports[0].id)
     expect(left.records.map((r) => r.vendor)).toEqual(['Acme', 'Beta'])
     expect(new Set(left.records.map((r) => r.importBatchId))).toEqual(new Set([b.imports[1].id]))
+  })
+
+  it('removing a file read the wrong way round leaves the other file’s reading of its dates', () => {
+    const rows = [plain, 'Acme,INV-1001,02/04/2026,100']
+    const wrong = mergeImport(null, file(...rows))
+    const right = mergeImport(wrong, { ...file(), parsed: parseCsv([...rows, 'Corp,INV-7000,25/04/2026,40'].join('\n'), { dateOrder: 'day-first' }) })
+    const left = removeImport(deserializeEnvironment(serializeEnvironment(right)), right.imports[0].id)
+    expect(left.records.map((r) => [r.vendor, r.paymentDate.getMonth() + 1, r.paymentDate.getDate()])).toEqual([['Acme', 4, 2], ['Corp', 4, 25]])
   })
 
   it('removing a file keeps a decision made on its payments, marked to be checked again', () => {

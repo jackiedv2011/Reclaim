@@ -220,14 +220,18 @@ function matchEarlier(records: APRecord[], incoming: APRecord[]): Map<APRecord, 
   const withoutInvoice = index(paymentKeyWithoutInvoice)
   const cells = index(cellsKey)
   const reference = (r: APRecord) => normalizeReference(r.invoiceNumber).value
-  const sameBooks = (a: APRecord, b: APRecord) => couldBeSamePayment({ ...a, currency: null }, { ...b, currency: null })
+  const sameVendor = (a: APRecord, b: APRecord) => normalizeVendor(a.vendor) === normalizeVendor(b.vendor) || Boolean(a.stableSupplierId && a.stableSupplierId === b.stableSupplierId)
+  const sameBooks = (a: APRecord, b: APRecord) => sameVendor(a, b) && couldBeSamePayment({ ...a, currency: null }, { ...b, currency: null })
+  const sameDay = (a: APRecord, b: APRecord) => isoDay(a.paymentDate) === isoDay(b.paymentDate)
+  // IDs are only unique inside their own system, and some files just number their rows: an ID never outvotes the vendor or a different bill.
+  const sameBill = (a: APRecord, b: APRecord) => reference(a) === reference(b) || reference(a) === null || reference(b) === null
   const passes: ((r: APRecord) => APRecord[])[] = [
-    (r) => identity(r).filter((e) => e.amountPaid === r.amountPaid && couldBeSamePayment(e, r)),
+    (r) => identity(r).filter((e) => e.amountPaid === r.amountPaid && sameVendor(e, r) && sameDay(e, r) && couldBeSamePayment(e, r)),
     (r) => payment(r).filter((e) => couldBeSamePayment(e, r)),
-    // The same transaction, with its invoice since added, dropped or corrected.
-    (r) => transaction(r).filter((e) => sameBooks(e, r) && e.amountPaid === r.amountPaid && isoDay(e.paymentDate) === isoDay(r.paymentDate)),
+    // The same transaction, with its invoice since added or left out.
+    (r) => transaction(r).filter((e) => sameBooks(e, r) && sameBill(e, r) && e.amountPaid === r.amountPaid && sameDay(e, r)),
     // The same transaction and bill saying something different: a conflict, not another payment.
-    (r) => transaction(r).filter((e) => sameBooks(e, r) && (reference(e) === reference(r) || reference(e) === null || reference(r) === null)),
+    (r) => transaction(r).filter((e) => sameBooks(e, r) && sameBill(e, r) && (reference(r) !== null ? reference(e) !== null : sameDay(e, r))),
     (r) => withoutInvoice(r).filter((e) => (!knowsInvoice(e) || !knowsInvoice(r)) && couldBeSamePayment(e, r)),
     (r) => cells(r).filter((e) => couldBeSamePayment(e, r)),
   ]
@@ -276,7 +280,7 @@ export function inspectImport(env: LedgerEnvironment | null, input: MergeImportI
     const otherDay = previous !== undefined && isoDay(previous.paymentDate) !== isoDay(record.paymentDate) && cellsKey(previous) === cellsKey(record)
     const missing = !record.externalTransactionId && !record.invoiceNumber
     const status = previous ? record.externalTransactionId && sourceSignature(previous)===sourceSignature(record) ? 'exact_duplicate' : 'possible_overlap' : missing ? 'missing_identification_fields' : 'newly_imported'
-    rowResults.push({ ...row, status, reason: previous ? status==='exact_duplicate' ? 'This external transaction was already imported.' : otherDay ? 'Already in this audit, read with its date the other way round. To use this reading, remove the earlier file first.' : 'Possible overlap or conflicting source identity. Row retained in this receipt; obtain distinct transaction IDs before importing it as another payment.' : missing ? 'No external transaction ID or invoice reference; payment identity needs confirmation.' : 'New source record.', ...(previous ? {existingRecordId:previous.id} : {}) })
+    rowResults.push({ ...row, status, reason: previous ? status==='exact_duplicate' ? 'This external transaction was already imported.' : otherDay ? 'Already in this audit, read with its date the other way round. To use this reading, remove the earlier file first.' : 'Possible overlap or conflicting source identity. Row retained in this receipt; obtain distinct transaction IDs before importing it as another payment.' : missing ? 'No external transaction ID or invoice reference; payment identity needs confirmation.' : 'New source record.', ...(previous ? {existingRecordId:previous.id} : {}), ...(otherDay ? {readAs:{paymentDate:isoDay(record.paymentDate),invoiceDate:record.invoiceDate ? isoDay(record.invoiceDate) : null}} : {}) })
     if(previous) overlaps.push({ incoming: record, previous })
     else accepted.push({...record,identityKey:key,rowFingerprint:fingerprint,importStatus:status})
   }
@@ -353,14 +357,24 @@ export function removeImport(env: LedgerEnvironment, batchId: string): LedgerEnv
   const batch = env.imports.find((b) => b.id === batchId)
   if (!batch) return env
   // A payment another file also lists stays, as that file's: it was only left out of it because this one came first.
-  const keptBy = new Map<string, string>()
+  const keptBy = new Map<string, { batchId: string; readAs?: ImportRowResult['readAs'] }>()
   for (const other of env.imports) {
     if (other.id === batchId) continue
-    for (const row of other.rowResults ?? []) if (row.existingRecordId) keptBy.set(row.existingRecordId, other.id)
+    for (const row of other.rowResults ?? []) if (row.existingRecordId) keptBy.set(row.existingRecordId, { batchId: other.id, readAs: row.readAs })
   }
   const removed = env.records.filter((r) => r.importBatchId === batchId && !keptBy.has(r.id))
   const gone = new Set(removed.map((r) => r.id))
-  const records = env.records.filter((r) => !gone.has(r.id)).map((r) => (r.importBatchId === batchId ? { ...r, importBatchId: keptBy.get(r.id)! } : r))
+  const records = env.records.filter((r) => !gone.has(r.id)).map((r) => {
+    if (r.importBatchId !== batchId) return r
+    const { batchId: keeper, readAs } = keptBy.get(r.id)!
+    if (!readAs) return { ...r, importBatchId: keeper }
+    // The file that stays read this row's date the other way round, so its reading is the one that stays.
+    gone.add(r.id)
+    const kept: APRecord = { ...r, importBatchId: keeper, paymentDate: storedDay(readAs.paymentDate) ?? r.paymentDate, invoiceDate: storedDay(readAs.invoiceDate) }
+    kept.identityKey = recordIdentity(kept)
+    kept.rowFingerprint = checksum(kept.identityKey)
+    return kept
+  })
   const next = rebuildLedger(env, records, batch, env.nextRecordSeq, gone, removed)
   return { ...next, imports: env.imports.filter((b) => b.id !== batchId), newFindingIds: [] }
 }

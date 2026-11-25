@@ -5,6 +5,8 @@
  * the same reading as a CSV. Nothing in the workbook is ever evaluated.
  */
 
+import { CURRENCY_CODES } from '@/lib/format'
+
 export class WorkbookError extends Error {}
 
 export interface WorkbookSheet {
@@ -134,6 +136,10 @@ function stringOf(xml: string): string {
 
 const BUILT_IN_DATE_FORMATS = new Set([14, 15, 16, 17, 22, 27, 28, 29, 30, 31, 34, 35, 36, 50, 51, 52, 53, 54, 55, 56, 57, 58])
 
+/** Currencies an amount can be written with; any other format's number is kept as a plain number. */
+const CODES = CURRENCY_CODES.filter((code) => code !== 'usd').join('|').toUpperCase()
+const CURRENCY_FORMAT = new RegExp(`\\[\\$(€|£|${CODES})(?:-[^\\]]*)?\\]|"\\s?(€|£|${CODES})\\s?"|(€|£)`)
+
 /** An element's attributes, which may hold a ">" of their own. */
 const ATTRIBUTES = `((?:[^>"']|"[^"]*"|'[^']*')*?)`
 const NUMBER_FORMAT = new RegExp(`<(?:\\w+:)?numFmt\\s${ATTRIBUTES}/?>`, 'g')
@@ -152,7 +158,7 @@ function styleOf(id: number, code: string | undefined): CellStyle {
   const bare = code.replace(/"[^"]*"|\\.|\[[^\]]*\]|_.|\*./g, '')
   return {
     date: /[dy]/i.test(bare),
-    currency: code.match(/\[\$(€|£|[A-Z]{3})(?:-[^\]]*)?\]|"?\s?(€|£|EUR|GBP|CAD|AUD|NZD|CHF)\s?"?/)?.slice(1).find(Boolean) ?? '',
+    currency: code.match(CURRENCY_FORMAT)?.slice(1).find(Boolean) ?? '',
     digits: /^0{2,}$/.test(code) ? code.length : 0,
   }
 }

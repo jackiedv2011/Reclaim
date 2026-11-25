@@ -47,6 +47,8 @@ export interface ImportRowResult {
   raw: Record<string, string> | null
   fingerprint?: string
   existingRecordId?: string
+  /** The days this file gives the row, when it is already in the audit under its date read the other way round. */
+  readAs?: { paymentDate: string; invoiceDate: string | null }
 }
 export interface APRecord {
   source?: SourceProvenance

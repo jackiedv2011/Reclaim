@@ -61,7 +61,8 @@ export function parseCurrency(raw: string | null | undefined): number | null {
 export type AmountStyle = 'point' | 'comma' | 'point-strict'
 
 const CURRENCY_MARKS: Record<string, string | null> = { $: null, 'us$': 'USD', 'ca$': 'CAD', 'c$': 'CAD', 'a$': 'AUD', 'au$': 'AUD', 'nz$': 'NZD', '€': 'EUR', '£': 'GBP' }
-const CURRENCY_CODE = 'usd|eur|gbp|cad|aud|nzd|chf|sek|nok|dkk|inr|sgd|hkd|zar|mxn|brl|jpy|cny'
+export const CURRENCY_CODES = 'usd eur gbp cad aud nzd chf sek nok dkk isk inr sgd hkd zar mxn brl jpy cny pln aed sar czk huf ron bgn try ils thb idr myr php krw twd vnd clp cop pen ars egp ngn kes ghs pkr bdt lkr uah qar kwd bhd omr jod mad'.split(' ')
+const CURRENCY_CODE = CURRENCY_CODES.join('|')
 const MARK = `(?:us\\$|ca\\$|c\\$|au\\$|a\\$|nz\\$|\\$|€|£|${CURRENCY_CODE})`
 const MARK_FIRST = new RegExp(`^(${MARK})(?![a-z])`, 'i')
 const MARK_LAST = new RegExp(`(?<![a-z])(${MARK})$`, 'i')
