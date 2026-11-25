@@ -22,6 +22,18 @@ describe('reading a workbook', () => {
     expect((await rowsOf('<row r="1"><c r="A1" s="1"><v>44623</v></c></row>', { date1904: true }))[0][0]).toBe('2026-03-04')
   })
 
+  it('a date cell holding nothing is blank, not 1899', async () => {
+    expect(await rowsOf('<row r="1"><c r="A1" s="1"><v></v></c><c r="B1" s="1"><v>0</v></c><c r="C1"><v>5</v></c></row>')).toEqual([['', '', '5']])
+  })
+
+  it('keeps a currency and leading zeros the format shows', async () => {
+    expect(await rowsOf('<row r="1"><c r="A1" s="4"><v>100</v></c><c r="B1" s="5"><v>123</v></c><c r="C1" s="6"><v>46085</v></c><c r="D1" s="4"><v>-7.5</v></c></row>')).toEqual([['€100', '00123', '2026-03-04', '€-7.5']])
+  })
+
+  it('reads markup other tools write', async () => {
+    expect(await rowsOf('<!-- <row r="1"><c><v>9</v></c></row> --><row r="1"><c r="A1" t="inlineStr"><is><t xml:space="preserve"/><t>INV_x2024_7</t></is></c></row><row r="1"><c r="A1"><v>2</v></c></row>')).toEqual([['INV_x2024_7'], ['2']])
+  })
+
   it('writes numbers the way a person would: no float noise, no exponent', async () => {
     expect(await rowsOf('<row r="1"><c r="A1"><v>1203.0000000000002</v></c><c r="B1"><v>1E-7</v></c><c r="C1"><v>-80.5</v></c><c r="D1"><v>0.1</v></c></row>')).toEqual([['1203', '0.0000001', '-80.5', '0.1']])
   })
@@ -30,14 +42,14 @@ describe('reading a workbook', () => {
     expect(await rowsOf('<x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Hi</x:t></x:is></x:c></x:row>')).toEqual([['Hi']])
   })
 
-  it('lists visible sheets that hold something', async () => {
+  it('lists the sheets that hold something, saying which are hidden', async () => {
     const sheets = await readWorkbook(buildXlsx([
       { name: 'Cover', rows: '' },
       { name: 'A &amp; B', rows: plainRows([['x', 1]]) },
       { name: 'Old', rows: plainRows([['y']]), state: 'hidden' },
       { name: 'Two', rows: plainRows([['z']]) },
     ]))
-    expect(sheets).toEqual([{ name: 'A & B', rows: [['x', '1']] }, { name: 'Two', rows: [['z']] }])
+    expect(sheets).toEqual([{ name: 'A & B', rows: [['x', '1']], hidden: false }, { name: 'Old', rows: [['y']], hidden: true }, { name: 'Two', rows: [['z']], hidden: false }])
   })
 
   it('reads a large sheet quickly', async () => {

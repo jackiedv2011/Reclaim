@@ -74,6 +74,7 @@ export function parseMoney(raw: string | null | undefined, style: AmountStyle = 
     const found = mark[1].toLowerCase()
     currency = Object.hasOwn(CURRENCY_MARKS, found) ? CURRENCY_MARKS[found] : found.toUpperCase()
     text = text.match(MARK_FIRST) ? text.slice(mark[0].length) : text.slice(0, -mark[0].length)
+    sign(/^\((.*)\)$/)
     sign(/^-(.*)$/)
     sign(/^(.*)-$/)
   }
@@ -87,6 +88,14 @@ export function parseMoney(raw: string | null | undefined, style: AmountStyle = 
   }
   const value = Number(text)
   return Number.isFinite(value) ? { amount: negative && value !== 0 ? -value : value, currency } : null
+}
+
+const CURRENCY_NAMES: Record<string, string> = { $: 'USD', us$: 'USD', 'us dollar': 'USD', 'us dollars': 'USD', 'u.s. dollar': 'USD', 'u.s. dollars': 'USD', dollar: 'USD', dollars: 'USD', 'united states dollar': 'USD', '€': 'EUR', euro: 'EUR', euros: 'EUR', '£': 'GBP', 'pound sterling': 'GBP', 'british pound': 'GBP', c$: 'CAD', ca$: 'CAD', 'canadian dollar': 'CAD', a$: 'AUD', au$: 'AUD', 'australian dollar': 'AUD' }
+
+/** The three-letter code for what people type in a currency column, so "$", "US Dollar" and "usd" are one currency. */
+export function canonicalCurrency(raw: string | null | undefined): string | null {
+  const text = raw?.trim()
+  return text ? CURRENCY_NAMES[text.toLowerCase()] ?? text.toUpperCase() : null
 }
 
 /** A calendar day as YYYY-MM-DD. Days have no time zone, so they are never stored as an instant. */
@@ -181,6 +190,9 @@ export function parseDate(raw: string | null | undefined, order: DateOrder = 'mo
 
   const iso = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/)
   if (iso) return buildLocalDate(Number(iso[1]), Number(iso[2]), Number(iso[3]))
+
+  const yearFirst = withoutTime(trimmed).match(/^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})$/)
+  if (yearFirst) return buildLocalDate(Number(yearFirst[1]), Number(yearFirst[3]), Number(yearFirst[4]))
 
   const compact = trimmed.match(/^((?:19|20)\d{2})(\d{2})(\d{2})$/)
   if (compact) return buildLocalDate(Number(compact[1]), Number(compact[2]), Number(compact[3]))

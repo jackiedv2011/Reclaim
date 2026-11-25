@@ -46,7 +46,7 @@ export function zip(files: Record<string, string>, compress = true): Uint8Array 
   return out
 }
 
-const STYLES = '<styleSheet><numFmts count="2"><numFmt numFmtId="164" formatCode="dd\\-mmm\\-yyyy"/><numFmt numFmtId="165" formatCode="&quot;Paid&quot; #,##0.00;[Red]-#,##0.00"/></numFmts><cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/><xf numFmtId="165"/></cellXfs></styleSheet>'
+const STYLES = '<styleSheet><numFmts count="5"><numFmt numFmtId="166" formatCode="#,##0.00\\ [$€-407]"/><numFmt numFmtId="167" formatCode="00000"/><numFmt numFmtId="168" formatCode="[>1]dd/mm/yyyy"/><numFmt numFmtId="164" formatCode="dd\\-mmm\\-yyyy"/><numFmt numFmtId="165" formatCode="&quot;Paid&quot; #,##0.00;[Red]-#,##0.00"/></numFmts><cellXfs count="7"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/><xf numFmtId="165"/><xf numFmtId="166"/><xf numFmtId="167"/><xf numFmtId="168"/></cellXfs></styleSheet>'
 
 /** A workbook whose sheets are given as raw `<row>` markup. */
 export function buildXlsx(sheets: { name: string; rows: string; state?: string }[], options: { strings?: string; compress?: boolean; date1904?: boolean } = {}): Uint8Array {

@@ -11,6 +11,7 @@ export interface WorkbookSheet {
   name: string
   /** Every row from the first, blanks included, so position + 1 is the row number Excel shows. */
   rows: string[][]
+  hidden: boolean
 }
 
 /** A real export is a few MB unpacked; past this it is a mistake or a trap. */
@@ -48,7 +49,7 @@ function zipEntries(bytes: Uint8Array): Map<string, ZipEntry> {
     if (at + 46 > bytes.length || view.getUint32(at, true) !== 0x02014b50) throw new WorkbookError(NOT_A_WORKBOOK)
     const nameLength = view.getUint16(at + 28, true)
     const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLength))
-    entries.set(name.replace(/^\//, '').replaceAll('\\', '/'), {
+    entries.set(name.replace(/^\//, '').replaceAll('\\', '/').toLowerCase(), {
       method: view.getUint16(at + 10, true),
       compressedSize: view.getUint32(at + 20, true),
       size: view.getUint32(at + 24, true),
@@ -59,7 +60,7 @@ function zipEntries(bytes: Uint8Array): Map<string, ZipEntry> {
   return entries
 }
 
-async function inflate(data: Uint8Array): Promise<Uint8Array> {
+async function inflate(data: Uint8Array, limit: number): Promise<Uint8Array> {
   const stream = new DecompressionStream('deflate-raw')
   const writer = stream.writable.getWriter()
   // Errors surface on the reading side; this only keeps them from being reported twice.
@@ -71,7 +72,7 @@ async function inflate(data: Uint8Array): Promise<Uint8Array> {
     const { done, value } = await reader.read()
     if (done) break
     total += value.length
-    if (total > MAX_UNPACKED_BYTES) {
+    if (total > limit) {
       await reader.cancel()
       throw new WorkbookError('That workbook is too large to read. Split the export by date range and add each part to the same audit.')
     }
@@ -87,15 +88,17 @@ async function inflate(data: Uint8Array): Promise<Uint8Array> {
   return out
 }
 
-async function entryText(bytes: Uint8Array, entry: ZipEntry | undefined): Promise<string | null> {
+async function entryText(bytes: Uint8Array, entry: ZipEntry | undefined, budget: { left: number }): Promise<string | null> {
   if (!entry) return null
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   if (entry.offset + 30 > bytes.length || view.getUint32(entry.offset, true) !== 0x04034b50) throw new WorkbookError(NOT_A_WORKBOOK)
-  if (entry.size > MAX_UNPACKED_BYTES) throw new WorkbookError('That workbook is too large to read. Split the export by date range and add each part to the same audit.')
+  if (entry.size > budget.left) throw new WorkbookError('That workbook is too large to read. Split the export by date range and add each part to the same audit.')
   const start = entry.offset + 30 + view.getUint16(entry.offset + 26, true) + view.getUint16(entry.offset + 28, true)
   const data = bytes.subarray(start, start + entry.compressedSize)
   if (entry.method !== 0 && entry.method !== 8) throw new WorkbookError(NOT_A_WORKBOOK)
-  return new TextDecoder().decode(entry.method === 0 ? data : await inflate(data))
+  const unpacked = entry.method === 0 ? data : await inflate(data, budget.left)
+  budget.left -= unpacked.length
+  return new TextDecoder().decode(unpacked)
 }
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
@@ -109,7 +112,7 @@ function unescapeXml(text: string): string {
       return point <= 0x10ffff ? String.fromCodePoint(point) : whole
     })
     // Excel writes characters XML can't hold as _x000D_ and the like.
-    .replace(/_x([0-9a-f]{4})_/gi, (_, code: string) => String.fromCharCode(parseInt(code, 16)))
+    .replace(/_x(00[01][0-9a-f]|005f)_/gi, (_, code: string) => String.fromCharCode(parseInt(code, 16)))
 }
 
 const attributePatterns = new Map<string, RegExp>()
@@ -125,26 +128,58 @@ function attribute(attributes: string, name: string): string | null {
 function stringOf(xml: string): string {
   const body = xml.replace(/<(?:\w+:)?rPh\b[\s\S]*?<\/(?:\w+:)?rPh>/g, '')
   let text = ''
-  for (const match of body.matchAll(/<(?:\w+:)?t(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?t>/g)) text += match[1]
+  for (const match of body.matchAll(/<(?:\w+:)?t(?:\s[^>]*)?(?<!\/)>([\s\S]*?)<\/(?:\w+:)?t>/g)) text += match[1]
   return unescapeXml(text)
 }
 
 const BUILT_IN_DATE_FORMATS = new Set([14, 15, 16, 17, 22, 27, 28, 29, 30, 31, 34, 35, 36, 50, 51, 52, 53, 54, 55, 56, 57, 58])
 
-/** For each cell style, whether Excel shows its number as a date. */
-function dateStyles(xml: string | null): boolean[] {
-  if (!xml) return []
-  const custom = new Map<number, boolean>()
-  for (const match of xml.matchAll(/<(?:\w+:)?numFmt\s([^>]*?)\/?>/g)) {
-    const id = Number(attribute(match[1], 'numFmtId'))
-    const code = (attribute(match[1], 'formatCode') ?? '').replace(/"[^"]*"|\\.|\[[^\]]*\]|_.|\*./g, '')
-    custom.set(id, /[dy]/i.test(code))
+/** An element's attributes, which may hold a ">" of their own. */
+const ATTRIBUTES = `((?:[^>"']|"[^"]*"|'[^']*')*?)`
+const NUMBER_FORMAT = new RegExp(`<(?:\\w+:)?numFmt\\s${ATTRIBUTES}/?>`, 'g')
+const SHEET = new RegExp(`<(?:\\w+:)?sheet\\s${ATTRIBUTES}/?>`, 'g')
+
+interface CellStyle {
+  date: boolean
+  /** A currency the format shows beside the number, other than a dollar sign, which is every file's default. */
+  currency: string
+  /** Digits a format like 00000 pads to, so 123 is the reference 00123 it looks like. */
+  digits: number
+}
+
+function styleOf(id: number, code: string | undefined): CellStyle {
+  if (code === undefined) return { date: BUILT_IN_DATE_FORMATS.has(id), currency: '', digits: 0 }
+  const bare = code.replace(/"[^"]*"|\\.|\[[^\]]*\]|_.|\*./g, '')
+  return {
+    date: /[dy]/i.test(bare),
+    currency: code.match(/\[\$(€|£|[A-Z]{3})(?:-[^\]]*)?\]|"?\s?(€|£|EUR|GBP|CAD|AUD|NZD|CHF)\s?"?/)?.slice(1).find(Boolean) ?? '',
+    digits: /^0{2,}$/.test(code) ? code.length : 0,
   }
+}
+
+function cellStyles(xml: string | null): CellStyle[] {
+  if (!xml) return []
+  const custom = new Map<number, string>()
+  for (const match of xml.matchAll(NUMBER_FORMAT)) custom.set(Number(attribute(match[1], 'numFmtId')), attribute(match[1], 'formatCode') ?? '')
   const cellFormats = xml.match(/<(?:\w+:)?cellXfs\b[^>]*>([\s\S]*?)<\/(?:\w+:)?cellXfs>/)?.[1] ?? ''
   return [...cellFormats.matchAll(/<(?:\w+:)?xf\b([^>]*?)\/?>/g)].map((match) => {
     const id = Number(attribute(match[1], 'numFmtId') ?? 0)
-    return custom.get(id) ?? BUILT_IN_DATE_FORMATS.has(id)
+    return styleOf(id, custom.get(id))
   })
+}
+
+/** A number as its cell shows it. A date cell holding nothing, or a formula never worked out, is blank rather than 1899. */
+function styledNumber(raw: string, style: CellStyle | undefined, epoch1904: boolean): string {
+  if (raw.trim() === '') return ''
+  if (style?.date) {
+    const serial = Number(raw)
+    if (!epoch1904 && serial >= 0 && serial < 1) return ''
+    const date = serialDate(serial, epoch1904)
+    if (date) return date
+  }
+  const number = plainNumber(raw)
+  if (style?.digits && /^\d+$/.test(number)) return number.padStart(style.digits, '0')
+  return style?.currency ? `${style.currency}${/^[A-Z]/.test(style.currency) ? ' ' : ''}${number}` : number
 }
 
 const two = (value: number) => String(value).padStart(2, '0')
@@ -179,11 +214,14 @@ function columnIndex(reference: string): number {
   return index - 1
 }
 
-function sheetRows(xml: string, strings: string[], dates: boolean[], epoch1904: boolean): string[][] {
+function sheetRows(source: string, strings: string[], styles: CellStyle[], epoch1904: boolean): string[][] {
+  const xml = source.includes('<!--') ? source.replace(/<!--[\s\S]*?-->/g, '') : source
   const rows: string[][] = []
   let previousRow = 0
   for (const rowMatch of xml.matchAll(/<(?:\w+:)?row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?row>)/g)) {
-    const rowNumber = Number(attribute(rowMatch[1], 'r') ?? previousRow + 1)
+    const given = Number(attribute(rowMatch[1], 'r') ?? previousRow + 1)
+    // A row number used twice would overwrite a row; the second goes below instead.
+    const rowNumber = Number.isInteger(given) && given <= previousRow ? previousRow + 1 : given
     if (!Number.isInteger(rowNumber) || rowNumber < 1 || rowNumber > MAX_ROWS) throw new WorkbookError(NOT_A_WORKBOOK)
     previousRow = rowNumber
     if (!rowMatch[2]) continue
@@ -202,10 +240,8 @@ function sheetRows(xml: string, strings: string[], dates: boolean[], epoch1904: 
       else if (stored === undefined) text = ''
       else if (type === 's') text = strings[Number(stored)] ?? ''
       else if (type === 'b') text = stored === '1' ? 'TRUE' : 'FALSE'
-      else if (type === 'n') {
-        const style = Number(attribute(cellMatch[1], 's') ?? 0)
-        text = (dates[style] ? serialDate(Number(stored), epoch1904) : null) ?? plainNumber(unescapeXml(stored))
-      } else text = unescapeXml(stored)
+      else if (type === 'n') text = styledNumber(unescapeXml(stored), styles[Number(attribute(cellMatch[1], 's') ?? 0)], epoch1904)
+      else text = unescapeXml(stored)
       if (text === '') continue
       while (cells.length < column) cells.push('')
       cells[column] = text
@@ -222,12 +258,13 @@ export function spreadsheetKind(bytes: Uint8Array): 'xlsx' | 'old-or-locked' | n
   return isZip(bytes) ? 'xlsx' : isOle(bytes) ? 'old-or-locked' : null
 }
 
-/** The visible sheets that hold anything, in workbook order. */
+/** The sheets that hold anything, hidden ones too so a person can be told of them, in workbook order. */
 export async function readWorkbook(bytes: Uint8Array): Promise<WorkbookSheet[]> {
   if (isOle(bytes)) throw new WorkbookError('That is an old .xls file or a password-protected workbook. Open it in Excel and save it as .xlsx without a password, or as CSV.')
   if (!isZip(bytes)) throw new WorkbookError(NOT_A_WORKBOOK)
   const entries = zipEntries(bytes)
-  const text = (name: string) => entryText(bytes, entries.get(name))
+  const budget = { left: MAX_UNPACKED_BYTES }
+  const text = (name: string) => entryText(bytes, entries.get(name.toLowerCase()), budget)
   const workbook = await text('xl/workbook.xml')
   if (!workbook) throw new WorkbookError(NOT_A_WORKBOOK)
 
@@ -238,17 +275,17 @@ export async function readWorkbook(bytes: Uint8Array): Promise<WorkbookSheet[]> 
     if (id && target) targets.set(id, target.startsWith('/') ? target.slice(1) : `xl/${target.replace(/^\.\//, '')}`)
   }
   const strings = [...((await text('xl/sharedStrings.xml')) ?? '').matchAll(/<(?:\w+:)?si\b[^>]*?(?:\/>|>([\s\S]*?)<\/(?:\w+:)?si>)/g)].map((match) => stringOf(match[1] ?? ''))
-  const dates = dateStyles(await text('xl/styles.xml'))
+  const styles = cellStyles(await text('xl/styles.xml'))
   const epoch1904 = /<(?:\w+:)?workbookPr\b[^>]*\bdate1904\s*=\s*["'](?:1|true)["']/.test(workbook)
 
   const sheets: WorkbookSheet[] = []
-  for (const match of workbook.matchAll(/<(?:\w+:)?sheet\s([^>]*?)\/?>/g)) {
-    if (/hidden/i.test(attribute(match[1], 'state') ?? '')) continue
+  for (const match of workbook.matchAll(SHEET)) {
+    const hidden = /hidden/i.test(attribute(match[1], 'state') ?? '')
     const id = attribute(match[1], '(?:\\w+:)?id')
     const xml = id ? await text(targets.get(id) ?? '') : null
     if (xml === null) continue
-    const rows = sheetRows(xml, strings, dates, epoch1904)
-    if (rows.length > 0) sheets.push({ name: attribute(match[1], 'name') ?? `Sheet ${sheets.length + 1}`, rows })
+    const rows = sheetRows(xml, strings, styles, epoch1904)
+    if (rows.length > 0) sheets.push({ name: attribute(match[1], 'name') ?? `Sheet ${sheets.length + 1}`, rows, hidden })
   }
   return sheets
 }

@@ -111,6 +111,36 @@ describe('the same payment is recognised however the next file is written', () =
     expect(mergeImport(t1, file(`${plain},transaction_id`, 'Acme,INV-1001,2025-01-10,250,T-2')).records).toHaveLength(2)
   })
 
+  it('a refund of it is a different row, in whatever order the two come', () => {
+    const paid = mergeImport(null, file(plain, 'Acme,INV-1001,2026-01-05,100'))
+    const refund = mergeImport(paid, file(plain, 'Acme,INV-1001,2026-01-05,-100'))
+    expect(refund.records.map((r) => r.amountPaid)).toEqual([100, -100])
+    const both = mergeImport(paid, file(plain, 'Acme,INV-1001,2026-01-05,-100', 'Acme,INV-1001,2026-01-05,100'))
+    expect(both.records.map((r) => r.amountPaid)).toEqual([100, -100])
+  })
+
+  it('by its transaction ID when the invoice is added, corrected or left out', () => {
+    const t = `${plain},transaction_id`
+    for (const [then, now] of [['Acme,,2026-01-05,100,T1', 'Acme,INV-1,2026-01-05,100,T1'], ['Acme,INV-1,2026-01-05,100,T1', 'Acme,INV-1A,2026-01-05,100,T1'], ['Acme,INV-1,2026-01-05,100,T1', 'Acme,,2026-01-05,100,T1']]) {
+      expect(mergeImport(mergeImport(null, file(t, then)), file(t, now, 'Z,Z,2026-01-09,1,T9')).records, now).toHaveLength(2)
+    }
+    expect(mergeImport(mergeImport(null, file(t, 'Acme,INV-1,2026-01-05,100,T1')), file('vendor,payment_date,amount_paid,transaction_id', 'Acme,2026-01-05,100,T1')).records).toHaveLength(1)
+    const bills = mergeImport(null, file(t, 'Acme,INV-1,2026-01-05,500,P1'))
+    expect(mergeImport(bills, file(t, 'Acme,INV-1,2026-01-05,500,P1', 'Acme,INV-2,2026-01-05,500,P1')).records).toHaveLength(2)
+  })
+
+  it('when one file has no invoice column at all, but not when its invoice is blank', () => {
+    expect(mergeImport(first, file('vendor,payment_date,amount_paid', 'Acme,2025-01-10,250')).records).toHaveLength(2)
+    expect(mergeImport(first, file(plain, 'Acme,,2025-01-10,250')).records).toHaveLength(3)
+  })
+
+  it('with its currency spelled another way, including in audits saved before', () => {
+    const saved = mergeImport(null, file(`${plain},currency`, 'Acme,INV-1,2026-01-05,100,$'))
+    const old = JSON.parse(serializeEnvironment(saved))
+    old.records[0].currency = '$'
+    expect(mergeImport(deserializeEnvironment(JSON.stringify(old)), file(`${plain},currency`, 'Acme,INV-1,2026-01-05,100,US Dollar')).records).toHaveLength(1)
+  })
+
   it('read with the dates the other way round', () => {
     const rows = [plain, 'Acme,INV-1001,02/04/2026,100', 'Beta,INV-9000,05/04/2026,70']
     const monthFirst = mergeImport(null, file(...rows))
@@ -189,6 +219,14 @@ describe('adding and removing files around decisions', () => {
     expect(found(removed)).toEqual([])
     expect(removed.retiredRecords).toHaveLength(1)
     expect(found(mergeImport(removed, file(plain, 'Acme,INV-1,2025-01-20,500')))).toEqual(['exact_duplicate 500'])
+  })
+
+  it('removing a file keeps the payments another file also lists', () => {
+    const a = mergeImport(null, file(plain, 'Acme,INV-1,2025-01-10,500', 'Solo,S-1,2025-01-11,5'))
+    const b = mergeImport(a, file(plain, 'Acme,INV-1,2025-01-10,500', 'Beta,B-1,2025-02-01,9'))
+    const left = removeImport(b, b.imports[0].id)
+    expect(left.records.map((r) => r.vendor)).toEqual(['Acme', 'Beta'])
+    expect(new Set(left.records.map((r) => r.importBatchId))).toEqual(new Set([b.imports[1].id]))
   })
 
   it('removing a file keeps a decision made on its payments, marked to be checked again', () => {

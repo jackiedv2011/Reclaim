@@ -99,15 +99,19 @@ function decodeText(bytes: Uint8Array): string {
   try {
     return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
   } catch {
-    return new TextDecoder('windows-1252').decode(bytes)
+    // A stray bad byte in a UTF-8 file should cost one character, not turn every accent in it to nonsense.
+    const text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes)
+    const bad = text.split('\ufffd').length - 1
+    const accented = (text.match(/[\u0080-\u{10ffff}]/gu) ?? []).length - bad
+    return accented > bad ? text : new TextDecoder('windows-1252').decode(bytes)
   }
 }
 
 /** The workbook's sheets as tables, the likeliest to hold payments first. */
 async function workbookTables(bytes: Uint8Array): Promise<CsvTable[]> {
   const sheets = await readWorkbook(bytes)
-  const tables = sheets.map((sheet) => {
-    const others = sheets.filter((other) => other !== sheet).map((other) => other.name)
+  const tables = sheets.filter((sheet) => !sheet.hidden).map((sheet) => {
+    const others = sheets.filter((other) => other !== sheet).map((other) => (other.hidden ? `${other.name} (hidden)` : other.name))
     return tableOf(Papa.unparse(sheet.rows), sheet.rows, [], { name: sheet.name, others })
   })
   const rank = (table: CsvTable) => (readsWithoutAsking(table).ask ? 0 : 1e9) + (canMatchColumns(table) ? dataRows(table).length : -1)

@@ -1,8 +1,8 @@
 import type { APRecord, DetectionResult, ParseResult, Finding, ImportReading, ImportRowResult } from '@/types'
 import { detectFindings } from '@/lib/detection'
 import { EMPTY_CASE_STATE, normalizeCaseState, recordEvidenceReview, type CaseState } from '@/ledger/caseState'
-import { cellsKey, checksum, couldBeSamePayment, paymentKey, recordIdentity, sourceSignature, normalizeReference } from '@/lib/sourceIdentity'
-import { isoDay, normalizeVendor, storedDay } from '@/lib/format'
+import { cellsKey, checksum, couldBeSamePayment, knowsInvoice, paymentKey, paymentKeyWithoutInvoice, recordIdentity, sourceSignature, normalizeReference } from '@/lib/sourceIdentity'
+import { canonicalCurrency, isoDay, normalizeVendor, storedDay } from '@/lib/format'
 import { reviewMetadata } from '@/lib/findingMetadata'
 import { evaluateEligibility, type RecoveryEvidence } from '@/recovery/eligibility'
 import type { QuickBooksFacts } from '../../server/quickbooksFacts.ts'
@@ -64,6 +64,7 @@ function reviveRecord(raw: Record<string, unknown>): APRecord {
     ...raw,
     paymentDate: storedDay(raw.paymentDate as string) ?? new Date(Number.NaN),
     invoiceDate: storedDay(raw.invoiceDate as string | null),
+    ...(raw.currency === undefined ? {} : { currency: canonicalCurrency(raw.currency as string | null) }),
     source: raw.source ?? {
       schemaVersion: 2, rawAvailable: false, raw: null,
       parsed: { vendor: raw.vendor, invoiceReference: raw.invoiceNumber, amountPaid: raw.amountPaid, paymentDate: raw.paymentDate },
@@ -193,9 +194,12 @@ export interface MergeImportInput {
   quickbooks?: QuickBooksFacts
 }
 
-/** The payments already in the ledger, each available to be recognised once: a file that holds one more copy than the ledger brings that copy in. */
-function earlierPayments(records: APRecord[]) {
-  const taken = new Set<string>()
+/**
+ * Which earlier payment each incoming row is, if any. Each earlier payment is
+ * recognised once, surest matches first, so a file that holds one more copy
+ * than the ledger brings that copy in.
+ */
+function matchEarlier(records: APRecord[], incoming: APRecord[]): Map<APRecord, APRecord> {
   const index = (keyOf: (record: APRecord) => string | null) => {
     const map = new Map<string, APRecord[]>()
     for (const record of records) {
@@ -205,52 +209,78 @@ function earlierPayments(records: APRecord[]) {
       if (list) list.push(record)
       else map.set(key, [record])
     }
-    return map
+    return (record: APRecord) => {
+      const key = keyOf(record)
+      return key === null ? [] : map.get(key) ?? []
+    }
   }
-  const byIdentity = index((r) => r.identityKey ?? recordIdentity(r))
-  const byPayment = index(paymentKey)
-  const byCells = index(cellsKey)
-  const available = (list: APRecord[] | undefined, fits: (r: APRecord) => boolean = () => true) => (list ?? []).filter((r) => !taken.has(r.id) && fits(r))
-  return (incoming: APRecord): APRecord | undefined => {
-    const same = available(byIdentity.get(incoming.identityKey ?? recordIdentity(incoming)))
-    const cells = cellsKey(incoming)
-    const match =
-      same.find((r) => r.amountPaid === incoming.amountPaid) ??
-      same[0] ??
-      available(byPayment.get(paymentKey(incoming)), (r) => couldBeSamePayment(r, incoming))[0] ??
-      available(cells === null ? undefined : byCells.get(cells), (r) => couldBeSamePayment(r, incoming))[0]
-    if (match) taken.add(match.id)
-    return match
+  const identity = index((r) => r.identityKey ?? recordIdentity(r))
+  const transaction = index((r) => (r.externalTransactionId ? r.externalTransactionId.trim().toLowerCase() : null))
+  const payment = index(paymentKey)
+  const withoutInvoice = index(paymentKeyWithoutInvoice)
+  const cells = index(cellsKey)
+  const reference = (r: APRecord) => normalizeReference(r.invoiceNumber).value
+  const sameBooks = (a: APRecord, b: APRecord) => couldBeSamePayment({ ...a, currency: null }, { ...b, currency: null })
+  const passes: ((r: APRecord) => APRecord[])[] = [
+    (r) => identity(r).filter((e) => e.amountPaid === r.amountPaid && couldBeSamePayment(e, r)),
+    (r) => payment(r).filter((e) => couldBeSamePayment(e, r)),
+    // The same transaction, with its invoice since added, dropped or corrected.
+    (r) => transaction(r).filter((e) => sameBooks(e, r) && e.amountPaid === r.amountPaid && isoDay(e.paymentDate) === isoDay(r.paymentDate)),
+    // The same transaction and bill saying something different: a conflict, not another payment.
+    (r) => transaction(r).filter((e) => sameBooks(e, r) && (reference(e) === reference(r) || reference(e) === null || reference(r) === null)),
+    (r) => withoutInvoice(r).filter((e) => (!knowsInvoice(e) || !knowsInvoice(r)) && couldBeSamePayment(e, r)),
+    (r) => cells(r).filter((e) => couldBeSamePayment(e, r)),
+  ]
+  const taken = new Set<string>()
+  const matched = new Map<APRecord, APRecord>()
+  for (const candidates of passes) {
+    for (const record of incoming) {
+      if (matched.has(record)) continue
+      const earlier = candidates(record).find((e) => !taken.has(e.id))
+      if (!earlier) continue
+      taken.add(earlier.id)
+      matched.set(record, earlier)
+    }
   }
+  return matched
 }
 
 export function inspectImport(env: LedgerEnvironment | null, input: MergeImportInput) {
   const fileChecksum = input.parsed.fileChecksum ?? checksum(input.parsed.records.map(sourceSignature).join('\n'))
   const duplicateFile = Boolean(env?.imports.some(batch=>batch.fileChecksum === fileChecksum))
-  const earlier = earlierPayments(env?.records ?? [])
   const repeatedLines = new Set<string>()
   const accepted: APRecord[] = []
+  const overlaps: { incoming: APRecord; previous: APRecord }[] = []
   const rowResults: ImportRowResult[] = [...(input.parsed.rowResults ?? [])]
+  // Two identical rows in one file are two payments: finding them is what the ledger is for. Only a line that
+  // repeats its own transaction ID, cell for cell, is the same payment exported twice.
+  const isRepeat = (record: APRecord) => {
+    if (!record.externalTransactionId) return false
+    const line = `${record.externalTransactionId}|${sourceSignature(record)}`
+    if (repeatedLines.has(line)) return true
+    repeatedLines.add(line)
+    return false
+  }
+  const repeats = new Set(input.parsed.records.filter(isRepeat))
+  const earlier = matchEarlier(env?.records ?? [], input.parsed.records.filter((record) => !repeats.has(record)))
   for(const record of input.parsed.records) {
     const key = record.identityKey ?? recordIdentity(record)
     const raw = record.source?.raw ?? null
     const fingerprint = record.rowFingerprint ?? checksum(key)
     const row = { rowNumber: record.source?.rowNumber ?? record.rowIndex+2, raw, fingerprint }
-    // Two identical rows in one file are two payments: finding them is what the ledger is for. Only a line that
-    // repeats its own transaction ID, cell for cell, is the same payment exported twice.
-    const line = record.externalTransactionId ? `${key}|${sourceSignature(record)}` : null
-    if (line !== null && repeatedLines.has(line)) {
+    if (repeats.has(record)) {
       rowResults.push({ ...row, status: 'exact_duplicate', reason: 'The same transaction is listed twice in this file.' })
       continue
     }
-    if (line !== null) repeatedLines.add(line)
-    const previous = earlier(record)
+    const previous = earlier.get(record)
+    const otherDay = previous !== undefined && isoDay(previous.paymentDate) !== isoDay(record.paymentDate) && cellsKey(previous) === cellsKey(record)
     const missing = !record.externalTransactionId && !record.invoiceNumber
     const status = previous ? record.externalTransactionId && sourceSignature(previous)===sourceSignature(record) ? 'exact_duplicate' : 'possible_overlap' : missing ? 'missing_identification_fields' : 'newly_imported'
-    rowResults.push({ ...row, status, reason: previous ? status==='exact_duplicate' ? 'This external transaction was already imported.' : 'Possible overlap or conflicting source identity. Row retained in this receipt; obtain distinct transaction IDs before importing it as another payment.' : missing ? 'No external transaction ID or invoice reference; payment identity needs confirmation.' : 'New source record.', ...(previous ? {existingRecordId:previous.id} : {}) })
-    if(!previous) accepted.push({...record,identityKey:key,rowFingerprint:fingerprint,importStatus:status})
+    rowResults.push({ ...row, status, reason: previous ? status==='exact_duplicate' ? 'This external transaction was already imported.' : otherDay ? 'Already in this audit, read with its date the other way round. To use this reading, remove the earlier file first.' : 'Possible overlap or conflicting source identity. Row retained in this receipt; obtain distinct transaction IDs before importing it as another payment.' : missing ? 'No external transaction ID or invoice reference; payment identity needs confirmation.' : 'New source record.', ...(previous ? {existingRecordId:previous.id} : {}) })
+    if(previous) overlaps.push({ incoming: record, previous })
+    else accepted.push({...record,identityKey:key,rowFingerprint:fingerprint,importStatus:status})
   }
-  return { fileChecksum, duplicateFile, accepted, rowResults: rowResults.sort((a,b)=>a.rowNumber-b.rowNumber) }
+  return { fileChecksum, duplicateFile, accepted, overlaps, rowResults: rowResults.sort((a,b)=>a.rowNumber-b.rowNumber) }
 }
 
 /**
@@ -293,7 +323,25 @@ export function mergeImport(env: LedgerEnvironment | null, input: MergeImportInp
     ...(input.parsed.reading ? { reading: input.parsed.reading } : {}),
     ...(qbo ? { quickbooks: { schemaVersion: qbo.schemaVersion, companyName: qbo.companyName, pulledAt: qbo.pulledAt, vendors: qbo.vendors, searched: qbo.searched, ...(qbo.sync ? { sync: { ...qbo.sync, touched: [], removed: [] } } : {}) } } : {}),
   }
-  return rebuildLedger(base, [...base.records, ...newRecords], batch, seq)
+  // A payment first seen without a transaction ID takes the one this file gives it, so the next pull of the same source knows it.
+  const identified = new Map<string, APRecord>()
+  for (const { incoming, previous } of inspection.overlaps) {
+    if (!incoming.externalTransactionId || previous.externalTransactionId) continue
+    const fact = qbo?.payments[incoming.externalTransactionId]
+    const record: APRecord = {
+      ...previous,
+      externalTransactionId: incoming.externalTransactionId,
+      company: previous.company ?? incoming.company,
+      sourceAccount: previous.sourceAccount ?? incoming.sourceAccount,
+      stableSupplierId: previous.stableSupplierId ?? incoming.stableSupplierId,
+      ...(fact ? { quickbooks: fact } : {}),
+      ...(previous.source ? { source: { ...previous.source, transformations: { ...previous.source.transformations, transactionId: [`identified_by_${batchId}`] } } } : {}),
+    }
+    record.identityKey = recordIdentity(record)
+    record.rowFingerprint = checksum(record.identityKey)
+    identified.set(record.id, record)
+  }
+  return rebuildLedger(base, [...base.records.map((r) => identified.get(r.id) ?? r), ...newRecords], batch, seq)
 }
 
 /**
@@ -304,8 +352,16 @@ export function mergeImport(env: LedgerEnvironment | null, input: MergeImportInp
 export function removeImport(env: LedgerEnvironment, batchId: string): LedgerEnvironment {
   const batch = env.imports.find((b) => b.id === batchId)
   if (!batch) return env
-  const removed = env.records.filter((r) => r.importBatchId === batchId)
-  const next = rebuildLedger(env, env.records.filter((r) => r.importBatchId !== batchId), batch, env.nextRecordSeq, new Set(removed.map((r) => r.id)), removed)
+  // A payment another file also lists stays, as that file's: it was only left out of it because this one came first.
+  const keptBy = new Map<string, string>()
+  for (const other of env.imports) {
+    if (other.id === batchId) continue
+    for (const row of other.rowResults ?? []) if (row.existingRecordId) keptBy.set(row.existingRecordId, other.id)
+  }
+  const removed = env.records.filter((r) => r.importBatchId === batchId && !keptBy.has(r.id))
+  const gone = new Set(removed.map((r) => r.id))
+  const records = env.records.filter((r) => !gone.has(r.id)).map((r) => (r.importBatchId === batchId ? { ...r, importBatchId: keptBy.get(r.id)! } : r))
+  const next = rebuildLedger(env, records, batch, env.nextRecordSeq, gone, removed)
   return { ...next, imports: env.imports.filter((b) => b.id !== batchId), newFindingIds: [] }
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { AlertCircle, ArrowRight, X } from 'lucide-react'
 import { parseCsv, type ParseOptions } from '@/lib/csv'
-import { FIELD_LABELS, NO_HEADINGS, OPTIONAL_FIELDS, REQUIRED_FIELDS, amountStyleOf, columnCount, columnName, dataRows, dateOrderEvidence, headingsOf, isBlankRow, negativePayments, suggestColumns, type ColumnMap, type CsvField, type CsvTable } from '@/lib/csvMapping'
+import { FIELD_LABELS, NO_HEADINGS, OPTIONAL_FIELDS, REQUIRED_FIELDS, amountStyleOf, columnName, dataRows, dateOrderEvidence, headingsOf, isBlankRow, negativePayments, offeredColumns, suggestColumns, type ColumnMap, type CsvField, type CsvTable } from '@/lib/csvMapping'
 import { parseDate, parseMoney, type DateOrder } from '@/lib/format'
 import type { ParseResult } from '@/types'
 
@@ -52,16 +52,20 @@ export function ColumnMatch({ table, filename, initial, notice, sheets, onSheet,
   )
   const [sign, setSign] = useState<'flip' | 'keep' | null>(initial?.flipSign === undefined ? null : initial.flipSign ? 'flip' : 'keep')
   const [grouped, setGrouped] = useState(initial?.vendorGrouped ?? suggestion.vendorGrouped)
+  const [chosenStyle, setChosenStyle] = useState<'point' | 'comma' | null>(() =>
+    initial?.amountStyle && initial.amountStyle !== 'point-strict' && amountStyleOf(table, initial.columns, initial.headerIndex).style === null ? initial.amountStyle : null
+  )
   const [problem, setProblem] = useState<string | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   useEffect(() => headingRef.current?.focus(), [])
 
   const headings = useMemo(() => headingsOf(table, headerIndex), [table, headerIndex])
-  const columnIndexes = useMemo(() => Array.from({ length: columnCount(table, headerIndex) }, (_, index) => index), [table, headerIndex])
+  const columnIndexes = useMemo(() => offeredColumns(table, headerIndex), [table, headerIndex])
   const rows = useMemo(() => dataRows(table, headerIndex), [table, headerIndex])
   const evidence = useMemo(() => dateOrderEvidence(table, columns, headerIndex, grouped), [table, columns, headerIndex, grouped])
   const dateOrder = evidence.order ?? chosenOrder
-  const amountStyle = useMemo(() => amountStyleOf(table, columns, headerIndex), [table, columns, headerIndex])
+  const styleEvidence = useMemo(() => amountStyleOf(table, columns, headerIndex), [table, columns, headerIndex])
+  const amountStyle = styleEvidence.style ?? chosenStyle ?? 'point'
   const negative = useMemo(() => negativePayments(table, columns, { dateOrder: dateOrder ?? 'month-first', amountStyle, headerIndex, vendorGrouped: grouped }), [table, columns, dateOrder, amountStyle, headerIndex, grouped])
   const invoicesNegative = useMemo(() => {
     const index = columns.invoice_amount
@@ -91,6 +95,7 @@ export function ColumnMatch({ table, filename, initial, notice, sheets, onSheet,
 
   const missing: string[] = REQUIRED_FIELDS.filter((field) => columns[field] === undefined).map((field) => FIELD_LABELS[field].toLowerCase())
   if (dateOrder === null) missing.push('which way round the dates are')
+  if (styleEvidence.style === null && chosenStyle === null) missing.push('how amounts are written')
   if (negative && sign === null) missing.push('whether the negative amounts are payments')
 
   function chooseHeader(index: number) {
@@ -99,6 +104,7 @@ export function ColumnMatch({ table, filename, initial, notice, sheets, onSheet,
     setColumns(next.columns)
     setGrouped(next.vendorGrouped)
     setChosenOrder(null)
+    setChosenStyle(null)
     setSign(null)
     setProblem(null)
   }
@@ -113,7 +119,10 @@ export function ColumnMatch({ table, filename, initial, notice, sheets, onSheet,
     }
     // An answer about one column's dates or signs says nothing about another's.
     if (next.payment_date !== columns.payment_date || next.invoice_date !== columns.invoice_date) setChosenOrder(null)
-    if (next.amount_paid !== columns.amount_paid) setSign(null)
+    if (next.amount_paid !== columns.amount_paid) {
+      setSign(null)
+      setChosenStyle(null)
+    }
     if (next.vendor !== columns.vendor) setGrouped(false)
     setColumns(next)
     setProblem(null)
@@ -169,7 +178,7 @@ export function ColumnMatch({ table, filename, initial, notice, sheets, onSheet,
   }
 
   const headingsKnown = REQUIRED_FIELDS.every((field) => suggestion.recognized.includes(field)) && !(['payment_date', 'amount_paid', 'invoice_date', 'invoice_amount'] as const).some((field) => suggestion.ambiguous[field])
-  const asks = evidence.question !== null || negative !== null
+  const asks = evidence.question !== null || styleEvidence.style === null || negative !== null || vendorMissing > 0
   const optionalMatched = OPTIONAL_FIELDS.filter((field) => columns[field] !== undefined).length
   // Decided once, from how the file arrived, so the section never closes under the person's hands.
   const [optionalOpen] = useState(OPTIONAL_FIELDS.some((field) => suggestion.ambiguous[field] || suggestion.suggested.includes(field)))
@@ -286,6 +295,24 @@ export function ColumnMatch({ table, filename, initial, notice, sheets, onSheet,
                 <span>
                   {order === 'month-first' ? 'Month first' : 'Day first'}
                   {orderExample ? <small>{date ? `${orderExample} is ${longDate(date, order)}` : `${orderExample} can’t be read this way`}</small> : null}
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ) : null}
+
+      {styleEvidence.style === null && styleEvidence.example !== null ? (
+        <fieldset className="wk-match-question">
+          <legend>How are the amounts written?</legend>
+          <p className="wk-match-note">Amounts like {styleEvidence.example} could be thousands or decimals, and nothing else in the file settles it.</p>
+          <div className="wk-match-options">
+            {(['comma', 'point'] as const).map((style) => (
+              <label className="wk-radio" key={style}>
+                <input type="radio" name={`${id}-style`} checked={chosenStyle === style} onChange={() => { setChosenStyle(style); setProblem(null) }} />
+                <span>
+                  {style === 'comma' ? 'The point marks thousands' : 'The point marks decimals'}
+                  <small>{styleEvidence.example} is {new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 }).format(parseMoney(styleEvidence.example, style)?.amount ?? 0)}</small>
                 </span>
               </label>
             ))}

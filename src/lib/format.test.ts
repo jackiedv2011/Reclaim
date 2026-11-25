@@ -46,7 +46,7 @@ describe('parseDate', () => {
   })
 
   it('reads past a time of day, and YYYYMMDD', () => {
-    for (const raw of ['03/04/2026 12:00:00 AM', '3/4/2026 10:15', '4 Mar 2026 10:15 pm', '2026-03-04 00:00:00', '20260304', '03.04.2026']) expect(parseDate(raw), raw).toEqual(new Date(2026, 2, 4))
+    for (const raw of ['03/04/2026 12:00:00 AM', '3/4/2026 10:15', '4 Mar 2026 10:15 pm', '2026-03-04 00:00:00', '20260304', '03.04.2026', '2026.03.04', '2026-03-04 10:30 AM', '2026-03-04 9:30']) expect(parseDate(raw), raw).toEqual(new Date(2026, 2, 4))
     for (const raw of ['20261304', '12345678', '2026030', '03/04.2026']) expect(parseDate(raw), raw).toBeNull()
   })
 

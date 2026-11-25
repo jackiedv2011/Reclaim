@@ -1,5 +1,5 @@
 import type { APRecord, ImportReading, ParseResult, ImportRowResult } from '@/types'
-import { isoDay, numericDateParts, parseDate, parseMoney, normalizeVendor, type AmountStyle, type DateOrder } from '@/lib/format'
+import { canonicalCurrency, isoDay, numericDateParts, parseDate, parseMoney, normalizeVendor, type AmountStyle, type DateOrder } from '@/lib/format'
 import { columnCount, columnName, dateOrderEvidence, headingsOf, isBlankRow, readCsvTable, recognizedColumns, recognizedField, sameColumns, uniqueKeys, type ColumnMap, type CsvField, type CsvTable } from '@/lib/csvMapping'
 import { resolveVendors } from '@/lib/vendorResolution'
 import { checksum, normalizeReference, vendorTransformations, recordIdentity } from './sourceIdentity'
@@ -37,15 +37,34 @@ function rejectionReason(vendor: string | null, date: string | null, paymentDate
   return missing.join(', ')
 }
 
-/** What people type in a currency column for the codes everything else compares. */
-const CURRENCY_NAMES: Record<string, string> = { $: 'USD', us$: 'USD', 'us dollar': 'USD', 'us dollars': 'USD', 'u.s. dollar': 'USD', dollar: 'USD', dollars: 'USD', 'united states dollar': 'USD', '€': 'EUR', euro: 'EUR', euros: 'EUR', '£': 'GBP', 'pound sterling': 'GBP', 'british pound': 'GBP', c$: 'CAD', ca$: 'CAD', 'canadian dollar': 'CAD', a$: 'AUD', au$: 'AUD', 'australian dollar': 'AUD' }
-
-/** "1,234.56" without quotes is two cells, and the first alone would import as 1. */
-function splitAmount(cells: string[], index: number | undefined): string | null {
+/**
+ * "1,234.56" without quotation marks is two cells, and the first alone would
+ * import as 1. Certain when the row is longer than the headings; otherwise
+ * only when the next column is one that hardly ever holds a number.
+ */
+function splitAmount(cells: string[], columns: ColumnMap, headingCount: number, nextIsText: boolean): string | null {
+  const index = columns.amount_paid
   if (index === undefined) return null
   const [whole, rest] = [cells[index]?.trim() ?? '', cells[index + 1]?.trim() ?? '']
-  return /^[-($]*\d{1,3}$/.test(whole) && /^\d{3}(?:\.\d+)?\)?$/.test(rest) ? `the amount looks split in two by a comma without quotation marks: ${whole},${rest}` : null
+  if (!/^\D{0,6}\d{1,3}$/.test(whole) || !/^\d{3}(?:\.\d+)?\D{0,4}$/.test(rest)) return null
+  let filled = cells.length
+  while (filled > 0 && cells[filled - 1].trim() === '') filled -= 1
+  const longer = headingCount > 0 && filled > headingCount
+  if (!longer && !(nextIsText && /^\d{3}\.\d{2}\D{0,4}$/.test(rest))) return null
+  return `the amount looks split in two by a comma without quotation marks: ${whole},${rest}`
 }
+
+/** Whether the column after the amount is free text that hardly ever holds a number on its own. */
+function textAfterAmount(rows: string[][], columns: ColumnMap): boolean {
+  const index = columns.amount_paid
+  if (index === undefined || Object.values(columns).includes(index + 1)) return false
+  const cells = rows.map((row) => (row[index + 1] ?? '').trim()).filter((cell) => cell !== '')
+  return cells.filter((cell) => parseMoney(cell) !== null).length <= Math.max(1, cells.length * 0.1)
+}
+
+/** Lines in a grouped report that name no vendor: totals end a group, page and note lines say nothing. */
+const TOTAL_LINE = /^(?:(?:grand|sub)[\s-]*)?total\b|\btotals?:?$/i
+const NOTE_LINE = /^(?:[*†#(]|page\b|printed\b|report\b|notes?\b|continued\b|run\s+date\b|as\s+of\b|generated\b)/i
 
 const negate = (amount: number) => (amount === 0 ? 0 : -amount)
 
@@ -73,6 +92,7 @@ export function parseCsv(input: string | CsvTable, options: ParseOptions = {}): 
   const rowResults: ImportRowResult[] = []
   let skippedCount = 0
   let group: { vendor: string; rowNumber: number } | null = null
+  const nextIsText = textAfterAmount(table.rows.slice(headerIndex + 1), columns)
 
   for (let position = headerIndex + 1; position < table.rows.length; position += 1) {
     const cells = table.rows[position]
@@ -94,19 +114,20 @@ export function parseCsv(input: string | CsvTable, options: ParseOptions = {}): 
     let vendor = value('vendor')
     let carriedFrom: number | null = null
     if (options.vendorGrouped) {
-      // A line naming a vendor and paying nothing starts a group; a total line names one too, but has an amount and no date.
-      if (vendor && !amountPaidRaw && !paymentDateRaw) {
+      const alone = vendor !== null && cells.filter((text) => text.trim() !== '').length === 1
+      if (vendor && TOTAL_LINE.test(vendor)) group = null
+      else if (vendor && alone && NOTE_LINE.test(vendor)) continue
+      else if (vendor) {
+        // Any row naming a vendor starts its group, even one that can't be imported, so its neighbours never fall to the vendor before.
         group = { vendor, rowNumber }
-        continue
-      }
-      if (vendor && paymentDate && money) group = { vendor, rowNumber }
-      else if (!vendor && group && paymentDate) {
+        if (alone) continue
+      } else if (group && paymentDateRaw && amountPaidRaw) {
         vendor = group.vendor
         carriedFrom = group.rowNumber
       }
     }
 
-    const split = headings.length > 0 && cells.length > headings.length ? splitAmount(cells, columns.amount_paid) : null
+    const split = splitAmount(cells, columns, headings.length, nextIsText)
     if (!vendor || !paymentDateRaw || !paymentDate || money === null || amountInFile === null || split) {
       skippedCount += 1
       rowResults.push({ rowNumber, status: 'rejected', reason: split ?? rejectionReason(vendor, paymentDateRaw, paymentDate, amountPaidRaw, amountInFile), raw })
@@ -119,7 +140,7 @@ export function parseCsv(input: string | CsvTable, options: ParseOptions = {}): 
     const invoiceDateRaw = value('invoice_date')
     const reference = normalizeReference(cell('invoice_number') ?? null)
     const written = value('currency')
-    const currency = written ? CURRENCY_NAMES[written.toLowerCase()] ?? written.toUpperCase() : money.currency ?? invoiceMoney?.currency ?? null
+    const currency = canonicalCurrency(written) ?? money.currency ?? invoiceMoney?.currency ?? null
     records.push({
       source: {
         schemaVersion: 2, rawAvailable: true, raw, ...(sourceColumns ? { columns: sourceColumns } : {}),

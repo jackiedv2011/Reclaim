@@ -103,6 +103,17 @@ describe('headings the review broke', () => {
     expect(suggestColumns(table).columns).toEqual({ payment_date: 0, vendor: 1, amount_paid: 2 })
   })
 
+  it('a title line with a date and a number is not a payment', () => {
+    const table = readCsvTable(csv('Run date,2026-01-31,Page,1', 'Supplier,Day,Paid', 'Acme,2026-01-05,10.00', 'Beta,2026-01-06,20.00'))
+    expect(table.headerIndex).toBe(1)
+  })
+
+  it('asks before leaving out rows above the headings that could be payments', () => {
+    const table = readCsvTable(csv('Acme,5 January,100.00,x', 'Beta,6 January,200.00,x', 'vendor,payment_date,amount_paid,memo', 'Gamma,2026-01-07,300,x'))
+    expect(table.headerIndex).toBe(2)
+    expect(readsWithoutAsking(table).ask).toBe(true)
+  })
+
   it('reads a heading called __proto__ like any other', () => {
     const parsed = parseCsv(csv('Who,When,__proto__,Paid', 'Acme,2026-01-05,INV-1,10', 'Acme,2026-01-05,INV-2,10'), { columns: { vendor: 0, payment_date: 1, invoice_number: 2, amount_paid: 3 } })
     expect(parsed.records.map((r) => sourceCell(r.source, 'invoice_number'))).toEqual(['INV-1', 'INV-2'])
@@ -125,16 +136,35 @@ describe('the file itself', () => {
     const parsed = parseCsv(csv('vendor,payment_date,amount_paid', 'Acme,2026-01-05,1,234.56', 'Beta,2026-01-05,12.00'))
     expect(parsed.records.map((r) => r.vendor)).toEqual(['Beta'])
     expect(parsed.rowResults?.[0].reason).toMatch(/1,234\.56/)
+    for (const amount of ['€1,234.56', 'USD 1,234.56', '1,234.56-', '1,234.56 CR']) {
+      const rows = parseCsv(csv('vendor,payment_date,amount_paid,memo', `Acme,2026-01-05,${amount}`, 'Beta,2026-01-05,12.00,rent'))
+      expect(rows.records.map((r) => r.vendor), amount).toEqual(['Beta'])
+    }
+  })
+
+  it('keeps a row with a trailing comma, or with a number in the next column', () => {
+    expect(parseCsv(csv('vendor,payment_date,amount_paid,tax', 'Acme,2026-01-05,100,500,')).records).toHaveLength(1)
+    expect(parseCsv(csv('vendor,payment_date,amount_paid,invoice_amount', 'Acme,2026-01-05,100,500.00')).records[0]).toMatchObject({ amountPaid: 100, invoiceAmount: 500 })
+    expect(parseCsv(csv('vendor,payment_date,amount_paid,tax', 'A,2026-01-05,100,120.50', 'B,2026-01-05,100,130.50')).records).toHaveLength(2)
   })
 })
 
 describe('amounts', () => {
-  const style = (...amounts: string[]) => amountStyleOf(readCsvTable(csv('vendor;payment_date;amount_paid', ...amounts.map((amount) => `Acme;2026-01-05;${amount}`))), { vendor: 0, payment_date: 1, amount_paid: 2 })
+  const style = (...amounts: string[]) => amountStyleOf(readCsvTable(csv('vendor;payment_date;amount_paid', ...amounts.map((amount) => `Acme;2026-01-05;${amount}`))), { vendor: 0, payment_date: 1, amount_paid: 2 }).style
 
   it('reads a decimal comma only when the file proves it', () => {
     expect(style('1.234,56', '12,50', '1.500')).toBe('comma')
     expect(style('1,234.56', '12.50')).toBe('point')
     expect(style('100', '200')).toBe('point')
+    // US thousands and two typing mistakes are not a decimal-comma file.
+    expect(style('1,500', '2,000', '12,50', '9,75')).toBe('point-strict')
+    expect(style('1,500', '2,000')).toBe('point')
+  })
+
+  it('asks about 1.500 when nothing settles it', () => {
+    expect(style('1.500', '12.250', '950')).toBeNull()
+    expect(style('1.500', '12.50')).toBe('point')
+    expect(readsWithoutAsking(readCsvTable('vendor,payment_date,amount_paid\nAcme,2026-01-05,1.500')).ask).toBe(true)
   })
 
   it('refuses 1.500 rather than reading 1.5 when the file holds both kinds', () => {
@@ -151,7 +181,7 @@ describe('amounts', () => {
   })
 
   it('reads the ways exports write a negative', () => {
-    for (const raw of ['-5', '5-', '(5)', '\u22125', '$-5', '-$5', '-€5', '€-5', '($5)']) expect(parseMoney(raw)?.amount, raw).toBe(-5)
+    for (const raw of ['-5', '5-', '(5)', '\u22125', '$-5', '-$5', '-€5', '€-5', '($5)', '$(5)']) expect(parseMoney(raw)?.amount, raw).toBe(-5)
   })
 
   it('refuses what it cannot be sure of', () => {
@@ -179,6 +209,23 @@ describe('reports grouped by vendor', () => {
     expect(parsed.rowResults?.map((row) => row.rowNumber)).toEqual([8, 11, 12])
     expect(parsed.records[0].identityKey).toContain('Acme Ltd')
     expect(parsed.records[2].identityKey).toContain('Beta LLC')
+  })
+
+  it('a row that cannot be imported still starts its vendor’s group', () => {
+    const parsed = parseCsv(readCsvTable(csv('Vendor,Payment Date,Amount Paid,Invoice Number', 'Acme,2026-01-05,1,', ',2026-01-06,2,', 'Beta,5-Jan,70,', ',2026-01-08,4,', 'Zeta,,,INV-77', ',2026-01-09,5,', 'Total Zeta,,9,', ',2026-01-10,6,')), { vendorGrouped: true })
+    expect(parsed.records.map((r) => [r.vendor, r.amountPaid])).toEqual([['Acme', 1], ['Acme', 2], ['Beta', 4], ['Zeta', 5]])
+    expect(parsed.rowResults?.map((row) => row.rowNumber)).toEqual([4, 6, 8, 9])
+  })
+
+  it('page and note lines name nobody and end nothing', () => {
+    const parsed = parseCsv(readCsvTable(csv('Vendor,Payment Date,Amount Paid', 'Acme,,', ',2026-01-05,1', 'Page 2 of 5,,', '* voided checks excluded,,', ',2026-01-06,2')), { vendorGrouped: true })
+    expect(parsed.records.map((r) => r.vendor)).toEqual(['Acme', 'Acme'])
+  })
+
+  it('blank payees with no names above them are asked about but not assumed to be groups', () => {
+    const table = readCsvTable(csv('Vendor,Payment Date,Amount Paid', 'Acme,2026-01-05,1', ',2026-01-06,2', 'Beta,2026-01-07,3', ',2026-01-08,4'))
+    expect(suggestColumns(table)).toMatchObject({ vendorGrouped: false, vendorMissing: true })
+    expect(readsWithoutAsking(table).ask).toBe(true)
   })
 
   it('a vendor written on the first row of each group counts too, and is asked about even under a known heading', () => {
@@ -288,6 +335,7 @@ describe('date order', () => {
   it('one odd date among many is a mistake in its row, not a change to the file', () => {
     const tenths = Array.from({ length: 24 }, (_, i) => `${String((i % 12) + 1).padStart(2, '0')}/10/2026`)
     expect(order(...tenths, '15/10/2026')).toMatchObject({ order: null, question: 'ambiguous' })
+    expect(order(...tenths.slice(0, 9), '15/10/2026')).toMatchObject({ order: null, question: 'ambiguous' })
     expect(order(...Array.from({ length: 40 }, () => '02/25/2026'), '25/02/2026')).toMatchObject({ order: 'month-first', question: null })
   })
 

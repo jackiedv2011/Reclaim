@@ -1,5 +1,5 @@
 import type { APRecord, SourceProvenance } from '@/types'
-import { isoDay, normalizeVendor, toCents } from './format'
+import { canonicalCurrency, isoDay, normalizeVendor, toCents } from './format'
 
 /** SHA-256 over UTF-8. Synchronous because CSV parsing and ledger merges are synchronous. */
 export function checksum(value: string): string {
@@ -96,12 +96,20 @@ const agree = (a: string | null | undefined, b: string | null | undefined) => !c
 export function paymentKey(record: APRecord): string {
   return JSON.stringify([normalizeVendor(record.vendor), normalizeReference(record.invoiceNumber).value, isoDay(record.paymentDate), toCents(record.amountPaid)])
 }
+/** The payment key without the invoice, for a file whose invoice column was not there or not matched. */
+export function paymentKeyWithoutInvoice(record: APRecord): string {
+  return JSON.stringify([normalizeVendor(record.vendor), isoDay(record.paymentDate), toCents(record.amountPaid)])
+}
+/** A column the file does not have says nothing; an empty cell in one it does have says there is no invoice. */
+export const knowsInvoice = (record: APRecord): boolean => record.invoiceNumber !== null || sourceCell(record.source, 'invoice_number') !== undefined
 /** The same cells, whatever was made of them: catches a file whose dates were read the other way round last time. */
 export function cellsKey(record: APRecord): string | null {
   const date = sourceCell(record.source, 'payment_date')
-  return date === undefined ? null : JSON.stringify([normalizeVendor(record.vendor), normalizeReference(record.invoiceNumber).value, date.trim(), toCents(Math.abs(record.amountPaid))])
+  const amount = sourceCell(record.source, 'amount_paid')
+  // The amount as written: a payment and its refund are never the same cells.
+  return date === undefined || amount === undefined ? null : JSON.stringify([normalizeVendor(record.vendor), normalizeReference(record.invoiceNumber).value, date.trim(), amount.trim()])
 }
 /** Whether what both rows say about company, account and currency allows them to be the same payment. */
 export function couldBeSamePayment(a: APRecord, b: APRecord): boolean {
-  return agree(a.company, b.company) && agree(a.sourceAccount, b.sourceAccount) && agree(a.currency, b.currency) && agree(a.externalTransactionId, b.externalTransactionId)
+  return agree(a.company, b.company) && agree(a.sourceAccount, b.sourceAccount) && agree(canonicalCurrency(a.currency), canonicalCurrency(b.currency)) && agree(a.externalTransactionId, b.externalTransactionId)
 }
