@@ -4,6 +4,7 @@ import { formatCurrency, plural } from '@/lib/format'
 import { overviewSummary } from '@/ledger/views'
 import { ladder } from '../selectors'
 import { assessRecordReadiness } from '@/audit/dataReadiness'
+import { readingNotes } from '@/lib/csvMapping'
 import type { LedgerEnvironment } from '@/ledger/store'
 import { describeQuickBooksSync } from '@/ledger/quickbooksSync'
 import type { LedgerProjectSummary } from '@/ledger/projects'
@@ -211,6 +212,7 @@ export function Audits({
                       ? `QuickBooks · ${describeQuickBooksSync(batch.quickbooksSync)}`
                       : `${batch.mode === 'sample' ? 'Sample data' : 'Uploaded CSV'} · ${batch.recordCount} newly imported · ${batch.skippedCount} rejected · ${(batch.rowResults ?? []).filter((row) => row.status === 'exact_duplicate' || row.status === 'possible_overlap').length} overlapping`}
                   </div>
+                  {readingNotes(batch.reading).map((note) => <div className="wk-table-sub" key={note}>{note}</div>)}
                   {batch.rowResults?.some((row) => row.status !== 'newly_imported') ? (
                     <details className="wk-table-sub" style={{ marginTop: 6 }}>
                       <summary>Review skipped and uncertain rows</summary>

@@ -1,4 +1,4 @@
-import type { APRecord, DetectionResult, ParseResult, Finding, ImportRowResult } from '@/types'
+import type { APRecord, DetectionResult, ParseResult, Finding, ImportReading, ImportRowResult } from '@/types'
 import { detectFindings } from '@/lib/detection'
 import { EMPTY_CASE_STATE, normalizeCaseState, recordEvidenceReview, type CaseState } from '@/ledger/caseState'
 import { checksum, recordIdentity, sourceSignature, normalizeReference } from '@/lib/sourceIdentity'
@@ -20,6 +20,8 @@ export interface ImportBatch {
   skippedCount: number
   /** Recognized source columns, retained so coverage remains explainable after reload. */
   detectedColumns?: string[]
+  /** Column matches, date order, sign and skipped title lines, when the file needed any of them. */
+  reading?: ImportReading
   /** Findings first surfaced by this scan, retained independently of the new-badge lifecycle. */
   findingIds?: string[]
   /** A QuickBooks import's vendor-level searches (credits, refunds, voids); each row keeps its own payment facts. */
@@ -234,6 +236,7 @@ export function mergeImport(env: LedgerEnvironment | null, input: MergeImportInp
     recordCount: newRecords.length,
     skippedCount: input.parsed.skippedCount,
     detectedColumns: [...input.parsed.detectedColumns],
+    ...(input.parsed.reading ? { reading: input.parsed.reading } : {}),
     ...(qbo ? { quickbooks: { schemaVersion: qbo.schemaVersion, companyName: qbo.companyName, pulledAt: qbo.pulledAt, vendors: qbo.vendors, searched: qbo.searched, ...(qbo.sync ? { sync: { ...qbo.sync, touched: [], removed: [] } } : {}) } } : {}),
   }
   return rebuildLedger(base, [...base.records, ...newRecords], batch, seq)

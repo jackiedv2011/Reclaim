@@ -1,4 +1,4 @@
-import type { APRecord } from '@/types'
+import type { APRecord, SourceProvenance } from '@/types'
 import { normalizeVendor } from './format'
 
 /** SHA-256 over UTF-8. Synchronous because CSV parsing and ledger merges are synchronous. */
@@ -71,13 +71,18 @@ export function vendorTransformations(raw:string):string[] {
   if(normalizeVendor(raw)!==value) steps.push('remove_legal_suffix')
   return steps
 }
+/** The untouched cell a field came from, whichever heading the file put it under. */
+export function sourceCell(source: SourceProvenance | undefined, field: string): string | undefined {
+  if (!source?.raw) return undefined
+  const key = source.columns ? source.columns[field] : field
+  return key === undefined ? undefined : source.raw[key]
+}
 export function sourceSignature(record: APRecord): string {
   const raw=record.source?.raw
   return JSON.stringify(raw ? Object.keys(raw).sort().map(k=>[k,raw[k]]) : [record.vendor,record.invoiceNumber,record.paymentDate.toISOString(),record.invoiceAmount,record.amountPaid,record.currency??null,record.terms,record.bankAccountLast4,record.category])
 }
 export function recordIdentity(record:APRecord):string {
-  const raw=record.source?.raw
   return record.externalTransactionId
     ? JSON.stringify(['external',record.company??null,record.sourceAccount??null,record.externalTransactionId])
-    : JSON.stringify(['raw', record.company??null,record.sourceAccount??null,raw?.vendor??record.vendor,raw?.invoice_number??record.invoiceNumber,record.paymentDate.toISOString(),record.amountPaid,record.currency??null,record.transactionType??null])
+    : JSON.stringify(['raw', record.company??null,record.sourceAccount??null,sourceCell(record.source,'vendor')??record.vendor,sourceCell(record.source,'invoice_number')??record.invoiceNumber,record.paymentDate.toISOString(),record.amountPaid,record.currency??null,record.transactionType??null])
 }

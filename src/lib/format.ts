@@ -46,14 +46,57 @@ function buildLocalDate(y: number, m: number, d: number): Date | null {
   return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d ? date : null
 }
 
+export type DateOrder = 'month-first' | 'day-first'
+
+const MONTHS: Record<string, number> = {}
+;['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'].forEach((name, index) => {
+  MONTHS[name] = index + 1
+  MONTHS[name.slice(0, 3)] = index + 1
+})
+MONTHS.sept = 9
+
+/** Two-digit years are how Excel writes m/d/yy; 00–69 are 2000s, 70–99 are 1900s. */
+function fullYear(raw: string): number {
+  return raw.length === 2 ? (Number(raw) < 70 ? 2000 : 1900) + Number(raw) : Number(raw)
+}
+
+/** The parts of a date written only in numbers whose day and month could be either way round, as they stand in the cell. */
+export function numericDateParts(raw: string | null | undefined): { first: number; second: number; year: string } | null {
+  const match = raw?.trim().match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4}|\d{2})$/)
+  return match ? { first: Number(match[1]), second: Number(match[2]), year: match[3] } : null
+}
+
+const GAP = '(?:\\s*[-/,]\\s*|\\.?,?\\s+)'
+const DAY = '(\\d{1,2})(?:st|nd|rd|th)?'
+const YEAR = "'?(\\d{4}|\\d{2})"
+const WEEKDAY = /^(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)(?:day|nesday|rsday|sday|urday)?[.,]?\s+/
+const DAY_MONTH_YEAR = new RegExp(`^${DAY}${GAP}([a-z]+)${GAP}${YEAR}$`)
+const MONTH_DAY_YEAR = new RegExp(`^([a-z]+)${GAP}${DAY}${GAP}${YEAR}$`)
+const YEAR_MONTH_DAY = new RegExp(`^(\\d{4})${GAP}([a-z]+)${GAP}${DAY}$`)
+
+/** "4 Mar 2026", "04-Mar-26", "March 4, 2026", "Wed, 4th March 2026", "2026-Mar-04". The month is spelled out, so there is no order to ask about. */
+function parseMonthNameDate(value: string): Date | null {
+  const text = value.toLowerCase().replace(WEEKDAY, '')
+  const build = (year: string, month: string, day: string) => (Object.hasOwn(MONTHS, month) ? buildLocalDate(fullYear(year), MONTHS[month], Number(day)) : null)
+  const dayFirst = text.match(DAY_MONTH_YEAR)
+  if (dayFirst) return build(dayFirst[3], dayFirst[2], dayFirst[1])
+  const monthFirst = text.match(MONTH_DAY_YEAR)
+  if (monthFirst) return build(monthFirst[3], monthFirst[1], monthFirst[2])
+  const yearFirst = text.match(YEAR_MONTH_DAY)
+  if (yearFirst) return build(yearFirst[1], yearFirst[2], yearFirst[3])
+  return null
+}
+
 /**
  * Parse a date cell as a local date (avoids UTC off-by-one). Accepts the
  * formats accounting exports actually use: ISO `YYYY-MM-DD` (with or without a
- * time suffix), `YYYY/MM/DD`, and US `MM/DD/YYYY` / `M/D/YYYY` / `M/D/YY`. A
- * slash date is always read month-first; anything else is null so the row is
- * reported as skipped rather than guessed at.
+ * time suffix), `YYYY/MM/DD`, a month written as a word, and an all-number
+ * `04/03/2026`, which is read in `order`. The caller decides the order for the
+ * whole file (see dateOrderEvidence in csvMapping.ts); a date that does not
+ * exist in that order is null, so the row is reported as skipped rather than
+ * quietly read the other way round.
  */
-export function parseDate(raw: string | null | undefined): Date | null {
+export function parseDate(raw: string | null | undefined, order: DateOrder = 'month-first'): Date | null {
   if (raw === null || raw === undefined) return null
   const trimmed = raw.trim()
   if (trimmed === '' || trimmed.toLowerCase() === 'na' || trimmed.toLowerCase() === 'n/a') return null
@@ -61,14 +104,13 @@ export function parseDate(raw: string | null | undefined): Date | null {
   const iso = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/)
   if (iso) return buildLocalDate(Number(iso[1]), Number(iso[2]), Number(iso[3]))
 
-  const us = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4}|\d{2})$/)
-  if (us) {
-    // Two-digit years are how Excel writes m/d/yy; 00–69 are 2000s, 70–99 are 1900s.
-    const year = us[3].length === 2 ? (Number(us[3]) < 70 ? 2000 : 1900) + Number(us[3]) : Number(us[3])
-    return buildLocalDate(year, Number(us[1]), Number(us[2]))
+  const numeric = numericDateParts(trimmed)
+  if (numeric) {
+    const [month, day] = order === 'month-first' ? [numeric.first, numeric.second] : [numeric.second, numeric.first]
+    return buildLocalDate(fullYear(numeric.year), month, day)
   }
 
-  return null
+  return parseMonthNameDate(trimmed)
 }
 
 export function daysBetween(a: Date, b: Date): number {

@@ -1,8 +1,9 @@
-import { useRef, useState } from 'react'
-import { parseCurrency, parseDate } from '@/lib/format'
+import { useEffect, useRef, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
-import { AlertCircle, AlertTriangle, CheckCircle2, Download, FileText, HelpCircle, ShieldCheck, Sparkles, Upload, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, CheckCircle2, Columns3, Download, FileText, HelpCircle, ShieldCheck, Sparkles, Upload, X } from 'lucide-react'
 import { parseCsv } from '@/lib/csv'
+import { canMatchColumns, readCsvTable, readingNotes, readsWithoutAsking, recognizedColumns, type CsvTable } from '@/lib/csvMapping'
+import { ColumnMatch, type ColumnChoices } from './ColumnMatch'
 import type { ParseResult } from '@/types'
 import { assessDataReadiness, assessFatalFile } from '@/audit/dataReadiness'
 import { QuickBooksImport } from './QuickBooksSource'
@@ -16,18 +17,6 @@ export interface QuickBooksImportContext {
 }
 import '@/workspace/workspace.css'
 import '@/workspace/reclaim.css'
-
-/** Why a row was left out, in the words of the spreadsheet it came from. */
-function skipReason(raw: Record<string, string> | null): string {
-  const cell = (key: string) => (raw?.[key] ?? '').trim()
-  const missing: string[] = []
-  if (!cell('vendor')) missing.push('no vendor name')
-  if (!cell('payment_date')) missing.push('no payment date')
-  else if (!parseDate(cell('payment_date'))) missing.push(`“${cell('payment_date')}” isn’t a date`)
-  if (!cell('amount_paid')) missing.push('no amount paid')
-  else if (parseCurrency(cell('amount_paid')) === null) missing.push(`“${cell('amount_paid')}” isn’t an amount`)
-  return missing.length ? missing.join(', ') : 'missing a vendor, payment date or amount paid'
-}
 
 const COLUMN_WORDS: Record<string, string> = {
   vendor: 'a vendor (or payee) name',
@@ -63,8 +52,8 @@ interface ImportPanelProps {
 const REQUIRED_COLUMNS: { name: string; description: string }[] = [
   { name: 'vendor', description: 'Vendor / supplier name' },
   { name: 'invoice_number', description: 'Invoice ID as printed' },
-  { name: 'invoice_date', description: 'Date on the invoice (YYYY-MM-DD or MM/DD/YYYY)' },
-  { name: 'payment_date', description: 'Date the business paid (YYYY-MM-DD or MM/DD/YYYY, required)' },
+  { name: 'invoice_date', description: 'Date on the invoice' },
+  { name: 'payment_date', description: 'Date the business paid (required)' },
   { name: 'invoice_amount', description: 'Amount the invoice was for' },
   { name: 'amount_paid', description: 'Amount actually paid (required)' },
   { name: 'terms', description: 'e.g. 2/10 net 30, net 30, net 15, or blank' },
@@ -78,8 +67,18 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 interface PendingUpload {
   file: File
   parsed: ParseResult
+  /** The file and the choices made about it, so the person can go back to them. Not for QuickBooks pulls. */
+  table?: CsvTable
+  choices?: ColumnChoices
   quickbooks?: QuickBooksFacts
   quickbooksPreview?: ReturnType<QuickBooksImportContext['preview']>
+}
+
+interface MatchingUpload {
+  file: File
+  table: CsvTable
+  choices: ColumnChoices | null
+  notice: string | null
 }
 
 function formatFileSize(bytes: number): string {
@@ -103,7 +102,13 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
   const [formatOpen, setFormatOpen] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [pending, setPending] = useState<PendingUpload | null>(null)
+  const [matching, setMatching] = useState<MatchingUpload | null>(null)
   const [parseError, setParseError] = useState<string | null>(null)
+  const confirmRef = useRef<HTMLHeadingElement>(null)
+  // The column step can be scrolled well down; the confirm screen starts at its top.
+  useEffect(() => {
+    if (pending) confirmRef.current?.focus()
+  }, [pending])
 
   async function handleFile(file: File, quickbooks?: QuickBooksFacts) {
     setParseError(null)
@@ -122,7 +127,15 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
         setParseError('That file isn’t a CSV. Export the ledger as CSV (comma-separated values) and upload that.')
         return
       }
-      const parsed = parseCsv(text)
+      const table = readCsvTable(text)
+      // QuickBooks pulls are written by Reclaim itself; there is never anything to ask about them.
+      const asIs = quickbooks ? { ask: false as const, dateOrder: undefined } : readsWithoutAsking(table)
+      if (asIs.ask && canMatchColumns(table)) {
+        setMatching({ file, table, choices: null, notice: null })
+        return
+      }
+      const dateOrder = asIs.ask ? undefined : asIs.dateOrder
+      const parsed = parseCsv(table, dateOrder ? { dateOrder } : {})
       // A QuickBooks change pull can carry no payment rows (nothing changed, or only voids); that is still an answer.
       if (parsed.records.length === 0 && !(quickbooks && parsed.skippedCount === 0)) {
         const guidance = assessFatalFile(parsed)
@@ -133,16 +146,17 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
           setParseError(
             guidance.detectedColumns.length > 0
               ? `Reclaim found ${list(words(guidance.detectedColumns))}, but not ${list(words(guidance.missingRequiredColumns))}. Add ${guidance.missingRequiredColumns.length === 1 ? 'that column' : 'those columns'} to the file and upload it again.`
-              : `Reclaim couldn’t match this file’s column headings. Every payment row needs at least ${list(words(guidance.missingRequiredColumns))}. Rename your headings to match, or start from the sample CSV.`
+              : `Reclaim couldn’t match this file’s column headings. Every payment row needs at least ${list(words(guidance.missingRequiredColumns))}. Check that this is the payments export, or start from the sample CSV.`
           )
         } else {
-          setParseError(
-            "We recognized the required columns, but none of the rows had valid values in all of them. Check the required format below."
-          )
+          const first = parsed.rowResults?.find((row) => row.status === 'rejected')
+          const why = `Reclaim recognised the headings, but no row had a vendor, a payment date and an amount paid under them.${first ? ` Row ${first.rowNumber}: ${first.reason}.` : ''}`
+          if (canMatchColumns(table)) setMatching({ file, table, choices: null, notice: `${why} Check that each field points at the right column.` })
+          else setParseError(`${why} Check the required format below.`)
         }
         return
       }
-      setPending({ file, parsed, ...(quickbooks ? { quickbooks, ...(quickbooksContext ? { quickbooksPreview: quickbooksContext.preview(parsed, quickbooks) } : {}) } : {}) })
+      setPending({ file, parsed, ...(quickbooks ? {} : { table, choices: { headerIndex: table.headerIndex, columns: recognizedColumns(table.rows[table.headerIndex] ?? []), ...(dateOrder ? { dateOrder } : {}) } }), ...(quickbooks ? { quickbooks, ...(quickbooksContext ? { quickbooksPreview: quickbooksContext.preview(parsed, quickbooks) } : {}) } : {}) })
     } catch {
       setParseError('Could not read that file. Please upload a valid CSV.')
     }
@@ -161,14 +175,32 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
     if (file) handleFile(file)
   }
 
+  if (matching) {
+    return (
+      <ColumnMatch
+        table={matching.table}
+        filename={matching.file.name}
+        initial={matching.choices}
+        notice={matching.notice}
+        onCancel={() => setMatching(null)}
+        onDone={(parsed, choices) => {
+          setMatching(null)
+          setPending({ file: matching.file, parsed, table: matching.table, choices })
+        }}
+      />
+    )
+  }
+
   if (pending) {
+    const { table, choices } = pending
+    const notes = readingNotes(pending.parsed.reading)
     const readiness = assessDataReadiness(pending.parsed)
     const recordCount = pending.parsed.records.length
     const vendorCount = new Set(pending.parsed.records.map((r) => r.vendor)).size
     const skipped = pending.parsed.skippedCount
     return (
       <div className="wk wk-import" data-state="confirmed">
-        <h2 className="wk-sr">Confirm before adding to the ledger</h2>
+        <h2 className="wk-sr" ref={confirmRef} tabIndex={-1}>Confirm before adding to the ledger</h2>
         <p className="wk-import-intro">Reclaim read this file. Review it, then add it to the ledger.</p>
 
         <div className="wk-import-file">
@@ -213,6 +245,22 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
           </div>
         ) : null}
 
+        {notes.length > 0 ? (
+          <div className="wk-import-reading">
+            <span className="wk-label">How Reclaim read this file</span>
+            <ul>{notes.map((note) => <li key={note}>{note}</li>)}</ul>
+          </div>
+        ) : null}
+
+        {table && choices ? (
+          <div className="wk-import-links">
+            <button type="button" className="wk-link" onClick={() => { setPending(null); setMatching({ file: pending.file, table, choices, notice: null }) }}>
+              <Columns3 aria-hidden="true" />
+              Check the column matches
+            </button>
+          </div>
+        ) : null}
+
         {skipped > 0 && (
           <div className="wk-callout" data-tone="warn">
             <AlertTriangle aria-hidden="true" />
@@ -223,7 +271,7 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
               {/* Which rows, and why, so the file can be fixed rather than guessed at. */}
               <ul className="wk-skipped-rows">
                 {(pending.parsed.rowResults ?? []).filter((row) => row.status === 'rejected').slice(0, 6).map((row) => (
-                  <li key={row.rowNumber}>Row {row.rowNumber}: {skipReason(row.raw)}</li>
+                  <li key={row.rowNumber}>Row {row.rowNumber}: {row.reason}</li>
                 ))}
                 {skipped > 6 ? <li>…and {skipped - 6} more</li> : null}
               </ul>
@@ -376,7 +424,7 @@ export function ImportPanel({ allowSample, animateEntry = false, autoFocusUpload
               <div>
                 <DialogPrimitive.Title className="wk-display wk-h2">Required CSV format</DialogPrimitive.Title>
                 <DialogPrimitive.Description className="wk-dim">
-                  Column headers are matched case-insensitively. Currency values may include $ and commas.
+                  Files with these headings import straight away. With any others, Reclaim shows you the columns and asks which is which. Dates can be 2026-03-04, 04/03/2026 or 4 Mar 2026. Amounts may include $ and commas.
                 </DialogPrimitive.Description>
               </div>
               <DialogPrimitive.Close className="wk-panel-close" aria-label="Close">

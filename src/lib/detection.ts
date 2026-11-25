@@ -1,6 +1,6 @@
 import type { APRecord, Finding, FindingClass, DetectionResult } from '@/types'
 import { normalizeVendor, normalizeAccountLast4, daysBetween, parseTerms, formatCurrency, formatDate, plural, toCents } from './format.ts'
-import { normalizeReference, referenceStrength } from './sourceIdentity.ts'
+import { normalizeReference, referenceStrength, sourceCell } from './sourceIdentity.ts'
 import { reviewMetadata } from './findingMetadata.ts'
 
 /** The review window for same-vendor, same-amount signals. It selects rows to review; it is not a recovery threshold. */
@@ -72,7 +72,7 @@ function median(values: number[]): number {
 type RefundPool = Map<string, number>
 
 function invoiceKey(r: APRecord): string {
-  const raw = r.source?.raw?.invoice_number
+  const raw = sourceCell(r.source, 'invoice_number')
   const reference = typeof raw === 'string' ? raw : r.invoiceNumber!
   return `${vendorIdentity(r)}|${reference}`
 }

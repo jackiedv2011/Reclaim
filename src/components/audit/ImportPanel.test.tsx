@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
-import { ImportPanel } from '@/components/audit/ImportPanel'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { ImportPanel, type ImportInput } from '@/components/audit/ImportPanel'
 
 function mount() {
   const onImport = vi.fn()
@@ -45,5 +46,173 @@ describe('upload guard rails', () => {
     expect((await screen.findByText('Valid records')).closest('div')).toHaveTextContent('1')
     expect(screen.getByText(/2 rows need attention and will be skipped/)).toBeInTheDocument()
     expect(onImport).not.toHaveBeenCalled()
+  })
+})
+
+describe('matching columns', () => {
+  const csv = (...lines: string[]) => new File([lines.join('\n')], 'export.csv', { type: 'text/csv' })
+  const select = (name: string) => screen.getByRole('combobox', { name }) as HTMLSelectElement
+  const continueButton = () => screen.getByRole('button', { name: 'Continue' })
+  const imported = (onImport: ReturnType<typeof vi.fn>) => (onImport.mock.calls[0][0] as ImportInput).parsed
+  const chosen = (name: string) => select(name).selectedOptions[0].textContent
+
+  it('a file with known headings goes straight to the confirm screen', async () => {
+    const { upload } = mount()
+    upload(csv('Vendor,Payment Date,Amount Paid', 'Acme,2026-03-04,100'))
+    expect(await screen.findByText('Valid records')).toBeInTheDocument()
+    expect(screen.queryByText('How Reclaim read this file')).not.toBeInTheDocument()
+  })
+
+  it('a raw export shows its own headings and rows, suggests matches, and imports once confirmed', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(csv('Harbour Cafe', 'Payments', '', 'Date,Contact,Reference,Amount', '04 Mar 2026,Acme Ltd,INV-1,"1,200.00"', '05 Mar 2026,Beta Ltd,INV-2,80'))
+
+    const preview = await screen.findByRole('region', { name: 'First rows of the file' })
+    expect(within(preview).getByRole('columnheader', { name: /Contact/ })).toHaveTextContent('Vendor')
+    expect(within(preview).getByRole('rowheader', { name: '5' })).toBeInTheDocument()
+    expect(within(preview).getByText('Acme Ltd')).toBeInTheDocument()
+    expect(screen.getByText(/Skipping 2 lines above the headings: “Harbour Cafe”, “Payments”/)).toBeInTheDocument()
+    expect(chosen('Vendor')).toBe('Contact (Acme Ltd)')
+    expect(chosen('Payment date')).toBe('Date (04 Mar 2026)')
+    expect(chosen('Amount paid')).toBe('Amount (1,200.00)')
+    expect(select('Vendor')).toHaveAccessibleDescription('Suggested. Check it is right.')
+    expect(onImport).not.toHaveBeenCalled()
+
+    await user.click(continueButton())
+    expect(screen.getByText(/vendor from “Contact”/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    const parsed = imported(onImport)
+    expect(parsed.records.map((r) => [r.vendor, r.invoiceNumber, r.amountPaid, r.source?.rowNumber])).toEqual([['Acme Ltd', 'INV-1', 1200, 5], ['Beta Ltd', 'INV-2', 80, 6]])
+    expect(parsed.records[0].source?.raw).toEqual({ Date: '04 Mar 2026', Contact: 'Acme Ltd', Reference: 'INV-1', Amount: '1,200.00' })
+  })
+
+  it('never picks between two possible date or amount columns', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(csv('Name,Date,Due Date,Debit,Credit', 'Acme,2026-03-04,2026-04-04,10.00,', 'Beta,2026-03-05,2026-04-05,20.00,1.00'))
+    expect(await screen.findByText('Still to choose: payment date, amount paid.')).toBeInTheDocument()
+    expect(select('Payment date')).toHaveValue('')
+    expect(select('Payment date')).toHaveAccessibleDescription('Could be “Date” or “Due Date”. Choose one.')
+    expect(select('Amount paid')).toHaveAccessibleDescription('Could be “Debit” or “Credit”. Choose one.')
+    expect(continueButton()).toBeDisabled()
+
+    await user.selectOptions(select('Payment date'), '1')
+    await user.selectOptions(select('Amount paid'), '3')
+    await user.click(continueButton())
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records.map((r) => r.amountPaid)).toEqual([10, 20])
+  })
+
+  it('one column feeds one field: choosing it again moves it', async () => {
+    const user = userEvent.setup()
+    const { upload } = mount()
+    upload(csv('Contact,Date,Amount', 'Acme,2026-03-04,10.00'))
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Payment date' }), '0')
+    expect(select('Vendor')).toHaveValue('')
+    expect(continueButton()).toBeDisabled()
+  })
+
+  it('asks which way round the dates are, showing what each answer means', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(csv('Vendor,Payment Date,Amount Paid', 'Acme,04/03/2026,100'))
+    expect(await screen.findByText('Which way round are the dates?')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /Month first.*04\/03\/2026 is April 3, 2026/ })).not.toBeChecked()
+    expect(continueButton()).toBeDisabled()
+    await user.click(screen.getByRole('radio', { name: /Day first.*04\/03\/2026 is 4 March 2026/ }))
+    await user.click(continueButton())
+    expect(screen.getByText('Dates read day first.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records[0].paymentDate).toEqual(new Date(2026, 2, 4))
+  })
+
+  it('reads a day-first file without asking when one of its dates proves it, and says so', async () => {
+    const { upload } = mount()
+    upload(csv('Vendor,Payment Date,Amount Paid', 'Acme,04/03/2026,100', 'Acme,25/03/2026,100'))
+    expect(await screen.findByText('Dates read day first.')).toBeInTheDocument()
+    expect(screen.getByText('Mar 4, 2026 – Mar 25, 2026')).toBeInTheDocument()
+  })
+
+  it('offers to flip the sign when every payment is negative, and says what that does', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(csv('Vendor,Payment Date,Amount Paid', 'Acme,2026-03-04,"-1,200.00"', 'Beta,2026-03-05,-80'))
+    expect(await screen.findByText(/All 2 amounts paid in this file are negative\. Reclaim reads a negative amount as a refund or credit/)).toBeInTheDocument()
+    expect(continueButton()).toBeDisabled()
+    await user.click(screen.getByRole('radio', { name: /Yes, flip the sign.*-1,200\.00 is read as 1,200\.00, a payment/ }))
+    await user.click(continueButton())
+    expect(screen.getByText('Negative amounts read as payments (sign flipped).')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records.map((r) => r.amountPaid)).toEqual([1200, 80])
+    expect(imported(onImport).records[0].source?.raw?.amount_paid).toBe('-1,200.00')
+  })
+
+  it('keeps the amounts negative when the person says they are credits', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(csv('Vendor,Payment Date,Amount Paid', 'Acme,2026-03-04,-5'))
+    await user.click(await screen.findByRole('radio', { name: /No, they are refunds or credits/ }))
+    await user.click(continueButton())
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records[0].amountPaid).toBe(-5)
+  })
+
+  it('goes back from the confirm screen to change a match, keeping the choices made', async () => {
+    const user = userEvent.setup()
+    const { upload, onImport } = mount()
+    upload(csv('Contact,Payer,Date,Amount', 'Acme,Us,04/03/2026,10.00'))
+    await user.click(await screen.findByRole('radio', { name: /Day first/ }))
+    await user.click(continueButton())
+    await user.click(screen.getByRole('button', { name: 'Check the column matches' }))
+    expect(screen.getByRole('radio', { name: /Day first/ })).toBeChecked()
+    await user.selectOptions(select('Vendor'), '1')
+    await user.click(continueButton())
+    await user.click(screen.getByRole('button', { name: 'Run the audit' }))
+    expect(imported(onImport).records[0]).toMatchObject({ vendor: 'Us', paymentDate: new Date(2026, 2, 4) })
+  })
+
+  it('forgets an answer about dates when a different date column is chosen', async () => {
+    const user = userEvent.setup()
+    const { upload } = mount()
+    upload(csv('Name,Date,Due Date,Amount', 'Acme,04/03/2026,05/04/2026,10.00'))
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Payment date' }), '1')
+    await user.click(screen.getByRole('radio', { name: /Day first/ }))
+    expect(continueButton()).toBeEnabled()
+    await user.selectOptions(select('Payment date'), '2')
+    expect(screen.getByRole('radio', { name: /Day first/ })).not.toBeChecked()
+    expect(continueButton()).toBeDisabled()
+  })
+
+  it('stays on the step, and says why, when the choices read no rows', async () => {
+    const user = userEvent.setup()
+    const { upload } = mount()
+    upload(csv('Contact,Date,Amount,Note', 'Acme,2026-03-04,10.00,x'))
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Payment date' }), '3')
+    await user.click(continueButton())
+    expect(screen.getByRole('alert')).toHaveTextContent(/Row 2: “x” isn’t a date/)
+  })
+
+  it('lets the person point at the heading row', async () => {
+    const user = userEvent.setup()
+    const { upload } = mount()
+    upload(csv('Vendor,Type,Account', 'Uno,Dos,Tres', 'Acme,2026-03-04,10.00'))
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Headings are on row' }), '2')
+    expect(screen.getByRole('columnheader', { name: /Dos/ })).toBeInTheDocument()
+  })
+
+  it('known headings over empty columns lead to the matches, not a dead end', async () => {
+    const { upload } = mount()
+    upload(csv('Vendor,Payment Date,Amount Paid,Date', 'Acme,,10,2026-03-04'))
+    expect(await screen.findByText(/no row had a vendor, a payment date and an amount paid under them\. Row 2: no payment date\./)).toBeInTheDocument()
+    expect(select('Payment date')).toBeInTheDocument()
+  })
+
+  it('a different file can be chosen instead', async () => {
+    const user = userEvent.setup()
+    const { upload } = mount()
+    upload(csv('Contact,Date,Amount', 'Acme,2026-03-04,10.00'))
+    await user.click(await screen.findByRole('button', { name: 'Choose a different file' }))
+    expect(screen.getByLabelText(/upload a csv ledger/i)).toBeInTheDocument()
   })
 })
