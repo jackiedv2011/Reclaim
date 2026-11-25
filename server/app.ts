@@ -21,6 +21,7 @@ import { authorizedDraftFacts } from './caseFacts.ts'
 import { createBilling } from './billing.ts'
 import { createStripeClient, type StripeApi } from './stripe.ts'
 import { createGmailClient, createGmailRoutes, type GmailClient } from './gmail.ts'
+import { createIntelligenceRoutes } from './intelligence.ts'
 import { OnboardingProfileSchema } from './onboarding.ts'
 
 const SESSION_COOKIE = 'reclaim_session'
@@ -107,6 +108,9 @@ export function createApp(deps: AppDependencies): App {
   const gmailSendLimiter = new RateLimiter(30, 60 * 60 * 1000)
   const gmailClient = deps.gmail !== undefined ? deps.gmail : config.gmailSend ? createGmailClient(config.gmailSend.clientId, config.gmailSend.clientSecret) : null
   const gmailRoutes = createGmailRoutes({ db, appOrigin: config.appOrigin, production: config.production, gmail: gmailClient && config.gmailSend ? { client: gmailClient, tokenKey: config.gmailSend.tokenKey } : null, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), getProject: (userId, projectId) => projects.get(userId, projectId), allowSend: (id) => gmailSendLimiter.check(`gmail:${id}`), now: deps.now })
+
+  const intelligenceReadLimiter = new RateLimiter(300, 60 * 60 * 1000)
+  const intelligenceRoutes = config.intelligenceApi ? createIntelligenceRoutes({ projects, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), allowRead: (id) => intelligenceReadLimiter.check(`intelligence:${id}`), now: deps.now }) : null
 
   const sessionCookie = (token: string, maxAge: number) => serializeCookie(SESSION_COOKIE, token, { maxAge, secure: config.production })
   const clearSessionCookie = () => serializeCookie(SESSION_COOKIE, '', { maxAge: 0, secure: config.production })
@@ -644,6 +648,8 @@ export function createApp(deps: AppDependencies): App {
 
     const gmailResponse = await gmailRoutes.route(req)
     if (gmailResponse) return gmailResponse
+    const intelligenceResponse = intelligenceRoutes ? await intelligenceRoutes.route(req) : null
+    if (intelligenceResponse) return intelligenceResponse
 
     if (path.startsWith('/api/')) throw new HttpError(404, 'Not found.')
 

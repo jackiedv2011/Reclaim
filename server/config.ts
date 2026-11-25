@@ -57,6 +57,11 @@ export interface ServerConfig {
    * the webhook refuses every event.
    */
   stripe: { secretKey: string; webhookSecret: string | null } | null
+  /**
+   * Read-only product-intelligence API (server/intelligence.ts). Off unless
+   * RECLAIM_INTELLIGENCE_API=1; pending founder decisions on release scope.
+   */
+  intelligenceApi: boolean
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -98,6 +103,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     dataKeys: dataKeysConfig(env),
     trustProxy: trustProxyConfig(env.TRUST_PROXY),
     gmailSend: gmailSendConfig(env, google),
+    intelligenceApi: env.RECLAIM_INTELLIGENCE_API === '1',
   }
 }
 
