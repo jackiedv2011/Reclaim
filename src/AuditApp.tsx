@@ -312,7 +312,7 @@ export function AuditApp() {
       const batch = env?.imports.find((b) => b.id === batchId)
       if (!env || !current || !batch) return
       const next = removeImport(env, batchId)
-      const saved = saveProject({ ...current, environment: next })
+      const saved = saveProject({ ...current, environment: next, sourceLabel: next.imports.at(-1)?.sourceLabel ?? current.sourceLabel })
       projectRef.current = saved
       environmentRef.current = next
       setProject(saved)

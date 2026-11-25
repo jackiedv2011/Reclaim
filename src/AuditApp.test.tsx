@@ -876,7 +876,7 @@ describe('correcting an upload', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove this file' }))
     expect(await screen.findByText('Removed “second.csv”: 1 of its payments are out of this audit.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remove second.csv from this audit' })).not.toBeInTheDocument()
-    expect(listProjects()[0].recordCount).toBe(2)
+    expect(listProjects()[0]).toMatchObject({ recordCount: 2, sourceLabel: 'first.csv' })
   })
 
   it('an audit left with no payments still opens and takes a new file', async () => {
