@@ -195,4 +195,23 @@ describe('intelligence API', () => {
     expect((await alice.client.post('/api/intelligence/assistant/ask', { question: 'Tell me about this vendor', subject: { vendorKey: 'vendor_doesnotexist' } })).status).toBe(404)
     expect((await alice.client.call('/api/intelligence/assistant/ask', { method: 'POST', body: 'question=hi', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })).status).toBe(415)
   })
+
+  it('serves deterministic insights that never claim an all-clear, and the assistant can explain one', async () => {
+    const alice = await signedIn(person('Lee', 'lee@example.test'))
+    const empty = await alice.client.get('/api/intelligence/insights')
+    expect(empty.status).toBe(200)
+    expect(JSON.stringify(empty.body).toLowerCase()).not.toMatch(/all clear|no issues/)
+    for (const audit of (await fixtures()).tenantAAudits()) store.upsert(alice.userId, { ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: 1, updatedAt: 2 })
+    const res = await alice.client.get('/api/intelligence/insights')
+    expect(res.status).toBe(200)
+    const items = res.body.result.items as Array<{ id: string; rule: string; tenantId: string }>
+    expect(items.length).toBeGreaterThan(0)
+    expect(items.every((i) => i.tenantId === alice.userId)).toBe(true)
+    const why = await alice.client.post('/api/intelligence/assistant/ask', { question: 'Why does this insight exist?', subject: { insightId: items[0].id } })
+    expect(why.status).toBe(200)
+    expect(why.body.intent).toBe('insight_explanation')
+    expect(JSON.stringify(why.body.citations)).toContain(items[0].id)
+    const bob = await signedIn(person('Max', 'max@example.test'))
+    expect((await bob.client.post('/api/intelligence/assistant/ask', { question: 'Why does this insight exist?', subject: { insightId: items[0].id } })).status).toBe(404)
+  })
 })

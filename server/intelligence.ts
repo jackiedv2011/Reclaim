@@ -22,6 +22,7 @@ import { vendorProfile, vendorProfiles } from '../src/intelligence/vendorProfile
 import { vendorBaselines } from '../src/intelligence/baselines.ts'
 import { InMemoryFeedbackStore } from '../src/intelligence/memory.ts'
 import { askAccount, AssistantRequestError } from '../src/intelligence/assistant.ts'
+import { generateInsightsSync, InMemoryInsightStateStore, insightLookup, type InsightDeps } from '../src/intelligence/insights.ts'
 import type { ReadModelEnvelope } from '../src/intelligence/contracts.ts'
 
 export const INTELLIGENCE_PREFIX = '/api/intelligence/'
@@ -87,6 +88,14 @@ function withoutPersistedMemory<T>(env: ReadModelEnvelope<T>): ReadModelEnvelope
   return { ...env, warnings: [...env.warnings, { code: 'business_memory_not_persisted', detail: 'Corrections and context notes are not stored on the server yet, so none influence this result.' }] }
 }
 
+/**
+ * Insight dismissals have no persistent store yet (S-7), so every request
+ * starts from an empty one; a dismissal route is not exposed until it does.
+ */
+function insightDeps(source: LegacyAuditSource, returns: ReturnMatchPort): InsightDeps {
+  return { financial: source.financial, cases: source.cases, returns, memory: new InMemoryFeedbackStore(), insightState: new InMemoryInsightStateStore() }
+}
+
 const ROUTES: Array<{ method: 'GET' | 'POST'; pattern: RegExp; handler: Handler }> = [
   {
     method: 'GET',
@@ -117,6 +126,12 @@ const ROUTES: Array<{ method: 'GET' | 'POST'; pattern: RegExp; handler: Handler 
       return withoutPersistedMemory(vendorProfile(ctx, source.financial, source.cases, new InMemoryFeedbackStore(), param, now))
     },
   },
+  {
+    method: 'GET',
+    pattern: /^insights$/,
+    handler: ({ ctx, source, returns, query, now }) =>
+      withoutPersistedMemory(generateInsightsSync(ctx, insightDeps(source, returns), now, { limit: limitParam(query), cursor: cursorParam(query), unreadableAuditIds: source.unreadableAuditIds })),
+  },
   { method: 'GET', pattern: /^baselines$/, handler: ({ ctx, source, now }) => vendorBaselines(ctx, source.financial, now) },
   {
     method: 'POST',
@@ -124,7 +139,8 @@ const ROUTES: Array<{ method: 'GET' | 'POST'; pattern: RegExp; handler: Handler 
     handler: async ({ ctx, source, returns, now, body }) => {
       const input = (await body()) as { question?: unknown; subject?: unknown } | null
       if (!input || typeof input !== 'object') throw new HttpError(400, 'Send a question.', 'validation')
-      return askAccount(ctx, { financial: source.financial, cases: source.cases, returns, memory: new InMemoryFeedbackStore() }, input.question, now, { subject: input.subject, ...unreadable(source), sourceUpdatedAt: source.newestUpdateAt })
+      const deps = insightDeps(source, returns)
+      return askAccount(ctx, { ...deps, insightLookup: insightLookup(deps, now, { unreadableAuditIds: source.unreadableAuditIds }) }, input.question, now, { subject: input.subject, ...unreadable(source), sourceUpdatedAt: source.newestUpdateAt })
     },
   },
   { method: 'GET', pattern: /^recovery\/vendors$/, handler: ({ ctx, source, returns, query, now }) => recoveryByVendor(ctx, source.cases, returns, now, page(query), unreadable(source)) },

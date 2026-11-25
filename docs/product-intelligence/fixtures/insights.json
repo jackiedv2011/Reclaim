@@ -1,0 +1,777 @@
+{
+  "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
+  "response": {
+    "model": "insights",
+    "contractVersion": "0.1.2",
+    "metricDefinitionVersion": "insights-v0.1",
+    "tenantId": "tenant_fixture_a",
+    "origin": "legacy_audit_snapshot",
+    "scope": {
+      "from": "2026-01-01",
+      "to": "2026-06-09",
+      "dateBasis": "payment_date",
+      "currencies": [
+        "USD"
+      ]
+    },
+    "freshness": {
+      "computedAt": 1782907200000,
+      "sourceUpdatedAt": 1782907200000,
+      "stale": false,
+      "staleReason": null
+    },
+    "coverage": [
+      {
+        "check": "insight:approvals_due",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "revalidation_not_in_snapshot",
+          "snapshot_not_continuous",
+          "upstream_contract_pending"
+        ]
+      },
+      {
+        "check": "insight:follow_ups_due",
+        "status": "limited",
+        "reasons": [
+          "cross_audit_overlap",
+          "customer_supplied_source",
+          "revision_unknown",
+          "send_state_not_in_snapshot",
+          "snapshot_not_continuous",
+          "upstream_contract_pending"
+        ]
+      },
+      {
+        "check": "insight:import_coverage_gap",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "insight:prevention_guidance",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "insight:recurring_payment_visible",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "insight:unresolved_recovery",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "no_independent_return_matching",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "insight:vendor_change",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "insufficient_history",
+          "snapshot_not_continuous",
+          "window_not_covered"
+        ]
+      },
+      {
+        "check": "insight:vendor_concentration",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "mixed_currency",
+          "settlement_unverified",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "insight:vendor_spend_above_baseline",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "insufficient_history",
+          "snapshot_not_continuous"
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "rule:insights-v0.1/approvals_due@1",
+        "label": "Supplier requests waiting for the customer to review and approve, from the attention queue."
+      },
+      {
+        "id": "rule:insights-v0.1/follow_ups_due@1",
+        "label": "Supplier follow-ups that reached their date, from the attention queue."
+      },
+      {
+        "id": "rule:insights-v0.1/import_coverage_gap@1",
+        "label": "Periods, rows or saved audits that the covered records do not include, or covered records that are out of date."
+      },
+      {
+        "id": "rule:insights-v0.1/prevention_guidance@1",
+        "label": "Static prevention suggestions keyed to recorded root causes and repeated dismissals."
+      },
+      {
+        "id": "rule:insights-v0.1/recurring_payment_visible@1",
+        "label": "A recurring payment pattern the detector does not flag, shown for visibility."
+      },
+      {
+        "id": "rule:insights-v0.1/unresolved_recovery@1",
+        "label": "Open supplier requests that are aging, disputed or partly returned, from case snapshots."
+      },
+      {
+        "id": "rule:insights-v0.1/vendor_change@1",
+        "label": "A vendor whose covered payments in the latest 90 days differ from the 90 days before."
+      },
+      {
+        "id": "rule:insights-v0.1/vendor_concentration@1",
+        "label": "One vendor holding a large share of covered payments in a currency."
+      },
+      {
+        "id": "rule:insights-v0.1/vendor_spend_above_baseline@1",
+        "label": "Recent payments above a vendor's established range in the covered records."
+      }
+    ],
+    "exclusions": [],
+    "warnings": [],
+    "result": {
+      "items": [
+        {
+          "id": "ins_unresolved_recovery_9be2d3b82b09",
+          "dedupKey": "unresolved_recovery|case:audit_fixture_q1/exact_duplicate-rec_5-rec_6|g1",
+          "tenantId": "tenant_fixture_a",
+          "rule": "unresolved_recovery",
+          "ruleVersion": "unresolved_recovery@1",
+          "insightsVersion": "insights-v0.1",
+          "severity": "high",
+          "severityReason": "high: the request has been open more than 60 days with money still open on it",
+          "title": "Request to Fixture Coffee Co still open after 87 days",
+          "explanation": "In the saved case state, the duplicate payment request to Fixture Coffee Co was sent 87 days ago and USD 910.25 is still open on it. You recorded USD 500.00 coming back; it has not been matched to a bank or accounting record. The supplier said it would return USD 910.25; that is a statement, not money received.",
+          "limits": "It is based on saved case state; it does not show replies or payments not recorded in Reclaim, and recorded returns are not matched to bank or accounting records.",
+          "subject": {
+            "type": "case",
+            "caseId": "audit_fixture_q1/exact_duplicate-rec_5-rec_6",
+            "vendorKey": "vendor_e0f43c8d84ae71849d5be4709a4c57dd12e474633b1852b7a65079778c1b346e"
+          },
+          "period": {
+            "from": "2026-04-06",
+            "to": "2026-07-01",
+            "dataAsOf": "2026-06-09",
+            "computedAt": 1782907200000
+          },
+          "figures": [
+            {
+              "label": "Still open on the request",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 91025
+              },
+              "source": {
+                "model": "recovery.overview",
+                "field": "approvedOutstanding",
+                "metricDefinitionVersion": "recovery-v0.1"
+              }
+            },
+            {
+              "label": "Supplier said it would return (a statement, not money received)",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 91025
+              },
+              "source": {
+                "model": "recovery.overview",
+                "field": "promised",
+                "metricDefinitionVersion": "recovery-v0.1"
+              }
+            },
+            {
+              "label": "Returns you recorded (not matched to a bank or accounting record)",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 50000
+              },
+              "source": {
+                "model": "recovery.overview",
+                "field": "customerRecordedReturns",
+                "metricDefinitionVersion": "recovery-v0.1"
+              }
+            }
+          ],
+          "measures": [
+            {
+              "label": "Days since the request was sent",
+              "value": 87,
+              "unit": "days",
+              "source": {
+                "model": "case_snapshot",
+                "field": "requestedAt",
+                "metricDefinitionVersion": "recovery-v0.1"
+              }
+            }
+          ],
+          "sourceRefs": [
+            {
+              "id": "case:audit_fixture_q1/exact_duplicate-rec_5-rec_6",
+              "label": "Recovery case"
+            },
+            {
+              "id": "record:audit_fixture_q1/rec_5",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q1/rec_6",
+              "label": "Source record"
+            }
+          ],
+          "sourceRefCount": 3,
+          "sourceRefsTruncated": false,
+          "coverage": [
+            {
+              "check": "recovery_cases",
+              "status": "limited",
+              "reasons": [
+                "customer_supplied_source",
+                "snapshot_not_continuous"
+              ]
+            },
+            {
+              "check": "promised",
+              "status": "supported",
+              "reasons": []
+            },
+            {
+              "check": "matched_returns",
+              "status": "not_run",
+              "reasons": [
+                "no_independent_return_matching"
+              ]
+            }
+          ],
+          "freshness": {
+            "computedAt": 1782907200000,
+            "sourceUpdatedAt": 1775088000000,
+            "stale": true,
+            "staleReason": "Newest source data is more than 35 days old."
+          },
+          "provenance": {
+            "insightsVersion": "insights-v0.1",
+            "contractVersion": "0.1.2",
+            "origin": "legacy_audit_snapshot",
+            "readModels": [
+              {
+                "model": "recovery.overview",
+                "metricDefinitionVersion": "recovery-v0.1"
+              }
+            ]
+          },
+          "nextAction": {
+            "kind": "open_case",
+            "target": {
+              "caseId": "audit_fixture_q1/exact_duplicate-rec_5-rec_6"
+            },
+            "label": "Open the Fixture Coffee Co case",
+            "sideEffects": "none"
+          },
+          "influencedBy": [],
+          "evidenceFingerprint": "151b7351413c4630",
+          "status": "active",
+          "expiresAt": null,
+          "dismissal": null,
+          "previousDismissal": null,
+          "advisorySummary": null,
+          "ai": {
+            "status": "not_requested",
+            "reason": null
+          }
+        },
+        {
+          "id": "ins_vendor_spend_above_baseline_239aca1270c4",
+          "dedupKey": "vendor_spend_above_baseline|vendor:vendor_e0f43c8d84ae71849d5be4709a4c57dd12e474633b1852b7a65079778c1b346e|USD:2026-05",
+          "tenantId": "tenant_fixture_a",
+          "rule": "vendor_spend_above_baseline",
+          "ruleVersion": "vendor_spend_above_baseline@1",
+          "insightsVersion": "insights-v0.1",
+          "severity": "medium",
+          "severityReason": "medium: the highest payment is 3.7 times the median, at or above the 2.0 times threshold",
+          "title": "Payments to Fixture Coffee Co in the covered records were above its usual range",
+          "explanation": "In the covered records, 1 payment to Fixture Coffee Co in the latest 60 days of covered data was above its usual range. The highest was USD 4,980.00 on 2026-05-12, about 3.7 times the median payment of USD 1,350.50 (usual range up to USD 1,529.75, from 7 payments over 6 months). This compares amounts only.",
+          "limits": "It compares amounts with this vendor's own history in the covered records; it does not show why the amount differed, what was bought, or whether the payment was right.",
+          "subject": {
+            "type": "vendor",
+            "vendorKey": "vendor_e0f43c8d84ae71849d5be4709a4c57dd12e474633b1852b7a65079778c1b346e",
+            "displayName": "Fixture Coffee Co"
+          },
+          "period": {
+            "from": "2026-04-11",
+            "to": "2026-06-09",
+            "dataAsOf": "2026-06-09",
+            "computedAt": 1782907200000
+          },
+          "figures": [
+            {
+              "label": "Payment on 2026-05-12",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 498000
+              },
+              "source": {
+                "model": "source_records",
+                "field": "amountMinor",
+                "metricDefinitionVersion": "legacy-audit-1"
+              }
+            },
+            {
+              "label": "Median payment",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 135050
+              },
+              "source": {
+                "model": "vendor_baselines",
+                "field": "medianPaymentMinor",
+                "metricDefinitionVersion": "baseline-v0.1"
+              }
+            },
+            {
+              "label": "Top of usual range",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 152975
+              },
+              "source": {
+                "model": "vendor_baselines",
+                "field": "upperBoundMinor",
+                "metricDefinitionVersion": "baseline-v0.1"
+              }
+            }
+          ],
+          "measures": [
+            {
+              "label": "Highest payment as a ratio of the median",
+              "value": 36875,
+              "unit": "bps",
+              "source": {
+                "model": "vendor_baselines",
+                "field": "compareToBaseline.ratioBps",
+                "metricDefinitionVersion": "baseline-v0.1"
+              }
+            },
+            {
+              "label": "Payments in the baseline",
+              "value": 7,
+              "unit": "count",
+              "source": {
+                "model": "vendor_baselines",
+                "field": "paymentCount",
+                "metricDefinitionVersion": "baseline-v0.1"
+              }
+            },
+            {
+              "label": "Covered months in the baseline",
+              "value": 6,
+              "unit": "count",
+              "source": {
+                "model": "vendor_baselines",
+                "field": "coveredMonths",
+                "metricDefinitionVersion": "baseline-v0.1"
+              }
+            }
+          ],
+          "sourceRefs": [
+            {
+              "id": "rule:baseline-v0.1",
+              "label": "Vendor baseline method"
+            },
+            {
+              "id": "record:audit_fixture_q2/rec_7",
+              "label": "Source record 2026-05-12"
+            }
+          ],
+          "sourceRefCount": 2,
+          "sourceRefsTruncated": false,
+          "coverage": [
+            {
+              "check": "vendor_baselines",
+              "status": "limited",
+              "reasons": [
+                "customer_supplied_source",
+                "insufficient_history",
+                "snapshot_not_continuous"
+              ]
+            },
+            {
+              "check": "seasonal_comparison",
+              "status": "not_run",
+              "reasons": [
+                "customer_supplied_source",
+                "insufficient_history",
+                "snapshot_not_continuous"
+              ]
+            }
+          ],
+          "freshness": {
+            "computedAt": 1782907200000,
+            "sourceUpdatedAt": 1782907200000,
+            "stale": false,
+            "staleReason": null
+          },
+          "provenance": {
+            "insightsVersion": "insights-v0.1",
+            "contractVersion": "0.1.2",
+            "origin": "legacy_audit_snapshot",
+            "readModels": [
+              {
+                "model": "vendor_baselines",
+                "metricDefinitionVersion": "baseline-v0.1"
+              }
+            ]
+          },
+          "nextAction": {
+            "kind": "review_vendor",
+            "target": {
+              "vendorKey": "vendor_e0f43c8d84ae71849d5be4709a4c57dd12e474633b1852b7a65079778c1b346e"
+            },
+            "label": "Review payments to Fixture Coffee Co",
+            "sideEffects": "none"
+          },
+          "influencedBy": [],
+          "evidenceFingerprint": "f28fa4cfd05be970",
+          "status": "active",
+          "expiresAt": 1788912000000,
+          "dismissal": null,
+          "previousDismissal": null,
+          "advisorySummary": null,
+          "ai": {
+            "status": "not_requested",
+            "reason": null
+          }
+        },
+        {
+          "id": "ins_vendor_concentration_b7a1994299f2",
+          "dedupKey": "vendor_concentration|vendor:vendor_9bd4e431b8e88212a7af155aa8369adf9bb4fa117c2814bc41f755ef9477aa60|USD",
+          "tenantId": "tenant_fixture_a",
+          "rule": "vendor_concentration",
+          "ruleVersion": "vendor_concentration@1",
+          "insightsVersion": "insights-v0.1",
+          "severity": "low",
+          "severityReason": "low: concentration is context, not a problem by itself",
+          "title": "Fixture Property Mgmt received 63.9% of covered USD payments",
+          "explanation": "In the covered records, payments to Fixture Property Mgmt were USD 24,000.00 of USD 37,546.75 paid in USD (63.9%), across 3 vendors. This shows where covered payments went.",
+          "limits": "It covers only imported AP payments in this currency; it is not total company spending and says nothing about whether the share is appropriate.",
+          "subject": {
+            "type": "vendor",
+            "vendorKey": "vendor_9bd4e431b8e88212a7af155aa8369adf9bb4fa117c2814bc41f755ef9477aa60",
+            "displayName": "Fixture Property Mgmt"
+          },
+          "period": {
+            "from": "2026-01-01",
+            "to": "2026-06-09",
+            "dataAsOf": "2026-06-09",
+            "computedAt": 1782907200000
+          },
+          "figures": [
+            {
+              "label": "Gross payments to this vendor",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 2400000
+              },
+              "source": {
+                "model": "spend.by_vendor",
+                "field": "rows[].grossPaymentsMinor",
+                "metricDefinitionVersion": "spend-v0.1"
+              }
+            },
+            {
+              "label": "All covered USD payments",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 3754675
+              },
+              "source": {
+                "model": "spend.by_vendor",
+                "field": "currencyTotals",
+                "metricDefinitionVersion": "spend-v0.1"
+              }
+            }
+          ],
+          "measures": [
+            {
+              "label": "Share of covered payments in this currency",
+              "value": 6392,
+              "unit": "bps",
+              "source": {
+                "model": "spend.by_vendor",
+                "field": "rows[].shareOfCurrencyBps",
+                "metricDefinitionVersion": "spend-v0.1"
+              }
+            },
+            {
+              "label": "Vendors paid in this currency",
+              "value": 3,
+              "unit": "count",
+              "source": {
+                "model": "spend.by_vendor",
+                "field": "rows",
+                "metricDefinitionVersion": "spend-v0.1"
+              }
+            }
+          ],
+          "sourceRefs": [
+            {
+              "id": "record:audit_fixture_q1/rec_0",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q1/rec_1",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q1/rec_2",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q2/rec_3",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q2/rec_4",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q2/rec_5",
+              "label": "Source record"
+            }
+          ],
+          "sourceRefCount": 6,
+          "sourceRefsTruncated": false,
+          "coverage": [
+            {
+              "check": "covered_spend",
+              "status": "limited",
+              "reasons": [
+                "customer_supplied_source",
+                "mixed_currency",
+                "settlement_unverified",
+                "snapshot_not_continuous"
+              ]
+            }
+          ],
+          "freshness": {
+            "computedAt": 1782907200000,
+            "sourceUpdatedAt": 1782907200000,
+            "stale": false,
+            "staleReason": null
+          },
+          "provenance": {
+            "insightsVersion": "insights-v0.1",
+            "contractVersion": "0.1.2",
+            "origin": "legacy_audit_snapshot",
+            "readModels": [
+              {
+                "model": "spend.by_vendor",
+                "metricDefinitionVersion": "spend-v0.1"
+              }
+            ]
+          },
+          "nextAction": {
+            "kind": "review_vendor",
+            "target": {
+              "vendorKey": "vendor_9bd4e431b8e88212a7af155aa8369adf9bb4fa117c2814bc41f755ef9477aa60"
+            },
+            "label": "Review payments to Fixture Property Mgmt",
+            "sideEffects": "none"
+          },
+          "influencedBy": [],
+          "evidenceFingerprint": "388c0313ff46b686",
+          "status": "active",
+          "expiresAt": 1791331200000,
+          "dismissal": null,
+          "previousDismissal": null,
+          "advisorySummary": null,
+          "ai": {
+            "status": "not_requested",
+            "reason": null
+          }
+        },
+        {
+          "id": "ins_recurring_payment_visible_95f6947d2cce",
+          "dedupKey": "recurring_payment_visible|vendor:vendor_9bd4e431b8e88212a7af155aa8369adf9bb4fa117c2814bc41f755ef9477aa60|USD:400000",
+          "tenantId": "tenant_fixture_a",
+          "rule": "recurring_payment_visible",
+          "ruleVersion": "recurring_payment_visible@1",
+          "insightsVersion": "insights-v0.1",
+          "severity": "low",
+          "severityReason": "low: visibility only; recurring payments are not flagged by the detector",
+          "title": "Recurring payment to Fixture Property Mgmt, about every 31 days",
+          "explanation": "In the covered records, Fixture Property Mgmt was paid USD 4,000.00 about every 31 days (4 payments, 2026-03-01 to 2026-06-01). The detector treats this as recurring and does not flag it. Review it if you no longer expect it.",
+          "limits": "It shows a repeating pattern in the covered records; it does not show whether the service is still used or whether the amount matches an agreement.",
+          "subject": {
+            "type": "vendor",
+            "vendorKey": "vendor_9bd4e431b8e88212a7af155aa8369adf9bb4fa117c2814bc41f755ef9477aa60",
+            "displayName": "Fixture Property Mgmt"
+          },
+          "period": {
+            "from": "2026-03-01",
+            "to": "2026-06-01",
+            "dataAsOf": "2026-06-09",
+            "computedAt": 1782907200000
+          },
+          "figures": [
+            {
+              "label": "Recurring amount",
+              "money": {
+                "currency": "USD",
+                "amountMinor": 400000
+              },
+              "source": {
+                "model": "recurring_series",
+                "field": "amount",
+                "metricDefinitionVersion": "0.1.2"
+              }
+            }
+          ],
+          "measures": [
+            {
+              "label": "Cadence",
+              "value": 31,
+              "unit": "days",
+              "source": {
+                "model": "recurring_series",
+                "field": "cadenceDays",
+                "metricDefinitionVersion": "0.1.2"
+              }
+            },
+            {
+              "label": "Payments in the series",
+              "value": 4,
+              "unit": "count",
+              "source": {
+                "model": "recurring_series",
+                "field": "paymentCount",
+                "metricDefinitionVersion": "0.1.2"
+              }
+            }
+          ],
+          "sourceRefs": [
+            {
+              "id": "series:audit_fixture_q1/series_7dc1aafb",
+              "label": "Recurring series"
+            },
+            {
+              "id": "series:audit_fixture_q2/series_a46e58f9",
+              "label": "Recurring series"
+            },
+            {
+              "id": "record:audit_fixture_q2/rec_0",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q2/rec_3",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q2/rec_4",
+              "label": "Source record"
+            },
+            {
+              "id": "record:audit_fixture_q2/rec_5",
+              "label": "Source record"
+            }
+          ],
+          "sourceRefCount": 6,
+          "sourceRefsTruncated": false,
+          "coverage": [
+            {
+              "check": "recurring_series",
+              "status": "limited",
+              "reasons": [
+                "customer_supplied_source",
+                "snapshot_not_continuous"
+              ]
+            }
+          ],
+          "freshness": {
+            "computedAt": 1782907200000,
+            "sourceUpdatedAt": 1782907200000,
+            "stale": false,
+            "staleReason": null
+          },
+          "provenance": {
+            "insightsVersion": "insights-v0.1",
+            "contractVersion": "0.1.2",
+            "origin": "legacy_audit_snapshot",
+            "readModels": [
+              {
+                "model": "recurring_series",
+                "metricDefinitionVersion": "0.1.2"
+              }
+            ]
+          },
+          "nextAction": {
+            "kind": "review_vendor",
+            "target": {
+              "vendorKey": "vendor_9bd4e431b8e88212a7af155aa8369adf9bb4fa117c2814bc41f755ef9477aa60"
+            },
+            "label": "Review recurring payments to Fixture Property Mgmt",
+            "sideEffects": "none"
+          },
+          "influencedBy": [],
+          "evidenceFingerprint": "f72b142debb71e04",
+          "status": "active",
+          "expiresAt": 1790640000000,
+          "dismissal": null,
+          "previousDismissal": null,
+          "advisorySummary": null,
+          "ai": {
+            "status": "not_requested",
+            "reason": null
+          }
+        }
+      ],
+      "nextCursor": null,
+      "total": 4,
+      "countsByRule": {
+        "approvals_due": 0,
+        "follow_ups_due": 0,
+        "import_coverage_gap": 0,
+        "prevention_guidance": 0,
+        "recurring_payment_visible": 1,
+        "unresolved_recovery": 1,
+        "vendor_change": 0,
+        "vendor_concentration": 1,
+        "vendor_spend_above_baseline": 1
+      },
+      "countsBySeverity": {
+        "high": 1,
+        "medium": 1,
+        "low": 2
+      },
+      "countsByStatus": {
+        "active": 4,
+        "dismissed": 0,
+        "expired": 0
+      },
+      "suppressedByDismissal": 0,
+      "aiSummaries": "disabled",
+      "aiOutcomes": {
+        "attached": 0,
+        "rejected": 0,
+        "unavailable": 0
+      },
+      "emptyState": null
+    }
+  }
+}

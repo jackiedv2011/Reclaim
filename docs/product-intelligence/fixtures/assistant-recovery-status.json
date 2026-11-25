@@ -1,0 +1,133 @@
+{
+  "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
+  "question": "What is my recovery status?",
+  "response": {
+    "version": "account-assistant-v0.1",
+    "contractVersion": "0.1.2",
+    "tenantId": "tenant_fixture_a",
+    "intent": "recovery_status",
+    "status": "answered",
+    "answer": "There are 2 cases in the covered records, each counted once across saved audits (2 need your action, 1 partly returned). In USD: 1 open check flagged for review involving USD 3,569.75 (the flagged payment value, not an amount owed); USD 910.25 approved and still outstanding on 1 request; USD 910.25 promised by suppliers on 1 request (a statement, not money received); USD 500.00 recorded by you as returned on 1 case (recorded by the customer, not matched to a bank or accounting record). Independently matched returns are not available yet, so none are counted.",
+    "figures": [
+      {
+        "metric": "recovery.flagged_for_review",
+        "currency": "USD",
+        "amountMinor": 356975
+      },
+      {
+        "metric": "recovery.approved_outstanding",
+        "currency": "USD",
+        "amountMinor": 91025
+      },
+      {
+        "metric": "recovery.promised",
+        "currency": "USD",
+        "amountMinor": 91025
+      },
+      {
+        "metric": "recovery.customer_recorded_returns",
+        "currency": "USD",
+        "amountMinor": 50000
+      }
+    ],
+    "citations": [
+      {
+        "id": "case:audit_fixture_q1/exact_duplicate-rec_5-rec_6",
+        "label": "Fixture Coffee Co · exact duplicate · requested"
+      },
+      {
+        "id": "case:audit_fixture_q2/amount_outlier-rec_7",
+        "label": "Fixture Coffee Co · amount outlier · unreviewed"
+      }
+    ],
+    "coverage": [
+      {
+        "model": "recovery.overview",
+        "check": "recovery_cases",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "model": "recovery.overview",
+        "check": "flagged_for_review",
+        "status": "supported",
+        "reasons": []
+      },
+      {
+        "model": "recovery.overview",
+        "check": "supported_potential",
+        "status": "supported",
+        "reasons": []
+      },
+      {
+        "model": "recovery.overview",
+        "check": "promised",
+        "status": "supported",
+        "reasons": []
+      },
+      {
+        "model": "recovery.overview",
+        "check": "matched_returns",
+        "status": "not_run",
+        "reasons": [
+          "no_independent_return_matching"
+        ]
+      }
+    ],
+    "asOf": {
+      "computedAt": 1782907200000,
+      "sourceUpdatedAt": 1775088000000,
+      "stale": true
+    },
+    "models": [
+      {
+        "model": "recovery.overview",
+        "metricDefinitionVersion": "recovery-v0.1",
+        "origin": "legacy_audit_snapshot"
+      }
+    ],
+    "uncertainty": [
+      {
+        "code": "customer_supplied_source",
+        "text": "The figures come from files imported into this account (customer-supplied), not an authenticated ledger."
+      },
+      {
+        "code": "snapshot_not_continuous",
+        "text": "Saved audits are snapshots, not continuous monitoring."
+      },
+      {
+        "code": "no_independent_return_matching",
+        "text": "Returns have not been matched to bank or accounting records; matched returns are not available yet."
+      },
+      {
+        "code": "cross_audit_cases_folded",
+        "text": "Cases that appear in more than one saved audit were counted once."
+      },
+      {
+        "code": "cross_audit_case_states_differ",
+        "text": "Some copies of the same case were reviewed differently in different audits; the most advanced is used."
+      },
+      {
+        "code": "stale_source",
+        "text": "The newest source data behind this answer is old; newer activity may not be reflected."
+      }
+    ],
+    "proposal": null,
+    "routeHint": {
+      "screen": "recoveries",
+      "existing": true,
+      "label": "Recoveries"
+    },
+    "interpretation": {
+      "method": "deterministic",
+      "aiInvocationId": null
+    },
+    "error": null,
+    "aiUsed": false,
+    "answerSource": "deterministic_templates",
+    "retention": "not_persisted"
+  }
+}

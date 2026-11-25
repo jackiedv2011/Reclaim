@@ -21,6 +21,8 @@ import { recoveryOverview } from './recoveryVisibility.ts'
 import { vendorProfiles } from './vendorProfiles.ts'
 import { InMemoryFeedbackStore } from './memory.ts'
 import { uiStateOf } from './viewModels.ts'
+import { generateInsightsSync, InMemoryInsightStateStore, insightLookup } from './insights.ts'
+import { askAccount } from './assistant.ts'
 
 const NOW = Date.UTC(2026, 6, 1, 12)
 const DIR = join(process.cwd(), 'docs/product-intelligence/fixtures')
@@ -59,21 +61,35 @@ function responses() {
     'attention-queue': { response: attentionQueue(ctx, source.cases, NOW) },
     'vendor-profiles': { response: vendorProfiles(ctx, source.financial, source.cases, memory, NOW, { limit: 3 }) },
     'empty-account': { response: spendSummary(ctx, createLegacyAuditSource(ctx.tenantId, []).financial, null, NOW) },
+    'insights': { response: generateInsightsSync(ctx, { financial: source.financial, cases: source.cases, returns: NO_RETURN_MATCHING, memory, insightState: new InMemoryInsightStateStore() }, NOW) },
   }
 }
 
-describe('design fixtures', () => {
-  const update = process.env.UPDATE_DESIGN_FIXTURES === '1'
-  for (const [name, body] of Object.entries(responses())) {
-    it(`${name}.json matches the current read model`, () => {
-      const text = `${JSON.stringify({ _note: 'SYNTHETIC FIXTURE: fictional data for design work. Not customer data.', ...body }, null, 2)}\n`
-      const file = join(DIR, `${name}.json`)
-      if (update) {
-        mkdirSync(DIR, { recursive: true })
-        writeFileSync(file, text)
-      }
-      expect(existsSync(file), `${file} missing: run with UPDATE_DESIGN_FIXTURES=1`).toBe(true)
-      expect(readFileSync(file, 'utf8')).toBe(text)
-    })
+async function assistantResponses() {
+  const source = tenant()
+  const deps = { financial: source.financial, cases: source.cases, returns: NO_RETURN_MATCHING, memory: new InMemoryFeedbackStore(), insightState: new InMemoryInsightStateStore() }
+  const ask = (question: string) => askAccount(ctx, { ...deps, insightLookup: insightLookup(deps, NOW) }, question, NOW)
+  return {
+    'assistant-recovery-status': { question: 'What is my recovery status?', response: await ask('What is my recovery status?') },
+    'assistant-action-request': { question: 'Email the vendor and get the duplicate refunded', response: await ask('Email the vendor and get the duplicate refunded') },
   }
+}
+
+const update = process.env.UPDATE_DESIGN_FIXTURES === '1'
+function check(name: string, body: object) {
+  const text = `${JSON.stringify({ _note: 'SYNTHETIC FIXTURE: fictional data for design work. Not customer data.', ...body }, null, 2)}\n`
+  const file = join(DIR, `${name}.json`)
+  if (update) {
+    mkdirSync(DIR, { recursive: true })
+    writeFileSync(file, text)
+  }
+  expect(existsSync(file), `${file} missing: run with UPDATE_DESIGN_FIXTURES=1`).toBe(true)
+  expect(readFileSync(file, 'utf8')).toBe(text)
+}
+
+describe('design fixtures', () => {
+  for (const [name, body] of Object.entries(responses())) it(`${name}.json matches the current read model`, () => check(name, body))
+  it('assistant answers match their fixture files', async () => {
+    for (const [name, body] of Object.entries(await assistantResponses())) check(name, body)
+  })
 })

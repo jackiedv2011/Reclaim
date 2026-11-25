@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { COVERAGE_REASONS, type ReadModelEnvelope } from './contracts.ts'
+import { COVERAGE_REASONS, INTELLIGENCE_CONTRACT_VERSION, type ReadModelEnvelope } from './contracts.ts'
 import { copyFor, DRAFT_COVERAGE_COPY, DRAFT_RECOVERY_LABELS, FALLBACK_COVERAGE_COPY, formatMinor, moneyViews, uiStateOf } from './viewModels.ts'
 import { spendSummary } from './spend.ts'
 import { createLegacyAuditSource } from './adapters/legacyAudit.ts'
@@ -11,7 +11,7 @@ const ctx = fixtureContext('tenant_a')
 
 function env<T>(partial: Partial<ReadModelEnvelope<T>>): ReadModelEnvelope<T> {
   return {
-    model: 'm', contractVersion: '0.1.1', metricDefinitionVersion: 'v', tenantId: 't', origin: 'fixture',
+    model: 'm', contractVersion: INTELLIGENCE_CONTRACT_VERSION, metricDefinitionVersion: 'v', tenantId: 't', origin: 'fixture',
     scope: { from: null, to: null, dateBasis: 'none', currencies: [] },
     freshness: { computedAt: NOW, sourceUpdatedAt: NOW, stale: false, staleReason: null },
     coverage: [], sources: [], exclusions: [], warnings: [], result: null, ...partial,

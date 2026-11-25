@@ -22,7 +22,7 @@
  *    anything or calls an external model.
  */
 
-export const INTELLIGENCE_CONTRACT_VERSION = '0.1.1' as const
+export const INTELLIGENCE_CONTRACT_VERSION = '0.1.2' as const
 
 // ---------------------------------------------------------------- tenancy
 
@@ -42,7 +42,12 @@ export interface TenantContext {
   tenantId: string
   actorId: string
   permissions: readonly Permission[]
-  source: 'single_user_session' | 'test_fixture'
+  /**
+   * `job_runner`: a background job (insight refresh) acting for the tenant
+   * under the system actor. It never holds the implicit owner rights that a
+   * signed-in single-user session has (e.g. proposed case approval).
+   */
+  source: 'single_user_session' | 'job_runner' | 'test_fixture'
 }
 
 export const SINGLE_USER_PERMISSIONS: readonly Permission[] = ['financial:read', 'cases:read', 'feedback:write', 'insights:refresh', 'assistant:ask']
@@ -115,6 +120,7 @@ export const COVERAGE_REASONS = {
   NON_POSITIVE_MEDIAN: 'non_positive_median',
   WINDOW_NOT_COVERED: 'window_not_covered',
   VENDOR_NOT_FOUND: 'vendor_not_found',
+  INSIGHT_INPUT_TRUNCATED: 'insight_input_truncated',
 } as const
 
 export interface Exclusion {

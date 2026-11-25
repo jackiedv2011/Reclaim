@@ -1,6 +1,6 @@
 # Insight catalog (P3)
 
-**Owner:** CPO workstream (Aditya) · **Engine version:** `insights-v0.1` · **Contract:** `src/intelligence/contracts.ts` `0.1.1` · **Document version:** 0.1 (25 November 2026)
+**Owner:** CPO workstream (Aditya) · **Engine version:** `insights-v0.1` · **Contract:** `src/intelligence/contracts.ts` `0.1.2` · **Document version:** 0.1 (25 November 2026)
 **Status:** proposal, implemented and tested against synthetic fixtures and the legacy-audit adapter only. Not wired to a route, not persisted, not validated on customer data. Wording is engineering copy pending Aditya's product-language review.
 
 Code: `src/intelligence/insights.ts` (engine, dismiss store), `src/intelligence/insightRefresh.ts` (job handler, snapshot cache, fixture runner). Tests beside each.

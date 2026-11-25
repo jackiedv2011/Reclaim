@@ -1,6 +1,6 @@
 # Product-intelligence metric definitions
 
-**Owner:** CPO workstream (Aditya) · **Contract:** `src/intelligence/contracts.ts` `0.1.1` · **Document version:** 0.1 (25 November 2026)
+**Owner:** CPO workstream (Aditya) · **Contract:** `src/intelligence/contracts.ts` `0.1.2` · **Document version:** 0.1 (25 November 2026)
 **Status:** proposal. The spending semantics below are a CPO proposal **pending CTO (Sid) agreement**; the recovery semantics consume Jagan's case model through `CaseReadPort` and are pending his review. Nothing here is a customer-facing claim, and nothing here has been validated on real customer data.
 
 Every read model returns a `ReadModelEnvelope` whose `metricDefinitionVersion` names the version of the definitions in this file. **Any change to what a figure means bumps that version** and adds a row to the changelog at the bottom. Code: `src/intelligence/spend.ts` (`spend-v0.1`) and `src/intelligence/recoveryVisibility.ts` (`recovery-v0.1`).

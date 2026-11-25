@@ -341,14 +341,12 @@ function validateInput(raw: unknown): { ok: true; value: { trigger: RefreshTrigg
 }
 
 /**
- * The context a job runs under. TenantContext.source has no job value yet
- * ('single_user_session' | 'test_fixture'); until the contract adds one
- * (requested: 'job_runner'), a job uses 'single_user_session', which matches
- * today's tenant = user model, with a read-only permission set and the
- * system actor when the runner started it.
+ * The context a job runs under: source 'job_runner' (contract 0.1.2), a
+ * read-only permission set, and the system actor when the runner started it.
+ * A job never inherits the implicit owner rights of a signed-in session.
  */
 export function jobTenantContext(tenantId: string, actorId: string | null): TenantContext {
-  return { tenantId, actorId: actorId ?? SYSTEM_ACTOR_ID, permissions: INSIGHT_JOB_PERMISSIONS, source: 'single_user_session' }
+  return { tenantId, actorId: actorId ?? SYSTEM_ACTOR_ID, permissions: INSIGHT_JOB_PERMISSIONS, source: 'job_runner' }
 }
 
 export function refreshInsightsHandler(deps: RefreshHandlerDeps): JobHandler<RefreshInsightsInput, RefreshInsightsOutput> {

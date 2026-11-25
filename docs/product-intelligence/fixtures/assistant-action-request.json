@@ -1,0 +1,124 @@
+{
+  "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
+  "question": "Email the vendor and get the duplicate refunded",
+  "response": {
+    "version": "account-assistant-v0.1",
+    "contractVersion": "0.1.2",
+    "tenantId": "tenant_fixture_a",
+    "intent": "investigation_or_action_request",
+    "status": "needs_clarification",
+    "answer": "Nothing has been sent, approved or changed: the assistant only prepares proposals for you to review. Which case? 1 case could fit: “Fixture Coffee Co” (Partially returned). Open the case and ask from there.",
+    "figures": [],
+    "citations": [
+      {
+        "id": "case:audit_fixture_q1/exact_duplicate-rec_5-rec_6",
+        "label": "Case"
+      }
+    ],
+    "coverage": [
+      {
+        "model": "attention_queue",
+        "check": "case_state",
+        "status": "limited",
+        "reasons": [
+          "cross_audit_overlap",
+          "customer_supplied_source",
+          "revision_unknown",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "model": "attention_queue",
+        "check": "pending_approvals",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "revalidation_not_in_snapshot",
+          "snapshot_not_continuous",
+          "upstream_contract_pending"
+        ]
+      },
+      {
+        "model": "attention_queue",
+        "check": "send_state",
+        "status": "limited",
+        "reasons": [
+          "send_state_not_in_snapshot",
+          "upstream_contract_pending"
+        ]
+      },
+      {
+        "model": "attention_queue",
+        "check": "returns",
+        "status": "limited",
+        "reasons": [
+          "no_independent_return_matching"
+        ]
+      }
+    ],
+    "asOf": {
+      "computedAt": 1782907200000,
+      "sourceUpdatedAt": 1775088000000,
+      "stale": true
+    },
+    "models": [
+      {
+        "model": "attention_queue",
+        "metricDefinitionVersion": "attention-1",
+        "origin": "legacy_audit_snapshot"
+      }
+    ],
+    "uncertainty": [
+      {
+        "code": "cross_audit_overlap",
+        "text": "Some rows or cases appear in more than one saved audit and were counted once."
+      },
+      {
+        "code": "customer_supplied_source",
+        "text": "The figures come from files imported into this account (customer-supplied), not an authenticated ledger."
+      },
+      {
+        "code": "revision_unknown",
+        "text": "At least one case has no saved revision."
+      },
+      {
+        "code": "snapshot_not_continuous",
+        "text": "Saved audits are snapshots, not continuous monitoring."
+      },
+      {
+        "code": "revalidation_not_in_snapshot",
+        "text": "A case may need revalidation before approval; the case page checks this."
+      },
+      {
+        "code": "upstream_contract_pending",
+        "text": "Part of this depends on a service that is not connected yet."
+      },
+      {
+        "code": "send_state_not_in_snapshot",
+        "text": "Whether an approved request was actually sent is not visible here."
+      },
+      {
+        "code": "no_independent_return_matching",
+        "text": "Returns have not been matched to bank or accounting records; matched returns are not available yet."
+      },
+      {
+        "code": "stale_source",
+        "text": "The newest source data behind this answer is old; newer activity may not be reflected."
+      }
+    ],
+    "proposal": null,
+    "routeHint": {
+      "screen": "recoveries",
+      "existing": true,
+      "label": "Recoveries"
+    },
+    "interpretation": {
+      "method": "deterministic",
+      "aiInvocationId": null
+    },
+    "error": null,
+    "aiUsed": false,
+    "answerSource": "deterministic_templates",
+    "retention": "not_persisted"
+  }
+}

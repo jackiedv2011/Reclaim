@@ -135,7 +135,7 @@ describe('refreshInsightsHandler: tenancy, authorization and validation', () => 
     const allowed = setup(() => sources, { authorizeActor: (t, a) => t === 'tenant_a' && a === 'tenant_a' })
     expect((await runJob(allowed.runner, job({ actorId: 'tenant_a' }))).outcome.status).toBe('succeeded')
     expect((await runJob(allowed.runner, job({ actorId: 'intruder', idempotencyKey: 'k2' }))).outcome.error?.code).toBe('forbidden')
-    expect(jobTenantContext('tenant_a', null)).toEqual({ tenantId: 'tenant_a', actorId: SYSTEM_ACTOR_ID, permissions: ['financial:read', 'cases:read', 'insights:refresh'], source: 'single_user_session' })
+    expect(jobTenantContext('tenant_a', null)).toEqual({ tenantId: 'tenant_a', actorId: SYSTEM_ACTOR_ID, permissions: ['financial:read', 'cases:read', 'insights:refresh'], source: 'job_runner' })
   })
 })
 
@@ -312,5 +312,17 @@ describe('no data, sparse data, bounds, no AI, manual refresh', () => {
     const runner = new FixtureJobRunner()
     await expect(runner.run(job())).rejects.toThrow('No handler registered')
     expect(runner.auditLog).toEqual([])
+  })
+})
+
+describe('job context privileges', () => {
+  it('a refresh job is read-only and never holds the implicit owner rights of a signed-in session', async () => {
+    const { jobTenantContext } = await import('./insightRefresh.ts')
+    const { hasCasePermission } = await import('./attention.ts')
+    const ctx = jobTenantContext('tenant_job', null)
+    expect(ctx.source).toBe('job_runner')
+    expect(hasCasePermission(ctx, 'cases:approve')).toBe(false)
+    expect(hasCasePermission(ctx, 'cases:write')).toBe(false)
+    expect(ctx.permissions).not.toContain('feedback:write')
   })
 })
