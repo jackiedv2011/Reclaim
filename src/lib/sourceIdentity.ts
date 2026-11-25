@@ -38,24 +38,55 @@ export function normalizeReference(raw: string | null): { value: string | null; 
   const step=(name:string,next:string)=>{if(next!==value) transformations.push(name);value=next}
   step('trim_whitespace',value.trim())
   step('lowercase',value.toLowerCase())
-  step('remove_invoice_prefix',value.replace(/^(?:invoice|inv)(?:[\s#:_-]+)(?=\w)/,''))
+  // "Inv. 1001", "INV#1001", "Invoice No. 1001" and "INV1001" all name invoice 1001.
+  step('remove_invoice_prefix',value.replace(/^(?:invoice|inv)(?:[\s.#:_/-]+(?=\w)|(?=\d))(?:(?:number|num|no)[\s.#:_-]*(?=\d))?/,''))
   step('remove_spacing_and_punctuation',value.replace(/[\s\-_.:#/]/g,''))
   return {value:value||null,transformations}
 }
-/** Words payment systems put in the reference field when there is no invoice number (QuickBooks writes "Debit" on card purchases). */
-const PLACEHOLDER_REFERENCES = new Set(['debit','credit','cash','check','cheque','card','creditcard','debitcard','visa','mastercard','amex','ach','eft','wire','transfer','payment','pmt','invoice','inv','bill','ref','reference','receipt','na','none','null','nil','tbd','unknown','misc','various'])
+/**
+ * The reference two rows are compared by: normalized, and without the padding
+ * ("0042", "PO-00042") some systems print in front of a number. The stored
+ * normalized value keeps its zeros.
+ */
+export function referenceKey(raw: string | null): string | null {
+  const { value } = normalizeReference(raw)
+  return value === null ? null : value.replace(/^([a-z]*)0+(?=\d)/,'$1')
+}
+/**
+ * Words that stand in the reference field when there is no invoice number: how
+ * it was paid ("Debit", which QuickBooks writes on card purchases), what it was
+ * for ("Rent"), how often, or which month. A reference made up only of these
+ * words identifies no invoice; one with a number or a name in it still does.
+ */
+const PLACEHOLDER_REFERENCES = new Set((
+  'debit credit cash check cheque chk card creditcard debitcard visa mastercard amex discover ach eft wire transfer zelle venmo paypal ' +
+  'payment pmt pymt pay paid billpay autopay auto autopayment autodebit autodraft autowithdrawal draft withdrawal direct directdebit directdeposit ' +
+  'online web internet phone electronic epay bank ' +
+  'recurring standing standingorder daily weekly biweekly monthly quarterly annual annually yearly month week quarter year ' +
+  'rent rental lease subscription membership dues retainer payroll salary wages deposit loan insurance premium utilities utility tax taxes fee fees service services ' +
+  'statement stmt invoice inv bill ref reference receipt memo number no account acct onaccount ' +
+  'instalment installment partial balance final advance prepayment prepaid ' +
+  'na none null nil tbd unknown misc miscellaneous various other general ' +
+  'january february march april may june july august september october november december jan feb mar apr jun jul aug sep sept oct nov dec'
+).split(' '))
 /** Up to this many characters, a reference ("1", "12", a check number) is too common to identify an invoice on its own. */
 const SHORT_REFERENCE_MAX_LENGTH = 2
 
+function isPlaceholder(raw: string): boolean {
+  const words = raw.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)
+  // "N/A" and "A.C.H." are one word written with separators.
+  return words.every((word) => PLACEHOLDER_REFERENCES.has(word)) || PLACEHOLDER_REFERENCES.has(words.join(''))
+}
+
 /**
  * How far an invoice reference can be trusted to identify one invoice.
- * - none: missing, blank, all zeros or a placeholder word; treated as no reference.
+ * - none: missing, blank, all zeros or only placeholder words; treated as no reference.
  * - short: one or two characters; the same invoice only when the amount matches too.
- * - strong: everything else.
+ * - strong: everything else. Leading zeros count: "001" is a three-character reference.
  */
 export function referenceStrength(raw: string | null): 'none' | 'short' | 'strong' {
-  const value = normalizeReference(raw).value
-  if (value === null || /^0+$/.test(value) || PLACEHOLDER_REFERENCES.has(value)) return 'none'
+  const { value } = normalizeReference(raw)
+  if (raw === null || value === null || /^0+$/.test(value) || isPlaceholder(raw)) return 'none'
   return value.length <= SHORT_REFERENCE_MAX_LENGTH ? 'short' : 'strong'
 }
 export function vendorTransformations(raw:string):string[] {

@@ -1,4 +1,6 @@
 import type { Finding } from '@/types'
+import { normalizeVendor } from '@/lib/format'
+import { referenceKey, referenceStrength } from '@/lib/sourceIdentity'
 
 export interface RuleCheck {
   label: string
@@ -7,6 +9,19 @@ export interface RuleCheck {
 }
 
 const EPSILON = 0.01
+
+/** What the two payments' references really show. A placeholder such as "Autopay" is no reference. */
+function referenceCheck(a: string | null, b: string | null): RuleCheck {
+  const [hasA, hasB] = [referenceStrength(a) !== 'none', referenceStrength(b) !== 'none']
+  if (!hasA && !hasB) return { label: 'No invoice reference on either payment', matched: false }
+  if (!hasA || !hasB) return { label: 'Invoice reference on only one payment', matched: false }
+  if (referenceKey(a) !== referenceKey(b)) return { label: 'Different invoice reference', matched: false }
+  // One label repeated as it stands (an account number) says nothing; one invoice number written two ways does.
+  const asWritten = (raw: string | null) => raw!.trim().toLowerCase().replace(/\s+/g, ' ')
+  return asWritten(a) === asWritten(b)
+    ? { label: 'Same reference on both payments', matched: true }
+    : { label: 'Same invoice reference, written differently', matched: true }
+}
 
 /**
  * Plain-language breakdown of why a finding was flagged, built from the
@@ -19,7 +34,7 @@ export function buildRuleChecklist(finding: Finding): RuleCheck[] {
 
   switch (finding.type) {
     case 'exact_duplicate': {
-      const sameAmount = b ? Math.abs(a.amountPaid - b.amountPaid) < EPSILON : true
+      const sameAmount = finding.relatedRecords.every((r) => Math.abs(a.amountPaid - r.amountPaid) < EPSILON)
       const sameDate = b ? a.paymentDate.getTime() === b.paymentDate.getTime() : true
       return [
         { label: 'Same vendor', matched: true },
@@ -30,11 +45,18 @@ export function buildRuleChecklist(finding: Finding): RuleCheck[] {
     }
 
     case 'near_duplicate': {
+      const sameDate = b ? a.paymentDate.getTime() === b.paymentDate.getTime() : true
+      const vendorCheck =
+        finding.ruleId !== 'cross_vendor_duplicate_v1'
+          ? { label: 'Same vendor', matched: true }
+          : b && normalizeVendor(a.vendor) === normalizeVendor(b.vendor)
+            ? { label: 'Same vendor name on two vendor records', matched: false }
+            : { label: 'Near-identical vendor names, not the same one', matched: false }
       return [
-        { label: 'Same vendor', matched: true },
-        { label: 'Different invoice reference', matched: false },
+        vendorCheck,
+        referenceCheck(a.invoiceNumber, b?.invoiceNumber ?? null),
         { label: 'Same amount', matched: true },
-        { label: 'Different payment date', matched: false },
+        { label: sameDate ? 'Same payment date' : 'Different payment date', matched: sameDate },
       ]
     }
 

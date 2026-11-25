@@ -82,7 +82,7 @@ export interface ScanReceiptSummary {
   dateRangeLabel: string | null
   skippedCount: number
   availableCheckCount: number
-  totalCheckCount: 7
+  totalCheckCount: 8
   limitations: WeakerCheck[]
   /** Findings created by this import, used to explain scan-specific access. */
   findingIds: string[]

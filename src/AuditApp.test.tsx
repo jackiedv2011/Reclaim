@@ -810,15 +810,15 @@ describe('AuditApp', () => {
   })
 
   // Coverage is a claim about what the loaded columns can actually support, so
-  // it is stated as "N of 7" rather than implying a full audit ran regardless.
-  it('the Audits page reports how many of the seven checks the loaded columns support', async () => {
+  // it is stated as "N of 8" rather than implying a full audit ran regardless.
+  it('the Audits page reports how many of the eight checks the loaded columns support', async () => {
     await runSampleFromLaunch()
     goToMode('Audits')
 
     const parsed = getSampleLedger()
     const readiness = assessRecordReadiness(parsed.records, parsed.skippedCount, parsed.detectedColumns)
-    expect(readiness.totalCheckCount).toBe(7)
-    expect(screen.getByText(`${readiness.availableCheckCount} of 7 checks`)).toBeInTheDocument()
+    expect(readiness.totalCheckCount).toBe(8)
+    expect(screen.getByText(`${readiness.availableCheckCount} of 8 checks`)).toBeInTheDocument()
     expect(fact('Payment records')).toBe(String(parsed.records.length))
     expect(fact('Vendors')).toBe(String(new Set(parsed.records.map((record) => record.vendor)).size))
   })

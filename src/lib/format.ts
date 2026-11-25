@@ -1,19 +1,38 @@
-const VENDOR_SUFFIXES = new Set(['inc', 'llc', 'ltd', 'co', 'corp'])
+/** Words that say what kind of company a vendor is, not which one. Dotted forms ("L.L.C.") are joined before this is read. */
+const VENDOR_SUFFIXES = new Set(['inc', 'incorporated', 'llc', 'llp', 'lp', 'pllc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'plc', 'gmbh', 'pty', 'sarl', 'srl', 'bv', 'nv', 'ag'])
 
-/** Lowercase, trim, collapse whitespace, strip trailing punctuation and common
- * legal suffixes so the same vendor matches across minor spelling variants. */
+/**
+ * One spelling for a vendor name, so the same vendor matches across the ways
+ * people key it: case, punctuation, accents, apostrophes, "&" for "and", dots
+ * and spaces in initials, a leading "The" and trailing legal words. Digits are
+ * never dropped or merged: "Station 1042" and "Station 1043" stay different.
+ */
 export function normalizeVendor(vendor: string): string {
-  const cleaned = vendor
+  const tokens = vendor
     .toLowerCase()
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .replace(/['’‘`´]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
-    .replace(/\s+/g, ' ')
-    .replace(/[.,]+$/g, '')
+    .split(' ')
+    .filter(Boolean)
 
-  const words = cleaned.split(' ')
-  while (words.length > 1 && VENDOR_SUFFIXES.has(words[words.length - 1].replace(/[.,]/g, ''))) {
-    words.pop()
+  // "a b c supply" and "j p morgan" are initials: join runs of single letters.
+  let words: string[] = []
+  let initials = false
+  for (const token of tokens) {
+    const single = /^\p{L}$/u.test(token)
+    if (single && initials) words[words.length - 1] += token
+    else words.push(token)
+    initials = single
   }
-  return words.join(' ').trim()
+
+  if (words.length > 1 && words[0] === 'the') words = words.slice(1)
+  while (words.length > 1 && (VENDOR_SUFFIXES.has(words[words.length - 1]) || words[words.length - 1] === 'and')) words.pop()
+  // A name made only of symbols keeps its own spelling rather than matching every other one.
+  return words.join(' ') || vendor.toLowerCase().trim().replace(/\s+/g, ' ')
 }
 
 /**
@@ -118,13 +137,27 @@ export function daysBetween(a: Date, b: Date): number {
   return Math.round((b.getTime() - a.getTime()) / msPerDay)
 }
 
-export function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value)
+const currencyFormatters = new Map<string, Intl.NumberFormat | null>()
+
+function currencyFormatter(code: string): Intl.NumberFormat | null {
+  let formatter = currencyFormatters.get(code)
+  if (formatter === undefined) {
+    try {
+      formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: code, minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    } catch {
+      formatter = null
+    }
+    currencyFormatters.set(code, formatter)
+  }
+  return formatter
+}
+
+/** Dollars unless the rows say otherwise. A code no one recognises is printed as written in the file, never as dollars. */
+export function formatCurrency(value: number, currency?: string | null): string {
+  const code = currency?.trim().toUpperCase() || 'USD'
+  const formatter = currencyFormatter(code)
+  if (formatter) return formatter.format(value)
+  return `${code} ${new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`
 }
 
 export function formatDate(date: Date | null): string {
@@ -140,28 +173,50 @@ export interface ParsedTerms {
   discountPct: number
   discountDays: number
   netDays: number
+  /** The terms say EOM. See parseTerms for how the discount window is read. */
+  endOfMonth?: true
 }
 
 /** Above this an "early-payment discount" is almost certainly a keying error, and claiming it would ask a vendor for most of an invoice back. */
 const MAX_DISCOUNT_PCT = 10
 
+const TERMS_DISCOUNT = '(\\d+(?:\\.\\d+)?)\\s*(?:%\\s*/?|/|\\s)\\s*(\\d+)\\s*(?:days?)?'
+const TERMS_NET = '(?:net|n)\\s*[/-]?\\s*(\\d+)\\s*(?:days?)?'
+const TERMS_EOM = '(?:[\\s,]*(e\\.?o\\.?m\\.?|end of month))?'
+const DISCOUNT_FIRST = new RegExp(`^${TERMS_DISCOUNT}${TERMS_EOM}\\s*[,;/-]?\\s*${TERMS_NET}${TERMS_EOM}\\.?$`, 'i')
+const NET_FIRST = new RegExp(`^${TERMS_NET}${TERMS_EOM}(?:\\s*[,;/-]\\s*|\\s+)${TERMS_DISCOUNT}${TERMS_EOM}\\.?$`, 'i')
+
 /**
  * Parse early-payment terms into discount %, discount window, and net days.
  * Accepts the spellings exports actually use — "2/10 net 30", "2/10, n/30",
- * "2% 10 net 30", "2/10 N30" — and rejects terms that cannot be real
- * (0% or implausibly large discounts, a window no shorter than the net period).
+ * "2% 10 Days Net 30 Days", "2/10-N30", "Net 30, 2/10" — and rejects terms that
+ * cannot be real (0% or implausibly large discounts, a window no shorter than
+ * the net period).
+ *
+ * "EOM" is read both ways people use it: the window may run from the invoice
+ * date, or from the end of the invoice's month. The terms are accepted and
+ * marked, and the discount checks only report what holds under both readings:
+ * a discount was earned within `discountDays` of the invoice date, and was
+ * missed only after `discountDays` past the end of that month.
  */
 export function parseTerms(raw: string | null): ParsedTerms | null {
   if (!raw) return null
-  const match = raw
-    .trim()
-    .match(/^(\d+(?:\.\d+)?)\s*%?\s*(?:\/\s*|\s+)(\d+)\s*(?:days?)?\s*[,/]?\s*(?:net|n)\s*\/?\s*(\d+)$/i)
-  if (!match) return null
-  const [, pct, discountDays, netDays] = match
-  const terms = {
+  const text = raw.trim()
+  let pct: string, discountDays: string, netDays: string, eom: boolean
+  const discountFirst = text.match(DISCOUNT_FIRST)
+  const netFirst = discountFirst ? null : text.match(NET_FIRST)
+  if (discountFirst) {
+    ;[, pct, discountDays, , netDays] = discountFirst
+    eom = Boolean(discountFirst[3] || discountFirst[5])
+  } else if (netFirst) {
+    ;[, netDays, , pct, discountDays] = netFirst
+    eom = Boolean(netFirst[2] || netFirst[5])
+  } else return null
+  const terms: ParsedTerms = {
     discountPct: parseFloat(pct),
     discountDays: parseInt(discountDays, 10),
     netDays: parseInt(netDays, 10),
+    ...(eom ? { endOfMonth: true as const } : {}),
   }
   if (!(terms.discountPct > 0 && terms.discountPct <= MAX_DISCOUNT_PCT)) return null
   if (!(terms.discountDays > 0 && terms.discountDays < terms.netDays)) return null

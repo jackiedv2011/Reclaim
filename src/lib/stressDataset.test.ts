@@ -84,10 +84,11 @@ describe('messy ledger — true positives', () => {
     expect(f.relatedRecords).toHaveLength(3)
   })
 
-  it('TP3: matching invoice numbers across legal-suffix variants remain a review signal', () => {
-    const f = only(ofType('shared_invoice_number', 'ABC Supply'))
-    expect(f.dollarImpact).toBe(1800)
-    expect(ofType('exact_duplicate', 'ABC Supply')).toHaveLength(0)
+  it('TP3: one invoice paid under two legal-suffix spellings is a duplicate of one payment, not two vendors', () => {
+    const f = only(ofType('exact_duplicate', 'ABC Supply'))
+    expect(f.dollarImpact).toBe(900)
+    expect(f.classification).toBe('review_needed')
+    expect(ofType('shared_invoice_number', 'ABC Supply')).toHaveLength(0)
     expect(byVendor('ABC')).toHaveLength(1)
   })
 
@@ -205,6 +206,7 @@ describe('messy ledger — totals, priority, evidence', () => {
       [
         'amount_outlier:Metro Utilities:' + findings.find((f) => f.type === 'amount_outlier')!.dollarImpact.toFixed(2),
         'bank_account_change:Northwest Pastry Co:662.00',
+        'exact_duplicate:ABC Supply LLC:900.00',
         'exact_duplicate:Harbor Point Roasting Equipment:2500.00',
         'exact_duplicate:Lakeside Printing:800.00',
         'exact_duplicate:Pine Valley Dairy:760.00',
@@ -214,7 +216,6 @@ describe('messy ledger — totals, priority, evidence', () => {
         'near_duplicate:Nameless Vendor Test:' + byVendor('Nameless')[0].dollarImpact.toFixed(2),
         'overpayment:Golden Bean Exports:800.00',
         'shared_invoice_number:Acme Steel, Acme Stone:2000.00',
-        'shared_invoice_number:ABC Supply LLC, ABC Supply, Inc.:1800.00',
         'unclaimed_discount:Blue Bag Packaging:100.00',
       ].sort()
     )
@@ -224,7 +225,7 @@ describe('messy ledger — totals, priority, evidence', () => {
     // Without evidence nothing is a recovery candidate; the rules' own strong signals are still flagged.
     expect(result.recoverableTotal).toBe(0)
     const strong = findings.filter((f) => f.ruleClass === 'recoverable').reduce((s, f) => s + (f.flaggedAmount ?? 0), 0)
-    expect(strong).toBeCloseTo(6800 + 2500 + 800 + 100 + 760 + 800, 2)
+    expect(strong).toBeCloseTo(6800 + 2500 + 800 + 100 + 760 + 800 + 900, 2)
     // Both missed discounts are future savings, never money owed.
     expect(result.opportunityTotal).toBeCloseTo(40 + 100, 2)
     const review = findings.filter((f) => f.class === 'review').reduce((s, f) => s + f.dollarImpact, 0)
