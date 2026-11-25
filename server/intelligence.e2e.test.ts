@@ -57,7 +57,7 @@ async function signedIn(first: string): Promise<{ client: Client; userId: string
 }
 
 const project = (audit: Audit) => ({ ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: NOW, updatedAt: NOW })
-const usd = (rows: Array<{ currency: string }>) => rows.find((r) => r.currency === 'USD') as Record<string, number>
+const usd = (rows: Array<{ currency: string }>) => rows.find((r) => r.currency === 'USD') as unknown as Record<string, number>
 
 describe('synthetic end-to-end: audit to recovery visibility through the real server', () => {
   let alice: { client: Client; userId: string }
