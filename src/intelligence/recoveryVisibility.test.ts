@@ -105,8 +105,8 @@ describe('recoveryOverview: figures kept apart and cross-checked with selectors'
     expect(row.flaggedForReviewMinor).toBe(cents(l.flagged))
     expect(row.promisedMinor).toBe(cents(vendorCommitments(ledgerEnv).confirmed))
     expect(row.approvedOutstandingMinor).toBe(cents(recoveryAging(ledgerEnv, NOW).reduce((sum, b) => sum + b.outstanding, 0)))
-    // A promise and a recorded return on one request: the order is not in the snapshot.
-    expect(env.coverage.find((c) => c.check === 'promised')!.reasons).toEqual([RECOVERY_COVERAGE_REASONS.PROMISE_RETURN_ORDER_UNKNOWN])
+    // The snapshot now carries what the promise still covers, so no order caveat is needed.
+    expect(env.coverage.find((c) => c.check === 'promised')!.reasons).toEqual([])
   })
 
   it('moves a fully returned case out of open figures, matching ladder()', () => {
@@ -154,14 +154,14 @@ describe('recoveryOverview: figures kept apart and cross-checked with selectors'
     expect(row.customerRecordedReturnsMinor).toBe(cents(ladder(ledgerEnv).recovered))
   })
 
-  it('INTENTIONAL DIFFERENCE: promised is the latest stated amount capped at outstanding; vendorCommitments() also nets returns recorded after the promise', () => {
+  it('promised nets returns recorded after the promise, exactly as vendorCommitments() does', () => {
     let state = requested()
     state = recordVendorUpdate(state, { at: T(3), status: 'promised', note: 'Partial refund promised', amount: 500 }, NOW)
     state = verifyRecovery(state, refund(400, 'FIXTURE-REF-4', T(4)))
     const audit = withCaseState(attest(q1(), DUP_Q1), DUP_Q1, state)
     const row = usd(recoveryOverview(ctxA, sourceOf(audit).cases, NO_RETURN_MATCHING, NOW).result!.byCurrency)
-    expect(row.promisedMinor).toBe(50000) // min(500.00, 1,010.25 outstanding)
-    expect(cents(vendorCommitments(ledgerOf(audit)).confirmed)).toBe(10000) // 500.00 − 400.00 returned since
+    expect(row.promisedMinor).toBe(10000) // 500.00 promised − 400.00 returned since
+    expect(cents(vendorCommitments(ledgerOf(audit)).confirmed)).toBe(10000)
   })
 })
 

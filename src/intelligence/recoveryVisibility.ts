@@ -223,8 +223,14 @@ export function isOpen(c: CaseSnapshot): boolean {
   return !CLOSED_STAGES.has(c.stage)
 }
 
-/** Mirrors selectors.isFlaggedForReview as far as a snapshot allows (see metrics.md for the gap). */
+/**
+ * selectors.isFlaggedForReview on a snapshot: the gate classified it as needing
+ * review, the detector did not suppress it, it is still in play and no recovery
+ * or internal review has started. Audits saved before classification existed
+ * fall back to the type-based approximation documented in metrics.md.
+ */
 export function isFlaggedForReviewSnapshot(c: CaseSnapshot): boolean {
+  if (c.classification !== null) return c.classification === 'review_needed' && !c.suppressed && c.recoveryStage === null && c.stage !== 'dismissed'
   return (c.stage === 'unreviewed' || c.stage === 'needs_info') && c.supportedPotentialMinor === null && !NOT_FLAGGED_FOR_REVIEW_TYPES.has(c.findingType)
 }
 
@@ -234,7 +240,8 @@ export function caseContributions(c: CaseSnapshot) {
   const flagged = open && isFlaggedForReviewSnapshot(c) ? c.flaggedMinor : null
   const supported = open && c.supportedPotentialMinor !== null ? Math.max(0, c.supportedPotentialMinor - c.customerRecordedReturnMinor) : null
   const approvedOutstanding = c.isClaim && c.approvedAt !== null && (c.stage === 'confirmed' || c.stage === 'requested') ? c.outstandingMinor : null
-  const promised = c.isClaim && c.stage === 'requested' && c.promisedMinor !== null ? Math.min(c.promisedMinor, c.outstandingMinor) : null
+  // promisedOutstandingMinor already nets returns recorded after the commitment (selectors.vendorCommitments).
+  const promised = !c.isClaim || c.stage !== 'requested' ? null : c.promisedOutstandingMinor !== null ? c.promisedOutstandingMinor : c.promisedMinor !== null ? Math.min(c.promisedMinor, c.outstandingMinor) : null
   const recorded = c.customerRecordedReturnMinor > 0 ? c.customerRecordedReturnMinor : null
   return { flagged, supported, approvedOutstanding, promised: promised !== null && promised > 0 ? promised : null, recorded }
 }
@@ -325,9 +332,10 @@ function coverageFor(origin: string, cases: CaseSnapshot[], returns: ReturnMatch
   return [
     coverage('recovery_cases', caseReasons),
     // A snapshot does not carry the detector's suppression reason, so suppressed signals cannot be left out yet.
-    coverage('flagged_for_review', [COVERAGE_REASONS.UPSTREAM_CONTRACT_PENDING]),
+    // Audits saved before the evidence gate classified findings fall back to a type-based approximation.
+    coverage('flagged_for_review', cases.some((c) => c.classification === null) ? [COVERAGE_REASONS.UPSTREAM_CONTRACT_PENDING] : []),
     coverage('supported_potential', gateReasons),
-    coverage('promised', cases.some((c) => caseContributions(c).promised !== null && c.customerRecordedReturnMinor > 0) ? [RECOVERY_COVERAGE_REASONS.PROMISE_RETURN_ORDER_UNKNOWN] : []),
+    coverage('promised', cases.some((c) => c.promisedOutstandingMinor === null && caseContributions(c).promised !== null && c.customerRecordedReturnMinor > 0) ? [RECOVERY_COVERAGE_REASONS.PROMISE_RETURN_ORDER_UNKNOWN] : []),
     returns.available ? coverage('matched_returns', []) : coverage('matched_returns', [COVERAGE_REASONS.NO_INDEPENDENT_RETURN_MATCHING], true),
   ]
 }

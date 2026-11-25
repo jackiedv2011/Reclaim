@@ -124,8 +124,12 @@ describe('spendSummary', () => {
     expect(env.result!.gross).toEqual([{ currency: 'EUR', amountMinor: 90000 }, { currency: 'USD', amountMinor: 541025 }])
     expect(env.result!.recordedRefundsAndCredits).toEqual([{ currency: 'USD', amountMinor: 5000 }])
     expect(env.scope.from).toBe('2026-03-01')
-    // Imports cover 01-01..03-10 and 04-01..06-09: March 11-31 is not covered.
-    expect(env.coverage[0].reasons).toContain(SPEND_COVERAGE_REASONS.PERIOD_PARTIALLY_COVERED)
+    // The second import's own rows start 03-01 (some were repeats of the first audit), so March is covered.
+    expect(env.coverage[0].reasons).not.toContain(SPEND_COVERAGE_REASONS.PERIOD_PARTIALLY_COVERED)
+    // Imports end 06-09: June 10-30 is not covered.
+    const june = spendSummary(ctxA, combinedSource().financial, { from: '2026-06-01', to: '2026-06-30' }, NOW)
+    expect(june.result!.gross).toEqual([{ currency: 'USD', amountMinor: 400000 + 129575 }])
+    expect(june.coverage[0].reasons).toContain(SPEND_COVERAGE_REASONS.PERIOD_PARTIALLY_COVERED)
     const jan = spendSummary(ctxA, combinedSource().financial, { from: '2026-01-01', to: '2026-01-31' }, NOW)
     expect(jan.result!.gross).toEqual([{ currency: 'USD', amountMinor: 400000 + 120000 + 31040 }])
     expect(jan.coverage[0].reasons).not.toContain(SPEND_COVERAGE_REASONS.PERIOD_PARTIALLY_COVERED)
@@ -399,12 +403,14 @@ describe('importCoverageSummary', () => {
     expect(result.rejectedRows).toBe(0)
     expect(result.systems).toEqual(['csv'])
     expect(result.coveredDateRange).toEqual({ from: '2026-01-01', to: '2026-06-09' })
-    expect(result.coveredSpans).toEqual([{ from: '2026-01-01', to: '2026-03-10' }, { from: '2026-04-01', to: '2026-06-09' }])
-    expect(result.gaps).toEqual([{ from: '2026-03-11', to: '2026-03-31' }])
+    // Q1 covers 01-01..03-10 and Q2 03-01..06-09 (its repeated March rows count toward its period).
+    expect(result.coveredSpans).toEqual([{ from: '2026-01-01', to: '2026-06-09' }])
+    expect(result.gaps).toEqual([])
     expect(result.crossAuditOverlapRows).toBe(3)
     expect(result.newestImportAt).toBe(Date.UTC(2026, 5, 30))
     expect(env.freshness.stale).toBe(false)
-    expect(env.coverage[0].reasons).toEqual(expect.arrayContaining([SPEND_COVERAGE_REASONS.PERIOD_PARTIALLY_COVERED, COVERAGE_REASONS.CUSTOMER_SUPPLIED_SOURCE]))
+    expect(env.coverage[0].reasons).toContain(COVERAGE_REASONS.CUSTOMER_SUPPLIED_SOURCE)
+    expect(env.coverage[0].reasons).not.toContain(SPEND_COVERAGE_REASONS.PERIOD_PARTIALLY_COVERED)
   })
 
   it('reports rejected rows as a coverage limit', () => {

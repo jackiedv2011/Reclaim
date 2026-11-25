@@ -1,6 +1,6 @@
 # Attention and approval presentation contract (P4)
 
-**Contract 0.1.0 · metric definition `attention-1` · 25 Nov 2026 · CPO workstream · proposal, not a completed integration**
+**Contract 0.1.1 · metric definition `attention-1` · 25 Nov 2026 · CPO workstream · proposal, not a completed integration**
 
 Code: `src/intelligence/attention.ts`, tests `src/intelligence/attention.test.ts` (synthetic fixtures only).
 

@@ -16,7 +16,7 @@
  */
 import type { CaseState } from '../../ledger/caseState.ts'
 import type { APRecord, Finding } from '../../types.ts'
-import { eligiblePotential, verifiedReturned, authorizedOutstanding } from '../../recovery/financials.ts'
+import { eligiblePotential, verifiedReturned, authorizedOutstanding, validSettlements } from '../../recovery/financials.ts'
 import { recoveryNextAction, requiresCustomerAction, recoveryStatusLabel } from '../../recovery/model.ts'
 import { latestVendorPosition, VENDOR_STATUS } from '../../recovery/vendorStatus.ts'
 import { normalizeVendor, parseDate } from '../../lib/format.ts'
@@ -131,16 +131,19 @@ interface Parsed {
   audit: StoredAudit
   env: RawEnvironment
   records: APRecord[]
+  /** The stored rows, index-aligned with `records`, before Date revival. */
+  rawRecords: RawRecord[]
   findings: Finding[]
 }
 
 function parseAudit(audit: StoredAudit): Parsed | null {
   const env = audit.environment as RawEnvironment | null
   if (!env || typeof env !== 'object' || !Array.isArray(env.records) || !Array.isArray(env.result?.findings)) return null
-  const records = env.records.filter((r) => r && typeof r.id === 'string').map(reviveRecord)
+  const rawRecords = env.records.filter((r) => r && typeof r.id === 'string')
+  const records = rawRecords.map(reviveRecord)
   const byId = new Map(records.map((r) => [r.id, r]))
   const findings = env.result!.findings!.filter((f) => f && typeof f.id === 'string').map((f) => reviveFinding(f, byId))
-  return { audit, env, records, findings }
+  return { audit, env, records, rawRecords, findings }
 }
 
 /**
@@ -165,13 +168,17 @@ export function createLegacyAuditSource(tenantId: string, audits: StoredAudit[],
   const sourceRecords: SourceRecord[] = []
   const recordIdentity = new Map<string, string>() // `${auditId}/${recordId}` -> identityKey
   let overlapCount = 0
+  // Every dated row an import brought, including rows another audit already held:
+  // an import covers its own period whether or not its rows are counted again.
+  const importDates = new Map<string, string[]>()
   {
     const seenByIdentity = new Map<string, string>() // identityKey -> auditId that first held it
     for (const p of parsed) {
       const ordinal = new Map<string, number>()
-      for (const record of p.records) {
+      for (const [index, record] of p.records.entries()) {
         const amountMinor = toMinor(record.amountPaid)
-        const raw = record as unknown as RawRecord
+        // Dates come from the stored row, not the revived one, so a missing date stays missing.
+        const raw = p.rawRecords[index]
         const pay = sourceDate(raw, 'payment_date', 'paymentDate')
         const inv = sourceDate(raw, 'invoice_date', 'invoiceDate')
         const vendorKey = record.canonicalVendorId ?? `vendor_${stableHash(normalizeVendor(record.vendor ?? ''))}`
@@ -186,6 +193,10 @@ export function createLegacyAuditSource(tenantId: string, audits: StoredAudit[],
         ordinal.set(base, n)
         const identityKey = `${base}#${n}`
         recordIdentity.set(`${p.audit.id}/${record.id}`, identityKey)
+        if (pay.date) {
+          const key = `${p.audit.id}/${record.importBatchId ?? ''}`
+          importDates.set(key, [...(importDates.get(key) ?? []), pay.date])
+        }
         const first = seenByIdentity.get(identityKey)
         if (first !== undefined && first !== p.audit.id) {
           overlapCount += 1
@@ -235,7 +246,7 @@ export function createLegacyAuditSource(tenantId: string, audits: StoredAudit[],
   const importCoverage: ImportCoverage[] = []
   for (const p of parsed) {
     for (const batch of p.env.imports ?? []) {
-      const dates = sourceRecords.filter((r) => r.auditId === p.audit.id && r.source.importId === batch.id && r.paymentDate).map((r) => r.paymentDate!).sort()
+      const dates = [...(importDates.get(`${p.audit.id}/${batch.id}`) ?? [])].sort()
       importCoverage.push({
         importId: batch.id,
         auditId: p.audit.id,
@@ -308,9 +319,23 @@ export function createLegacyAuditSource(tenantId: string, audits: StoredAudit[],
           const currencies = new Set(finding.relatedRecords.map((r) => normalizeCurrency(r.currency ?? r.quickbooks?.currency ?? null)))
           const currency = finding.currency ? normalizeCurrency(finding.currency) : currencies.size === 1 ? [...currencies][0] : 'UNKNOWN'
           const lastHistoryAt = state?.history?.at(-1)?.at ?? null
-          const next = state && stage !== 'unreviewed'
-            ? { ...recoveryNextAction(state, now, internal), requiresCustomer: requiresCustomerAction(state, now, internal) }
-            : { label: 'Review finding', detail: '', dueAt: null, requiresCustomer: true }
+          const next = !state || stage === 'unreviewed'
+            ? { label: 'Review finding', dueAt: null, requiresCustomer: true }
+            : stage === 'needs_info'
+              ? { label: 'Provide information', dueAt: null, requiresCustomer: true }
+              : stage === 'dismissed'
+                ? { label: 'No action needed', dueAt: null, requiresCustomer: false }
+                : !state.recoveryStage
+                  ? { label: 'Start recovery review', dueAt: null, requiresCustomer: true }
+                  : { ...recoveryNextAction(state, now, internal), requiresCustomer: requiresCustomerAction(state, now, internal) }
+          // Same rule as selectors.vendorCommitments: what the latest commitment still covers.
+          let promisedOutstandingMinor: number | null = null
+          if (state && position && VENDOR_STATUS[position.status].agreed) {
+            const remaining = authorizedOutstanding(state)
+            const returnedSince = validSettlements(state).filter((e) => (e.requestGeneration ?? 1) === (state.activeRequestGeneration ?? 1) && e.settledAt >= position.at).reduce((sum, e) => sum + e.amount, 0)
+            const amount = position.amount === undefined ? (position.status === 'accepted' ? remaining : 0) : Math.min(remaining, Math.max(0, position.amount - returnedSince))
+            promisedOutstandingMinor = toMinor(amount)
+          }
           out.push({
             caseId: `${p.audit.id}/${finding.id}`,
             auditId: p.audit.id,
@@ -320,6 +345,9 @@ export function createLegacyAuditSource(tenantId: string, audits: StoredAudit[],
             vendor: { displayName: finding.vendor, vendorKey: finding.relatedRecords[0]?.canonicalVendorId ?? `vendor_${stableHash(normalizeVendor(finding.vendor ?? ''))}` },
             currency,
             stage,
+            recoveryStage: state?.recoveryStage ?? null,
+            classification: finding.classification ?? null,
+            suppressed: Boolean(finding.suppressionReason),
             isClaim: !NOT_A_CLAIM_TYPES.has(finding.type) && !internal,
             flaggedMinor: toMinor(finding.flaggedAmount ?? finding.dollarImpact),
             supportedPotentialMinor: potential === null ? null : toMinor(potential),
@@ -327,6 +355,11 @@ export function createLegacyAuditSource(tenantId: string, audits: StoredAudit[],
             approvedAt: state?.approvedAt ?? null,
             requestedAt: state?.recoveryRequestedAt ?? null,
             promisedMinor,
+            promisedOutstandingMinor,
+            latestVendorStatus: position?.status ?? null,
+            contactHold: Boolean(state?.contactHold),
+            requiresRevalidation: Boolean(state?.requiresRevalidation || finding.requiresRevalidation),
+            activeRequestGeneration: state?.activeRequestGeneration ?? 1,
             customerRecordedReturnMinor: toMinor(recorded),
             matchedReturnMinor: null,
             outstandingMinor: state ? toMinor(authorizedOutstanding(state)) : 0,

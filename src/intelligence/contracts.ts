@@ -22,7 +22,7 @@
  *    anything or calls an external model.
  */
 
-export const INTELLIGENCE_CONTRACT_VERSION = '0.1.0' as const
+export const INTELLIGENCE_CONTRACT_VERSION = '0.1.1' as const
 
 // ---------------------------------------------------------------- tenancy
 
@@ -99,6 +99,22 @@ export const COVERAGE_REASONS = {
   UPSTREAM_CONTRACT_PENDING: 'upstream_contract_pending',
   STALE_SOURCE: 'stale_source',
   REJECTED_ROWS: 'rejected_rows',
+  // Registered from the read-model modules (v0.1.1). Add, never repurpose.
+  UNREADABLE_SAVED_AUDIT: 'unreadable_saved_audit',
+  PERIOD_NOT_COVERED: 'period_not_covered',
+  PERIOD_PARTIALLY_COVERED: 'period_partially_covered',
+  GATE_CURRENCY_UNSUPPORTED: 'gate_currency_unsupported',
+  PROMISE_RETURN_ORDER_UNKNOWN: 'promise_return_order_unknown',
+  SEND_STATE_NOT_IN_SNAPSHOT: 'send_state_not_in_snapshot',
+  REVALIDATION_NOT_IN_SNAPSHOT: 'revalidation_not_in_snapshot',
+  REVISION_UNKNOWN: 'revision_unknown',
+  UNMAPPED_CASE_STATE: 'unmapped_case_state',
+  TOO_FEW_PAYMENTS: 'too_few_payments',
+  TOO_FEW_COVERED_MONTHS: 'too_few_covered_months',
+  SEASONAL_MODEL_NOT_IMPLEMENTED: 'seasonal_model_not_implemented',
+  NON_POSITIVE_MEDIAN: 'non_positive_median',
+  WINDOW_NOT_COVERED: 'window_not_covered',
+  VENDOR_NOT_FOUND: 'vendor_not_found',
 } as const
 
 export interface Exclusion {
@@ -230,6 +246,12 @@ export interface CaseSnapshot {
   vendor: { displayName: string; vendorKey: string }
   currency: CurrencyCode
   stage: CaseStageView
+  /** The raw recovery stage; null before a recovery or internal review starts (stage then reflects the decision). */
+  recoveryStage: 'confirmed' | 'requested' | 'recovered' | 'not_recovered' | null
+  /** The evidence gate's classification (`recovery_candidate`, `review_needed`, ...); null on older audits. */
+  classification: string | null
+  /** The detector suppressed this signal (e.g. recurring or explained); it is not flagged for review. */
+  suppressed: boolean
   /** True when the case is a vendor recovery; false for internal reviews and non-claim checks. */
   isClaim: boolean
   /** Rule exposure (flagged value). Never money owed. */
@@ -242,6 +264,16 @@ export interface CaseSnapshot {
   requestedAt: number | null
   /** Latest supplier statement of intent with an amount; not money. */
   promisedMinor: number | null
+  /**
+   * The part of the latest supplier commitment not yet covered by returns
+   * recorded after it (same rule as selectors.vendorCommitments). Not money.
+   */
+  promisedOutstandingMinor: number | null
+  /** Latest real supplier position code (VendorUpdateStatus), ignoring our own follow-ups. */
+  latestVendorStatus: string | null
+  contactHold: boolean
+  requiresRevalidation: boolean
+  activeRequestGeneration: number
   /** Structurally valid customer-entered settlements (financials.validSettlements). Not bank-matched. */
   customerRecordedReturnMinor: number
   /** Always null until Sid's return-match contract exists. */

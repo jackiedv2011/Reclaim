@@ -1,6 +1,6 @@
 # Product-intelligence metric definitions
 
-**Owner:** CPO workstream (Aditya) · **Contract:** `src/intelligence/contracts.ts` `0.1.0` · **Document version:** 0.1 (25 November 2026)
+**Owner:** CPO workstream (Aditya) · **Contract:** `src/intelligence/contracts.ts` `0.1.1` · **Document version:** 0.1 (25 November 2026)
 **Status:** proposal. The spending semantics below are a CPO proposal **pending CTO (Sid) agreement**; the recovery semantics consume Jagan's case model through `CaseReadPort` and are pending his review. Nothing here is a customer-facing claim, and nothing here has been validated on real customer data.
 
 Every read model returns a `ReadModelEnvelope` whose `metricDefinitionVersion` names the version of the definitions in this file. **Any change to what a figure means bumps that version** and adds a row to the changelog at the bottom. Code: `src/intelligence/spend.ts` (`spend-v0.1`) and `src/intelligence/recoveryVisibility.ts` (`recovery-v0.1`).
@@ -118,10 +118,10 @@ Why: a recorded return is the most informative state; an open request outranks a
 
 | Figure | Definition (rule) | One-sentence definition shipped to the UI (`RECOVERY_DEFINITIONS`) |
 |---|---|---|
-| `flaggedForReview` | Open, stage `unreviewed` or `needs_info`, evidence gate not passed (`supportedPotentialMinor` null), finding type not `bank_account_change`, `unclaimed_discount` or `missed_discount`. Amount: `flaggedMinor`. | Open checks in the covered records that have not passed the evidence review; the amount is what the check flagged, not money a supplier owes. |
+| `flaggedForReview` | Same rule as `selectors.isFlaggedForReview`: gate classification `review_needed`, not suppressed by the detector, not dismissed, no recovery or internal review started. Audits saved before classification existed fall back to: stage `unreviewed` or `needs_info`, gate not passed, type not `bank_account_change`, `unclaimed_discount` or `missed_discount` (coverage `upstream_contract_pending`). Amount: `flaggedMinor`. | Open checks in the covered records that have not passed the evidence review; the amount is what the check flagged, not money a supplier owes. |
 | `supportedPotential` | Open cases with a supported potential: `max(0, supportedPotentialMinor − customerRecordedReturnMinor)`. | For open cases whose evidence review passed, the supported amount minus any returns you recorded; the most a request could ask for, not a forecast. |
 | `approvedOutstanding` | Vendor cases (`isClaim`) with `approvedAt`, stage `confirmed` or `requested`: `outstandingMinor` (approved request minus returns recorded against the active request). | For supplier requests you approved that are still open, the approved amount not yet covered by a return you recorded. |
-| `promised` | Vendor cases at stage `requested` whose latest supplier position agreed an amount: `min(promisedMinor, outstandingMinor)`, counted when > 0. | The latest amount a supplier said it would return on an open request, capped at what is still outstanding; a statement, not money received. |
+| `promised` | Vendor cases at stage `requested` whose latest supplier position agreed: `promisedOutstandingMinor` (same rule as `vendorCommitments`: the stated amount minus returns recorded since, capped at outstanding; a full acceptance without an amount counts the outstanding balance), counted when > 0. | What a supplier said it would still return on an open request; a statement, not money received. |
 | `customerRecordedReturns` | Every kept case (any stage) with `customerRecordedReturnMinor > 0` (structurally valid settlements, `financials.validSettlements`). | Refunds and applied credits you recorded with a reference; they have not been matched to a bank or accounting record. |
 | `matchedReturns` | `null` while `ReturnMatchPort.available` is false (coverage `matched_returns`: `not_run` / `no_independent_return_matching`). When available: verified matches per currency, attributed to the kept case, each distinct match counted once even if reported against two copies; proposed / ambiguous / reversed matches are counted in `returnMatching` but add no money. Matches for cases not visible here are ignored with warning `return_match_unknown_case`. | Returns independently matched to a bank or accounting record; not available yet, so shown as unavailable rather than zero. |
 | `partialReturns` (count) | Stage `requested` with a customer-recorded return > 0. | Open supplier requests where you recorded part of the money coming back. |
@@ -129,7 +129,7 @@ Why: a recorded return is the most informative state; an open request outranks a
 | `needingCustomerAction` (count) | `nextAction.requiresCustomer` (includes unreviewed checks). | Cases where the next step is yours, including checks you have not reviewed yet. |
 | `byStage`, `claims`, `nonClaims`, `dismissed` | Counts over kept snapshots. | — |
 
-Coverage items: `recovery_cases` (source reasons, `no_data`, `missing_currency`, `mixed_currency`), `flagged_for_review` (always `upstream_contract_pending`, see difference 1), `supported_potential` (`gate_currency_unsupported` when an open case is not USD: the evidence gate supports USD only), `promised` (`promise_return_order_unknown` when a request has both a promise and a recorded return), `matched_returns`.
+Coverage items: `recovery_cases` (source reasons, `no_data`, `missing_currency`, `mixed_currency`), `flagged_for_review` (`upstream_contract_pending` only for audits saved before classification), `supported_potential` (`gate_currency_unsupported` when an open case is not USD: the evidence gate supports USD only), `promised` (`promise_return_order_unknown` only if a snapshot lacks `promisedOutstandingMinor`), `matched_returns`.
 
 `recoveryByVendor` gives the same figures and counts per vendor key (display name = most frequent case vendor name, ties alphabetical), ordered by cases needing customer action (desc), case count (desc), vendor key; paginated as above.
 
@@ -139,10 +139,10 @@ Freshness basis: newest case activity (`CaseSnapshot.updatedAt`) unless the call
 
 The tests in `recoveryVisibility.test.ts` cross-check against `ladder()`, `vendorCommitments()` and `recoveryAging()` on single-audit fixtures where the semantics agree (flagged USD, supported potential = `ladder.potential`, approved outstanding = `ladder.inRecovery`, customer-recorded = `ladder.recoveredByCurrency.USD`, promised = `vendorCommitments.confirmed` when the promise precedes the return). Where they differ:
 
-1. **Suppressed signals (forced).** `isFlaggedForReview` excludes findings with a detector `suppressionReason`; `CaseSnapshot` does not carry it, so `flaggedForReview` may include them. Coverage `flagged_for_review` says `upstream_contract_pending`. A decision `confirmed` with no recovery stage (old states) is also indistinguishable from stage `confirmed` and is not counted as flagged here, while the ladder counts it.
+1. **Suppressed signals (resolved in contract 0.1.1).** `CaseSnapshot` now carries `classification`, `suppressed` and the raw `recoveryStage`, so flagged-for-review uses the selector's rule. Only audits saved before classification existed use the documented fallback.
 2. **Exposure currency (intentional).** `exposureCurrencyOf` reads a row with no currency as USD. Here such a case stays `UNKNOWN` with `missing_currency`, per the shared rule that unknown currency is never assumed.
 3. **Approved outstanding (intentional).** `ladder.inRecovery` requires the evidence gate to pass now (or a superseded finding). Here any vendor case (`isClaim`, the same test as `selectors.recoveries()`) with an approved, open request counts, which agrees with `recoveryAging()` and `vendorCommitments()`. Example: an approved duplicate request whose evidence was never attested shows its outstanding balance here and in `recoveryAging`, but not in `ladder.inRecovery`.
-4. **Promised (forced).** `vendorCommitments()` subtracts returns recorded *after* the promise. A snapshot has no settlement dates, so v0.1 caps the latest stated amount at the outstanding balance instead and flags `promise_return_order_unknown` when both exist. Example: request 1,410.25, promise 500.00, then 400.00 recorded → here 500.00, `vendorCommitments` 100.00.
+4. **Promised (resolved in contract 0.1.1).** The adapter computes `promisedOutstandingMinor` with the `vendorCommitments()` rule, so promise 500.00 then 400.00 recorded reads 100.00 in both.
 5. **Account-wide.** The selectors work on one audit; these models deduplicate across audits.
 
 ### What these figures are not
@@ -151,7 +151,7 @@ None of them is money the business is owed, a forecast, or "total savings". They
 
 ### Open questions (recovery)
 
-- Jagan: add `classification`/`suppressed` and the promise-vs-settlement order (or a `promisedOutstandingMinor` computed like `vendorCommitments`) to the case read contract (see report / interface requests J-1).
+- Jagan: carry `classification`, `suppressed`, `recoveryStage` and `promisedOutstandingMinor` (added to `CaseSnapshot` in 0.1.1) in the real case read service (J-1).
 - Jagan: confirm the stage rank used to fold cross-audit copies, or provide one case identity across audits.
 - Sid: return matching (S-5) to fill `matchedReturns`; how a reversed match affects a customer-recorded return.
 
