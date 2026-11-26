@@ -1,4 +1,4 @@
-import type { Finding } from '@/types'
+import type { Finding } from '../types.ts'
 import { evaluateEligibility } from '../recovery/eligibility.ts'
 
 export function reviewMetadata(finding: Finding, createdAt = Date.now()): Finding {

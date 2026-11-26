@@ -1,9 +1,9 @@
 import Papa from 'papaparse'
-import type { ImportReading } from '@/types'
-import { numericDateParts, parseDate, parseMoney, type AmountStyle, type DateOrder } from '@/lib/format'
+import type { ImportReading } from '../types.ts'
+import { numericDateParts, parseDate, parseMoney, type AmountStyle, type DateOrder } from './format.ts'
 
 /** Header spellings seen in QuickBooks, Xero, Bill and hand-built AP exports, after headingKey. These import with nothing to confirm. */
-const COLUMN_ALIASES: Record<string, CsvField> = {
+export const COLUMN_ALIASES: Record<string, CsvField> = {
   vendor: 'vendor',
   vendor_name: 'vendor',
   supplier: 'vendor',

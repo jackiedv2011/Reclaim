@@ -280,7 +280,8 @@ export function AuditApp() {
           setProject(saved)
           if (input.mode === 'upload') rememberUpload(input.parsed.records, saved.id)
           // This audit is now the one signing in keeps current with that QuickBooks company.
-          if (input.quickbooks && account) void linkQuickBooksAudit(saved.id).then(() => quickBooksRecheck.current?.())
+          // The server links only audits it already holds, so the save goes first.
+          if (input.quickbooks && account) void projectSync.flush().then(() => linkQuickBooksAudit(saved.id)).then(() => quickBooksRecheck.current?.())
           refreshProjects()
           // A new audit counts against the plan once the server has it.
           if (!current || options.replaceEnvironment) void projectSync.flush().then(() => auth?.refreshEntitlements())

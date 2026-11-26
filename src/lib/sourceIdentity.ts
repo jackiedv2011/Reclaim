@@ -1,5 +1,5 @@
-import type { APRecord, SourceProvenance } from '@/types'
-import { canonicalCurrency, isoDay, normalizeVendor, toCents } from './format'
+import type { APRecord, SourceProvenance } from '../types.ts'
+import { canonicalCurrency, isoDay, normalizeVendor, toCents } from './format.ts'
 
 /** SHA-256 over UTF-8. Synchronous because CSV parsing and ledger merges are synchronous. */
 export function checksum(value: string): string {

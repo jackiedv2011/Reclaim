@@ -1,4 +1,4 @@
-import type { APRecord, Finding, FindingClass, DetectionResult } from '@/types'
+import type { APRecord, Finding, FindingClass, DetectionResult } from '../types.ts'
 import { normalizeVendor, normalizeAccountLast4, daysBetween, parseTerms, formatCurrency, formatDate, plural, toCents, type ParsedTerms } from './format.ts'
 import { normalizeReference, referenceKey, referenceStrength } from './sourceIdentity.ts'
 import { nearIdenticalVendorNames } from './vendorResolution.ts'

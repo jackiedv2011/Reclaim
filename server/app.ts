@@ -20,6 +20,8 @@ import { authorizedDraftFacts } from './caseFacts.ts'
 import { createBilling } from './billing.ts'
 import { createStripeClient, type StripeApi } from './stripe.ts'
 import { createGmailClient, createGmailRoutes, type GmailClient } from './gmail.ts'
+import { createLedgerRoutes } from './ledgerRoutes.ts'
+import { resealLedger } from './ledger.ts'
 import { OnboardingProfileSchema } from './onboarding.ts'
 import { serveStatic } from './staticFiles.ts'
 
@@ -61,6 +63,8 @@ export function createApp(deps: AppDependencies): App {
   const projects = new ProjectStore(db, config.dataKeys)
   const sealedNow = projects.migrate()
   if (sealedNow) console.log(`  encrypted ${sealedNow} stored audits at rest`)
+  const sealedLedger = resealLedger(db, config.dataKeys)
+  if (sealedLedger) console.log(`  sealed ${sealedLedger} server ledger rows at rest`)
   const caseCommands = new CaseCommands(db, projects)
   caseCommands.migrateLegacy()
   const mailer = deps.mailer ?? (config.resend ? new ResendMailer(config.resend.apiKey, config.resend.from) : config.gmail ? new GmailMailer(config.gmail.user, config.gmail.appPassword) : new DevMailer(db))
@@ -153,6 +157,8 @@ export function createApp(deps: AppDependencies): App {
   const limit = (limiter: RateLimiter, key: string) => {
     if (!limiter.check(key)) throw new HttpError(429, `Too many attempts. Wait ${waits.get(limiter) ?? 'an hour'} and try again.`, 'rate_limited')
   }
+  const ledgerImportLimiter = new RateLimiter(60, 60 * 60 * 1000)
+  const ledgerRoutes = createLedgerRoutes({ db, keys: config.dataKeys, enabled: config.serverLedger === true, requireUser, requireJson, limitImport: (userId) => limit(ledgerImportLimiter, `ledger-import:${userId}`) })
 
   // QuickBooks Online (GET-only adapter, write-capable OAuth scope; sandbox or production per QBO_ENVIRONMENT). Tokens are sealed at rest under a
   // key from the environment; they are never logged and never sent to the browser.
@@ -438,6 +444,8 @@ export function createApp(deps: AppDependencies): App {
       const { auditId } = await req.json<{ auditId?: unknown }>()
       if (typeof auditId !== 'string' || !/^[\w-]{1,100}$/.test(auditId)) throw new HttpError(400, 'Send the audit to link.')
       if (!qboConnection(user.id)) throw new HttpError(409, 'Connect QuickBooks first.', 'quickbooks_not_connected')
+      // Only an audit this account has saved on the server can be linked (audit S8).
+      if (!db.prepare('SELECT 1 FROM projects WHERE user_id = ? AND id = ?').get(user.id, auditId)) throw new HttpError(404, 'That audit was not found.', 'audit_not_found')
       db.prepare("UPDATE integration_connections SET linked_project_id = ? WHERE user_id = ? AND provider = 'quickbooks'").run(auditId, user.id)
       return json(200, { ok: true, linkedAuditId: auditId })
     }
@@ -656,6 +664,9 @@ export function createApp(deps: AppDependencies): App {
 
     const gmailResponse = await gmailRoutes.route(req)
     if (gmailResponse) return gmailResponse
+
+    const ledgerResponse = await ledgerRoutes.route(req)
+    if (ledgerResponse) return ledgerResponse
 
     if (path.startsWith('/api/')) throw new HttpError(404, 'Not found.')
 

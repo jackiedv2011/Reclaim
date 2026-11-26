@@ -58,6 +58,11 @@ export interface ServerConfig {
    * the webhook refuses every event.
    */
   stripe: { secretKey: string; webhookSecret: string | null } | null
+  /**
+   * Server-authoritative ledger API (/api/ledger/*, server/ledgerRoutes.ts).
+   * Off unless RECLAIM_SERVER_LEDGER=true; off, the browser ledger is the only path.
+   */
+  serverLedger?: boolean
 }
 
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -113,6 +118,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ServerConfi
     dataKeys: dataKeysConfig(env),
     trustProxy: trustProxyConfig(env.TRUST_PROXY),
     gmailSend: gmailSendConfig(env, google),
+    serverLedger: env.RECLAIM_SERVER_LEDGER === 'true',
   }
 }
 

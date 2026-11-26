@@ -1,8 +1,11 @@
-import type { APRecord, ImportReading, ParseResult, ImportRowResult } from '@/types'
-import { canonicalCurrency, isoDay, numericDateParts, parseDate, parseMoney, normalizeVendor, type AmountStyle, type DateOrder } from '@/lib/format'
-import { columnCount, columnName, dateOrderEvidence, headingsOf, isBlankRow, readCsvTable, recognizedColumns, recognizedField, sameColumns, styleAt, uniqueKeys, type ColumnMap, type CsvField, type CsvTable } from '@/lib/csvMapping'
-import { resolveVendors } from '@/lib/vendorResolution'
-import { checksum, normalizeReference, vendorTransformations, recordIdentity } from './sourceIdentity'
+import type { APRecord, ImportReading, ParseResult, ImportRowResult } from '../types.ts'
+import { canonicalCurrency, isoDay, numericDateParts, parseDate, parseMoney, normalizeVendor, type AmountStyle, type DateOrder } from './format.ts'
+import { columnCount, columnName, dateOrderEvidence, headingsOf, isBlankRow, readCsvTable, recognizedColumns, recognizedField, sameColumns, styleAt, uniqueKeys, type ColumnMap, type CsvField, type CsvTable } from './csvMapping.ts'
+import { resolveVendors } from './vendorResolution.ts'
+import { checksum, normalizeReference, vendorTransformations, recordIdentity } from './sourceIdentity.ts'
+
+/** The heading spellings the importer recognises. src/ingestion/columnMapping.ts reads them from here. */
+export { COLUMN_ALIASES } from './csvMapping.ts'
 
 export interface ParseOptions {
   /** Position of the heading row. Found automatically when not given. */
