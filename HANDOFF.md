@@ -1,6 +1,6 @@
 # Reclaim — handoff for a fresh session
 
-Project: `/Users/jaganvenkatraman/Documents/AP Leak Finder` (GitHub: `jackiedv2011/AP-Leak-Finder`, branch `main`). Updated 2026-09-24.
+Project: `/Users/jaganvenkatraman/Documents/Reclaim` (GitHub: `jackiedv2011/Reclaim`, branch `main`). Updated 2026-09-24.
 
 ## 0. Read this first — nothing from the last session is committed
 
@@ -12,7 +12,7 @@ Project: `/Users/jaganvenkatraman/Documents/AP Leak Finder` (GitHub: `jackiedv20
 ## 1. Run it and check it
 
 ```bash
-cd "/Users/jaganvenkatraman/Documents/AP Leak Finder"
+cd "/Users/jaganvenkatraman/Documents/Reclaim"
 npm run dev:server     # API — reads ./.env (PORT=8790 on this Mac)
 npm run dev            # Vite — VITE_PORT=5174, proxies /api to the API
 ```

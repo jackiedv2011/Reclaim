@@ -45,9 +45,9 @@ export default defineConfig(({ mode }) => {
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
-    // The preview copy is a historical snapshot with obsolete expectations.
+    // Agent worktrees are other checkouts of this repo: their tests are not this branch's.
     // Keep the active repository suite serial to avoid worker OOM on Windows.
-    exclude: ['**/node_modules/**', '**/dist/**', '**/restore-backup-*/**', '**/.preview-pre-v2/**', '**/experiments/**'],
+    exclude: ['**/node_modules/**', '**/dist/**', '**/restore-backup-*/**', '**/experiments/**', '**/.claude/**'],
     maxWorkers: 1,
     fileParallelism: false,
   },

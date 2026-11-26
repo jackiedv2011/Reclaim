@@ -34,7 +34,7 @@ export default {
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
         },
-        // AP Leak Finder brand palette
+        // Reclaim brand palette
         ink: '#14213D',
         recoverable: '#0F7A4D',
         review: '#B7791F',
