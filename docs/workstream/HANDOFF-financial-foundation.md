@@ -22,7 +22,7 @@ Everything below was verified **locally on synthetic data only**. Nothing was de
 | `2e618c1` | Job contract unified with the handlers; fixes for review findings 1–6 (§13) |
 | *(docs)* | This handoff and the final progress ledger |
 
-Diff against base: 55 files changed, about 11.4k lines added, 14 removed (largely new modules, tests and fixtures). Run `git diff --stat b27ee30..workstream/financial-foundation` for the exact list.
+Diff against base: 56 files changed, about 11.9k lines added, 14 removed (largely new modules, tests and fixtures). Run `git diff --stat b27ee30..workstream/financial-foundation` for the exact list.
 
 ## 2. Changed files
 
