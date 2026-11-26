@@ -126,6 +126,9 @@ const activeOwners = (db: DatabaseSync, orgId: string) =>
  * away ownership; admins manage the other roles. The last owner cannot be
  * demoted. A revoked member added again gets a fresh membership.
  */
+const personalUserId = (db: DatabaseSync, orgId: string) =>
+  (db.prepare('SELECT personal_user_id FROM organizations WHERE id = ?').get(orgId) as { personal_user_id: string | null } | undefined)?.personal_user_id ?? null
+
 export function setMemberRole(db: DatabaseSync, ctx: TenantContext, userId: string, role: TenantRole, now = Date.now()): void {
   requirePermission(ctx, 'members:manage')
   if (!TENANT_ROLES.includes(role)) throw new TenantAccessError(403, 'Unknown role.', 'invalid_role')
@@ -135,6 +138,9 @@ export function setMemberRole(db: DatabaseSync, ctx: TenantContext, userId: stri
   if (touchesOwner && ctx.role !== 'owner') throw new TenantAccessError(403, 'Only an owner can change ownership.', 'permission_denied')
   if (current?.revoked_at === null && current.role === 'owner' && role !== 'owner' && activeOwners(db, ctx.tenantId) <= 1) {
     throw new TenantAccessError(403, 'An organisation needs at least one owner.', 'last_owner')
+  }
+  if (role !== 'owner' && personalUserId(db, ctx.tenantId) === userId) {
+    throw new TenantAccessError(403, 'The account that owns a personal organisation stays its owner.', 'personal_owner')
   }
   db.prepare(`INSERT INTO memberships (org_id, user_id, role, created_at) VALUES (?, ?, ?, ?)
     ON CONFLICT (org_id, user_id) DO UPDATE SET role = excluded.role,
@@ -149,7 +155,6 @@ export function revokeMember(db: DatabaseSync, ctx: TenantContext, userId: strin
   if (!current) throw new TenantAccessError(404, 'Member not found.', 'member_not_found')
   if (current.role === 'owner' && ctx.role !== 'owner') throw new TenantAccessError(403, 'Only an owner can remove an owner.', 'permission_denied')
   if (current.role === 'owner' && activeOwners(db, ctx.tenantId) <= 1) throw new TenantAccessError(403, 'An organisation needs at least one owner.', 'last_owner')
-  const personal = db.prepare('SELECT personal_user_id FROM organizations WHERE id = ?').get(ctx.tenantId) as { personal_user_id: string | null } | undefined
-  if (personal?.personal_user_id === userId) throw new TenantAccessError(403, 'The account that owns a personal organisation cannot be removed from it.', 'personal_owner')
+  if (personalUserId(db, ctx.tenantId) === userId) throw new TenantAccessError(403, 'The account that owns a personal organisation cannot be removed from it.', 'personal_owner')
   db.prepare('UPDATE memberships SET revoked_at = ? WHERE org_id = ? AND user_id = ?').run(now, ctx.tenantId, userId)
 }

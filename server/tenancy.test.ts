@@ -112,6 +112,12 @@ describe('tenant context', () => {
     expect(code(() => revokeMember(db, owner, 'alice'))).toBe('403 last_owner')
     setMemberRole(db, owner, 'bob', 'owner')
     expect(code(() => revokeMember(db, owner, 'alice'))).toBe('403 personal_owner')
+    // Another owner can't demote the personal account either; a demotion would leave alice unable to manage her own org.
+    const bob = tenantContextFor(db, 'bob', owner.tenantId)
+    expect(code(() => setMemberRole(db, bob, 'alice', 'viewer'))).toBe('403 personal_owner')
+    expect(code(() => setMemberRole(db, owner, 'alice', 'admin'))).toBe('403 personal_owner')
+    expect(code(() => setMemberRole(db, owner, 'alice', 'owner'))).toBe('ok')
+    expect(code(() => setMemberRole(db, bob, 'bob', 'admin'))).toBe('ok')
     expect(code(() => revokeMember(db, owner, 'nobody'))).toBe('404 member_not_found')
     expect(code(() => setMemberRole(db, owner, 'nobody', 'member'))).toBe('404 account_not_found')
   })

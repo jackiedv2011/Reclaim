@@ -79,6 +79,21 @@ describe('reconcileSupplierCredits', () => {
     expect(row.appliedMinor).toBe(0)
   })
 
+  it('keeps two tenants apart when their credits, applications and reversals share ids', () => {
+    const rows = reconcileSupplierCredits({
+      credits: [syntheticCredit({ id: '12', amountMinor: 100 }), syntheticCredit({ id: '12', tenantId: SYNTH_TENANT_B, amountMinor: 200 })],
+      applications: [
+        syntheticApplication({ id: 'a1', creditId: '12', amountMinor: 40 }),
+        syntheticApplication({ id: 'a1', creditId: '12', tenantId: SYNTH_TENANT_B, amountMinor: 50 }),
+      ],
+      reversals: [], coverage: SYNTHETIC_FULL_COVERAGE,
+    })
+    expect(rows.map((r) => [r.tenantId, r.issuedMinor, r.appliedMinor, r.remainingMinor, r.status, r.reasons])).toEqual([
+      ['synthetic-tenant-a', 100, 40, 60, 'computed', []],
+      ['synthetic-tenant-b', 200, 50, 150, 'computed', []],
+    ])
+  })
+
   it('reports unknown amounts and currency instead of treating them as zero', () => {
     const rows = reconcileSupplierCredits({
       credits: [syntheticCredit({ amountMinor: null }), syntheticCredit({ id: 'c-nocur', currency: null })], applications: [], reversals: [], coverage: SYNTHETIC_FULL_COVERAGE,

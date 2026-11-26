@@ -16,8 +16,9 @@ import type { DatabaseSync } from 'node:sqlite'
 import { QuickBooksRateLimitError, QuickBooksReconnectError, QuickBooksUnauthorizedError, syncLedger, type QuickBooksClient } from './quickbooks.ts'
 import { LedgerError, deriveFindings, importQuickBooksPull, type LedgerKeys } from './ledger.ts'
 import { TenantAccessError, requirePermission, tenantContextFor } from './tenancy.ts'
+import { FINANCIAL_CONTRACT_VERSION, type TenantContext, type JobAuditEvent, type JobCheckpoint, type JobErrorCode, type JobHandler, type JobOutcome, type JobRequest } from '../src/contracts/financial.ts'
 
-export const LEDGER_JOB_CONTRACT_VERSION = '0.1.0'
+export const LEDGER_JOB_CONTRACT_VERSION = FINANCIAL_CONTRACT_VERSION
 
 export function ensureLedgerSyncSchema(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS ledger_sync_state (
@@ -90,8 +91,17 @@ const toState = (r: SyncRow): SyncState => ({
   consecutiveFailures: r.consecutive_failures,
 })
 
-/** Sync state for one QuickBooks company, readable by anyone who can read the tenant's ledger. */
-export function getSyncState(db: DatabaseSync, tenantId: string, realmId: string): SyncState | null {
+/**
+ * Sync state for one QuickBooks company, readable by anyone who can read the
+ * tenant's ledger. The tenant comes from the server-derived context, never
+ * from the caller.
+ */
+export function getSyncState(db: DatabaseSync, ctx: TenantContext, realmId: string): SyncState | null {
+  requirePermission(ctx, 'ledger:read')
+  return readSyncState(db, ctx.tenantId, realmId)
+}
+
+function readSyncState(db: DatabaseSync, tenantId: string, realmId: string): SyncState | null {
   const row = db.prepare("SELECT * FROM ledger_sync_state WHERE tenant_id = ? AND source_system = 'quickbooks' AND account_ref = ?").get(tenantId, realmId) as SyncRow | undefined
   return row ? toState(row) : null
 }
@@ -114,55 +124,14 @@ function markFailed(db: DatabaseSync, tenantId: string, realmId: string, now: nu
 
 // ------------------------------------------------------------------ job contract
 
+// The types are the shared contract's (src/contracts/financial.ts); these
+// aliases only narrow the operation to the two this workstream provides.
 export type LedgerJobOperation = 'quickbooks.sync' | 'ledger.scan'
-
-/** Bounded error codes: the only failure detail that leaves a handler. */
-export type SyncErrorCode =
-  | 'permission_denied'
-  | 'invalid_request'
-  | 'reconnect_required'
-  | 'token_rejected'
-  | 'rate_limited'
-  | 'provider_error'
-  | 'storage_rejected'
-  | 'retries_exhausted'
-
-export interface LedgerJobRequest {
-  tenantId: string
-  /** The member the job runs as; their current role is re-checked on every attempt. */
-  actorUserId: string
-  operation: LedgerJobOperation
-  /** Same key, same logical job: a completed key is not run again. */
-  idempotencyKey: string
-  /** 1 for the first attempt. */
-  attempt: number
-  payload: Record<string, unknown>
-}
-
-export interface JobAuditEvent {
-  contractVersion: string
-  tenantId: string
-  actorUserId: string
-  operation: LedgerJobOperation
-  idempotencyKey: string
-  attempt: number
-  outcome: 'succeeded' | 'already_completed' | 'retry' | 'failed'
-  at: number
-  counts: Record<string, number>
-  errorCode: SyncErrorCode | null
-}
-
-export type JobCheckpoint = Record<string, string | number | null>
-
-export type LedgerJobOutcome =
-  | { status: 'succeeded'; checkpoint: JobCheckpoint; audit: JobAuditEvent }
-  | { status: 'retry'; retryAfterMs: number; errorCode: SyncErrorCode; audit: JobAuditEvent }
-  | { status: 'failed'; errorCode: SyncErrorCode; audit: JobAuditEvent }
-
-export interface LedgerJobHandler {
-  operation: LedgerJobOperation
-  run(request: LedgerJobRequest, now?: number): Promise<LedgerJobOutcome>
-}
+export type SyncErrorCode = JobErrorCode
+export type LedgerJobRequest = JobRequest<LedgerJobOperation>
+export type LedgerJobOutcome = JobOutcome
+export type LedgerJobHandler = JobHandler<LedgerJobOperation>
+export type { JobAuditEvent, JobCheckpoint }
 
 /** Attempts before a retryable error becomes a failure. The runner may stop sooner. */
 export const MAX_ATTEMPTS = 5
@@ -234,7 +203,7 @@ export function quickBooksSyncHandler(deps: QuickBooksSyncDeps): LedgerJobHandle
       if (done) return { status: 'succeeded', checkpoint: done, audit: audit(req, 'already_completed', now) }
 
       markRequested(deps.db, ctx.tenantId, realmId, now)
-      const since = getSyncState(deps.db, ctx.tenantId, realmId)?.cursorSince ?? null
+      const since = readSyncState(deps.db, ctx.tenantId, realmId)?.cursorSince ?? null
       let code: SyncErrorCode
       let retryable: boolean
       try {

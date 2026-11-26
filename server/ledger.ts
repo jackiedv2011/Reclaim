@@ -106,6 +106,10 @@ export function ensureLedgerSchema(db: DatabaseSync): void {
 // ------------------------------------------------------------------ at-rest protection
 
 const isSealed = (value: string) => value.startsWith('v1.')
+const scopedChecksum = (scope: string | null | undefined, fileChecksum: string) => (scope ? scope + '|' + fileChecksum : fileChecksum)
+/** The scope an import's file hash was computed with; older details carry only the connector realm. */
+const importScope = (d: ImportDetail) =>
+  d.identityScope !== undefined ? d.identityScope : d.connector?.system === 'quickbooks' ? `qbo:${d.connector.realmId}` : null
 const recordContext = (tenantId: string, id: string) => `ledger-record:${tenantId}:${id}`
 const importContext = (tenantId: string, id: string) => `ledger-import:${tenantId}:${id}`
 
@@ -155,6 +159,8 @@ type StoredEngineRecord = Omit<APRecord, 'invoiceDate' | 'paymentDate'> & { invo
 interface ImportDetail {
   sourceLabel: string
   fileChecksum: string
+  /** Prefix the file hash was scoped by (e.g. `qbo:<realm>`); absent on imports stored before it was recorded. */
+  identityScope?: string | null
   coverage: ImportCoverage
   rowResults: Array<Omit<ImportRowResult, 'raw'>>
   connector?: ConnectorDetail
@@ -321,7 +327,7 @@ interface StoreParsedInput {
 function storeParsedImport(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContext, input: StoreParsedInput, now: number): ImportCsvResult {
   const { parsed, sourceLabel } = input
   const fileChecksum = parsed.fileChecksum ?? checksum(parsed.records.map(sourceSignature).join('\n'))
-  const fileHash = blind(keys, ctx.tenantId, 'file', input.identityScope ? input.identityScope + '|' + fileChecksum : fileChecksum)
+  const fileHash = blind(keys, ctx.tenantId, 'file', scopedChecksum(input.identityScope, fileChecksum))
 
   db.exec('BEGIN IMMEDIATE')
   try {
@@ -334,6 +340,24 @@ function storeParsedImport(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContex
 
     const importId = newId('imp')
     const findPrevious = db.prepare('SELECT id, payload FROM source_records WHERE tenant_id = ? AND identity_hash = ?')
+    // The same payment exported from two systems (a CSV and a QuickBooks pull) has unrelated identity keys, so the
+    // identity index never joins them. Look for it in other sources by settled facts: amount, date, currency, vendor
+    // name and a compatible reference. A match is reported as an overlap and not stored, so it can't become a duplicate claim.
+    const findCrossSource = db.prepare(`SELECT id, payload FROM source_records WHERE tenant_id = ? AND source_system <> ?
+      AND amount_minor IS ? AND payment_date IS ? AND currency IS ? LIMIT 50`)
+    const crossSourceMatch = (record: APRecord) => {
+      const vendor = normalizeVendorName(record.vendor)
+      const reference = normalizeReference(record.invoiceNumber).value
+      const rows = findCrossSource.all(ctx.tenantId, input.sourceSystem, toCents(record.amountPaid), isoDate(record.paymentDate),
+        record.currency ? record.currency.toUpperCase() : null) as Array<{ id: string; payload: string }>
+      for (const row of rows) {
+        const payload = open<RecordPayload>(keys, row.payload, recordContext(ctx.tenantId, row.id))
+        if (normalizeVendorName(payload.vendorName) !== vendor) continue
+        if (reference !== null && payload.referenceNormalized !== null && reference !== payload.referenceNormalized) continue
+        return { id: row.id, record: reviveEngine(payload.engine) }
+      }
+      return undefined
+    }
     const seen = new Map<string, { id: string; record: APRecord }>()
     const rowResults: ImportRowResult[] = [...(parsed.rowResults ?? [])]
     const accepted: Array<{ record: APRecord; key: string; status: ImportRowStatus }> = []
@@ -345,23 +369,29 @@ function storeParsedImport(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContex
       const key = input.identityScope ? input.identityScope + '|' + baseKey : baseKey
       const identityHash = blind(keys, ctx.tenantId, 'identity', key)
       let previous = seen.get(identityHash)
+      let crossSource = false
       if (previous) repeatedWithinImport++
       else {
         const stored = findPrevious.get(ctx.tenantId, identityHash) as { id: string; payload: string } | undefined
         if (stored) {
           previous = { id: stored.id, record: reviveEngine(open<RecordPayload>(keys, stored.payload, recordContext(ctx.tenantId, stored.id)).engine) }
           alreadyImported++
+        } else {
+          previous = crossSourceMatch(record)
+          if (previous) { crossSource = true; alreadyImported++ }
         }
       }
       const missing = !record.externalTransactionId && !record.invoiceNumber
       const status: ImportRowStatus = previous
-        ? record.externalTransactionId && sourceSignature(previous.record) === sourceSignature(record) ? 'exact_duplicate' : 'possible_overlap'
+        ? !crossSource && record.externalTransactionId && sourceSignature(previous.record) === sourceSignature(record) ? 'exact_duplicate' : 'possible_overlap'
         : missing ? 'missing_identification_fields' : 'newly_imported'
       rowResults.push({
         rowNumber: record.source?.rowNumber ?? record.rowIndex + 2,
         status,
         reason: previous
-          ? status === 'exact_duplicate' ? 'This external transaction was already imported.' : 'Possible overlap or conflicting source identity. Row retained in this receipt; obtain distinct transaction IDs before importing it as another payment.'
+          ? status === 'exact_duplicate' ? 'This external transaction was already imported.'
+            : crossSource ? 'Same vendor, amount, payment date, currency and reference as a record already imported from another source. Treated as the same payment and not stored again.'
+            : 'Possible overlap or conflicting source identity. Row retained in this receipt; obtain distinct transaction IDs before importing it as another payment.'
           : missing ? 'No external transaction ID or invoice reference; payment identity needs confirmation.' : 'New source record.',
         raw: null,
         fingerprint: record.rowFingerprint ?? checksum(key),
@@ -385,7 +415,7 @@ function storeParsedImport(db: DatabaseSync, keys: LedgerKeys, ctx: TenantContex
       freshAsOf: input.freshAsOf,
     })
     const sortedResults = rowResults.sort((a, b) => a.rowNumber - b.rowNumber).map(withoutRaw)
-    const detail: ImportDetail = { sourceLabel, fileChecksum, coverage, rowResults: sortedResults, ...(input.connector ? { connector: input.connector } : {}) }
+    const detail: ImportDetail = { sourceLabel, fileChecksum, identityScope: input.identityScope, coverage, rowResults: sortedResults, ...(input.connector ? { connector: input.connector } : {}) }
     db.prepare(`INSERT INTO ledger_imports (id, tenant_id, actor_user_id, source_system, report_type, file_hash, contract_version, normalization_version,
       rows_total, rows_accepted, rows_rejected, new_records, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(importId, ctx.tenantId, ctx.actorUserId, input.sourceSystem, coverage.reportType, fileHash, FINANCIAL_CONTRACT_VERSION, SOURCE_NORMALIZATION_VERSION,
@@ -604,32 +634,41 @@ export function resealLedger(db: DatabaseSync, keys: LedgerKeys): number {
   const imports = db.prepare(`SELECT id, tenant_id, detail FROM ledger_imports${where.replace('payload', 'detail')}`).all() as Array<{ id: string; tenant_id: string; detail: string }>
   if (records.length === 0 && imports.length === 0) return 0
   const oldKeys: LedgerKeys = keys.previous ? { current: keys.previous, previous: null } : null
-  const reader = (payload: string, context: string) => {
+  /** Plaintext of a row that still needs (re)sealing, or undefined when it is already sealed under the current key. */
+  const reader = (payload: string, context: string): unknown => {
     if (!isSealed(payload)) return JSON.parse(payload) as unknown
     try {
-      return open<unknown>(keys, payload, context)
+      openSecret(payload, keys.current, context)
+      return undefined
     } catch {
       return open<unknown>(oldKeys, payload, context)
     }
   }
+  let resealed = 0
   db.exec('BEGIN IMMEDIATE')
   try {
     const updateRecord = db.prepare('UPDATE source_records SET payload = ?, identity_hash = ?, vendor_hash = ? WHERE id = ?')
     for (const r of records) {
-      const p = reader(r.payload, recordContext(r.tenant_id, r.id)) as RecordPayload
+      const p = reader(r.payload, recordContext(r.tenant_id, r.id)) as RecordPayload | undefined
+      if (!p) continue
       updateRecord.run(seal(keys, JSON.stringify(p), recordContext(r.tenant_id, r.id)), blind(keys, r.tenant_id, 'identity', p.identityKey), blind(keys, r.tenant_id, 'vendor', p.vendorKey), r.id)
+      resealed++
     }
     const updateImport = db.prepare('UPDATE ledger_imports SET detail = ?, file_hash = ? WHERE id = ?')
     for (const i of imports) {
-      const d = reader(i.detail, importContext(i.tenant_id, i.id)) as ImportDetail
-      updateImport.run(seal(keys, JSON.stringify(d), importContext(i.tenant_id, i.id)), blind(keys, i.tenant_id, 'file', d.fileChecksum), i.id)
+      const d = reader(i.detail, importContext(i.tenant_id, i.id)) as ImportDetail | undefined
+      if (!d) continue
+      const scope = importScope(d)
+      const sealed: ImportDetail = { ...d, identityScope: scope }
+      updateImport.run(seal(keys, JSON.stringify(sealed), importContext(i.tenant_id, i.id)), blind(keys, i.tenant_id, 'file', scopedChecksum(scope, d.fileChecksum)), i.id)
+      resealed++
     }
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
   }
-  return records.length + imports.length
+  return resealed
 }
 
 // ---------------------------------------------------------------------------
@@ -700,7 +739,7 @@ export interface QuickBooksPullInput {
  * as an upload; the identity of every record is prefixed with the realm so two
  * companies' "BillPayment 12" never collide. Read-only towards QuickBooks: this
  * only stores what the adapter already pulled. Returns null for an empty change
- * set (nothing changed since the last pull).
+ * set (no changed rows and no deletions since the last pull).
  *
  * QuickBooks has no cleared/settled status in its API, so records keep status
  * `unknown`; deletions in QuickBooks are reported on the import for review and
@@ -714,9 +753,13 @@ export function importQuickBooksPull(db: DatabaseSync, keys: LedgerKeys, ctx: Te
   if (sync && sync.realmId !== input.realmId) throw new LedgerError(400, 'The pull belongs to a different QuickBooks company.', 'realm_mismatch')
   const pulledAt = Number.isFinite(input.facts?.pulledAt) ? input.facts.pulledAt : now
   const dataLines = input.csv.split(/\r?\n/).slice(1).filter((l) => l.trim() !== '').length
-  if (dataLines === 0) return null
+  const removed = [...(sync?.removed ?? [])].sort((a, b) => (`${a.txnType}:${a.id}` < `${b.txnType}:${b.id}` ? -1 : 1))
+  // A change set that only deletes still has to be stored: the sync cursor moves past it, so it would never be seen again.
+  if (dataLines === 0 && removed.length === 0) return null
 
   const parsed = parseCsv(input.csv)
+  // Deletions are part of what this pull says, so two pulls with the same rows but different deletions are different imports.
+  if (removed.length > 0) parsed.fileChecksum = checksum(`${parsed.fileChecksum ?? ''}\nremoved:${removed.map((r) => `${r.txnType}:${r.id}`).join(',')}`)
   const mode = sync?.mode ?? 'full'
   return storeParsedImport(db, keys, ctx, {
     parsed,
@@ -727,6 +770,6 @@ export function importQuickBooksPull(db: DatabaseSync, keys: LedgerKeys, ctx: Te
     freshAsOf: new Date(pulledAt).toISOString(),
     sourceLabel: mode === 'changes' ? 'QuickBooks changes' : 'QuickBooks full pull',
     identityScope: `qbo:${input.realmId}`,
-    connector: { system: 'quickbooks', realmId: input.realmId, mode, since: sync?.since ?? null, pulledAt, removedInSource: (sync?.removed ?? []).slice(0, 10_000) },
+    connector: { system: 'quickbooks', realmId: input.realmId, mode, since: sync?.since ?? null, pulledAt, removedInSource: removed.slice(0, 10_000) },
   }, now)
 }

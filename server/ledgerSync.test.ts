@@ -154,7 +154,7 @@ describe('quickbooks.sync handler', () => {
     expect(summary.coverage.reportType).toBe('quickbooks_ledger')
     expect(summary.coverage.freshAsOf).toBe(new Date(T0).toISOString())
 
-    expect(getSyncState(db, alice.tenantId, REALM_A)).toMatchObject({ lastRequestedAt: T0, lastSuccessAt: T0, lastSuccessMode: 'full', cursorSince: T0, lastFailedAt: null, lastErrorCode: null, consecutiveFailures: 0 })
+    expect(getSyncState(db, alice, REALM_A)).toMatchObject({ lastRequestedAt: T0, lastSuccessAt: T0, lastSuccessMode: 'full', cursorSince: T0, lastFailedAt: null, lastErrorCode: null, consecutiveFailures: 0 })
     // Read calls only, and every query is a SELECT.
     expect(qbo.calls.every((c) => c.startsWith('companyinfo:') || c.startsWith(`query:${REALM_A}:select `))).toBe(true)
   })
@@ -181,7 +181,7 @@ describe('quickbooks.sync handler', () => {
     expect(later.audit.counts).toMatchObject({ duplicatePull: 1, newRecords: 3 })
     expect(db.prepare('SELECT COUNT(*) AS n FROM source_records').get()).toEqual({ n: 3 })
     expect(db.prepare('SELECT COUNT(*) AS n FROM ledger_imports').get()).toEqual({ n: 1 })
-    expect(getSyncState(db, alice.tenantId, REALM_A)).toMatchObject({ lastSuccessAt: T0 + 31 * DAY, cursorSince: T0 + 31 * DAY })
+    expect(getSyncState(db, alice, REALM_A)).toMatchObject({ lastSuccessAt: T0 + 31 * DAY, cursorSince: T0 + 31 * DAY })
   })
 
   it('pulls only changes since the last successful sync, flags edits for review and reports deletions without applying them', async () => {
@@ -208,7 +208,37 @@ describe('quickbooks.sync handler', () => {
     const records = listSourceRecords(db, keys, alice).records
     expect(records).toHaveLength(4)
     expect(records.filter((r) => r.amountMinor === 125000)).toHaveLength(2)
-    expect(getSyncState(db, alice.tenantId, REALM_A)).toMatchObject({ lastSuccessAt: t1, lastSuccessMode: 'changes', cursorSince: t1 })
+    expect(getSyncState(db, alice, REALM_A)).toMatchObject({ lastSuccessAt: t1, lastSuccessMode: 'changes', cursorSince: t1 })
+  })
+
+  it('stores a change set that only deletes, so the deletion is not lost when the cursor moves on', async () => {
+    const { db, keys, alice, qbo, sync } = setup()
+    await sync.run(request(alice.tenantId), T0)
+    const deletesOnly = (id: string) => ({ CDCResponse: [{ QueryResponse: [{ BillPayment: [{ Id: id, status: 'Deleted', MetaData: { LastUpdatedTime: '2026-10-01T18:00:00Z' } }] }] }] })
+    qbo.state.cdc = deletesOnly('201')
+    const t1 = T0 + DAY
+    const outcome = await sync.run(request(alice.tenantId, { idempotencyKey: 'sync-2' }), t1)
+    expect(outcome.status).toBe('succeeded')
+    if (outcome.status !== 'succeeded') return
+    expect(outcome.checkpoint).toMatchObject({ mode: 'changes', cursorSince: t1 })
+    expect(outcome.checkpoint.importId).not.toBeNull()
+    expect(outcome.audit.counts).toMatchObject({ rowsAccepted: 0, newRecords: 0, removedInSource: 1, duplicatePull: 0 })
+
+    // A later deletions-only pull of a different payment is its own import, not a repeat of the first.
+    qbo.state.cdc = deletesOnly('202')
+    const again = await sync.run(request(alice.tenantId, { idempotencyKey: 'sync-3' }), t1 + DAY)
+    expect(again.audit.counts).toMatchObject({ removedInSource: 1, duplicatePull: 0 })
+
+    const imports = listImports(db, keys, alice)
+    expect(imports.map((i) => i.connector?.removedInSource)).toEqual([[], [{ txnType: 'BillPayment', id: '201' }], [{ txnType: 'BillPayment', id: '202' }]])
+    // Deletions are reported for review; stored records are never rewritten.
+    expect(listSourceRecords(db, keys, alice).records).toHaveLength(3)
+
+    // An empty change set (no rows, no deletions) still stores nothing.
+    qbo.state.cdc = { CDCResponse: [{ QueryResponse: [] }] }
+    const empty = await sync.run(request(alice.tenantId, { idempotencyKey: 'sync-4' }), t1 + 2 * DAY)
+    expect(empty.status === 'succeeded' && empty.checkpoint.mode).toBe('no_changes')
+    expect(listImports(db, keys, alice)).toHaveLength(3)
   })
 
   it('keeps two QuickBooks companies apart even when their transaction ids are identical', async () => {
@@ -218,8 +248,8 @@ describe('quickbooks.sync handler', () => {
     expect(a.audit.counts.newRecords).toBe(3)
     expect(b.audit.counts).toMatchObject({ newRecords: 3, alreadyImported: 0, duplicatePull: 0 })
     expect(listSourceRecords(db, keys, alice).records).toHaveLength(6)
-    expect(getSyncState(db, alice.tenantId, REALM_A)?.lastSuccessAt).toBe(T0)
-    expect(getSyncState(db, alice.tenantId, REALM_B)?.lastSuccessAt).toBe(T0)
+    expect(getSyncState(db, alice, REALM_A)?.lastSuccessAt).toBe(T0)
+    expect(getSyncState(db, alice, REALM_B)?.lastSuccessAt).toBe(T0)
   })
 
   it('asks the runner to back off on rate limits and gives up after the last attempt, keeping the last good sync', async () => {
@@ -230,7 +260,7 @@ describe('quickbooks.sync handler', () => {
     expect(outcomes.map((o) => o.status)).toEqual(['retry', 'retry', 'retry', 'retry', 'failed'])
     expect(outcomes.slice(0, 4).map((o) => (o.status === 'retry' ? o.retryAfterMs : 0))).toEqual([60_000, 120_000, 240_000, 480_000])
     expect(outcome).toMatchObject({ status: 'failed', errorCode: 'retries_exhausted' })
-    const state = getSyncState(db, alice.tenantId, REALM_A)!
+    const state = getSyncState(db, alice, REALM_A)!
     expect(state).toMatchObject({ lastSuccessAt: T0, cursorSince: T0, lastErrorCode: 'rate_limited', consecutiveFailures: MAX_ATTEMPTS })
     expect(state.lastRequestedAt).toBeGreaterThan(state.lastSuccessAt!)
     expect(state.lastFailedAt).toBe(state.lastRequestedAt)
@@ -243,7 +273,7 @@ describe('quickbooks.sync handler', () => {
     const { outcome, outcomes, clock } = await runToCompletion(sync, request(alice.tenantId), T0)
     expect(outcomes.map((o) => [o.status, o.status === 'retry' ? o.errorCode : null])).toEqual([['retry', 'rate_limited'], ['retry', 'provider_error'], ['succeeded', null]])
     expect(outcome.status).toBe('succeeded')
-    expect(getSyncState(db, alice.tenantId, REALM_A)).toMatchObject({ lastSuccessAt: clock, consecutiveFailures: 0, lastErrorCode: null, lastFailedAt: T0 + 60_000 })
+    expect(getSyncState(db, alice, REALM_A)).toMatchObject({ lastSuccessAt: clock, consecutiveFailures: 0, lastErrorCode: null, lastFailedAt: T0 + 60_000 })
   })
 
   it('fails without retrying when the connection must be made again, and retries a rejected access token', async () => {
@@ -252,7 +282,7 @@ describe('quickbooks.sync handler', () => {
     const gone = await sync.run(request(alice.tenantId), T0)
     expect(gone).toMatchObject({ status: 'failed', errorCode: 'reconnect_required' })
     expect(qbo.calls).toEqual([])
-    expect(getSyncState(db, alice.tenantId, REALM_A)).toMatchObject({ lastSuccessAt: null, lastRequestedAt: T0, lastFailedAt: T0, lastErrorCode: 'reconnect_required' })
+    expect(getSyncState(db, alice, REALM_A)).toMatchObject({ lastSuccessAt: null, lastRequestedAt: T0, lastFailedAt: T0, lastErrorCode: 'reconnect_required' })
 
     qbo.state.failures = [new QuickBooksUnauthorizedError('401')]
     const rejected = await sync.run(request(alice.tenantId, { idempotencyKey: 'sync-2' }), T0 + 1)
@@ -301,6 +331,19 @@ describe('quickbooks.sync handler', () => {
     ]
     for (const over of bad) expect(await sync.run(request(alice.tenantId, over), T0)).toMatchObject({ status: 'failed', errorCode: 'invalid_request' })
     expect(qbo.calls).toEqual([])
+  })
+
+  it('reads sync state only through a server-derived tenant context', async () => {
+    const { db, alice, sync } = setup()
+    await sync.run(request(alice.tenantId), T0)
+    setMemberRole(db, alice, 'vic', 'viewer')
+    const viewer = tenantContextFor(db, 'vic', alice.tenantId)
+    expect(getSyncState(db, viewer, REALM_A)?.lastSuccessAt).toBe(T0)
+    // Vic's own organisation has no sync for this company: state is per tenant, not per realm id.
+    expect(getSyncState(db, tenantContextFor(db, 'vic'), REALM_A)).toBeNull()
+    revokeMember(db, alice, 'vic')
+    expect(() => tenantContextFor(db, 'vic', alice.tenantId)).toThrow()
+    expect(() => getSyncState(db, { ...viewer, permissions: [] }, REALM_A)).toThrow()
   })
 
   it('removes sync state and receipts with the organisation', async () => {

@@ -224,34 +224,56 @@ export interface ReturnMatch {
 
 // ---------------------------------------------------------------- jobs
 
-export interface JobContext {
+// Implemented by server/ledgerSync.ts (quickbooks.sync, ledger.scan) and
+// exercised there with a fake runner fixture. The runner (Jagan) owns
+// scheduling, leases and when to retry; handlers only report.
+
+/** Bounded, value-free failure codes: the only error detail that leaves a handler. */
+export type JobErrorCode =
+  | 'permission_denied'
+  | 'invalid_request'
+  | 'reconnect_required'
+  | 'token_rejected'
+  | 'rate_limited'
+  | 'provider_error'
+  | 'storage_rejected'
+  | 'retries_exhausted'
+
+export interface JobRequest<Operation extends string = string> {
   tenantId: string
-  operation: string
+  /** The member the job runs as; the handler re-derives their role on every attempt. */
+  actorUserId: string
+  operation: Operation
+  /** Same key, same logical job: a completed key is not run again. */
   idempotencyKey: string
+  /** 1 for the first attempt. */
   attempt: number
-  checkpoint: string | null
-  now: number
+  payload: Record<string, unknown>
 }
 
 export interface JobAuditEvent {
-  operation: string
+  contractVersion: string
   tenantId: string
-  outcome: 'succeeded' | 'retry' | 'failed' | 'skipped_duplicate'
-  /** Counts only; no row values, tokens or identifiers beyond the tenant. */
-  counts: Record<string, number>
-}
-
-export interface JobOutcome {
-  status: 'succeeded' | 'retry' | 'failed'
-  checkpoint: string | null
-  retryAfterMs?: number
-  /** Bounded, value-free error description. */
-  error?: { code: string; message: string }
-  audit: JobAuditEvent
-}
-
-/** Handler side of the shared job contract. The runner (Jagan) owns scheduling and retries. */
-export interface JobHandler<Payload> {
+  actorUserId: string
   operation: string
-  handle(ctx: JobContext, payload: Payload): Promise<JobOutcome>
+  idempotencyKey: string
+  attempt: number
+  outcome: 'succeeded' | 'already_completed' | 'retry' | 'failed'
+  at: number
+  /** Counts only; no row values, tokens or identifiers beyond tenant and actor. */
+  counts: Record<string, number>
+  errorCode: JobErrorCode | null
+}
+
+export type JobCheckpoint = Record<string, string | number | null>
+
+export type JobOutcome =
+  | { status: 'succeeded'; checkpoint: JobCheckpoint; audit: JobAuditEvent }
+  | { status: 'retry'; retryAfterMs: number; errorCode: JobErrorCode; audit: JobAuditEvent }
+  | { status: 'failed'; errorCode: JobErrorCode; audit: JobAuditEvent }
+
+/** Handler side of the shared job contract. */
+export interface JobHandler<Operation extends string = string> {
+  operation: Operation
+  run(request: JobRequest<Operation>, now?: number): Promise<JobOutcome>
 }

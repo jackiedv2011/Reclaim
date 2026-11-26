@@ -179,6 +179,7 @@ function recordDay(r: ReturnSourceRecord): string | null {
 }
 
 const methodOf = (r: ReturnSourceRecord): 'refund' | 'credit' => (r.kind === 'vendor_credit' ? 'credit' : 'refund')
+const uidOf = (r: { tenantId: string; id: string }) => `${r.tenantId}\u0000${r.id}`
 
 // ---------------------------------------------------------------- record preparation
 
@@ -197,6 +198,8 @@ const CONFLICT_ISSUES: ReadonlySet<RecordIssue> = new Set(['conflicting_duplicat
 
 interface PreparedRecord {
   rec: ReturnSourceRecord
+  /** Tenant-qualified key. Record IDs are only unique within a tenant, so every internal map uses this. */
+  uid: string
   day: string | null
   issues: RecordIssue[]
   /** Canonical record this one duplicates (exact identity, or same reference/amount/date). */
@@ -209,7 +212,10 @@ interface PreparedRecord {
 
 function prepareRecords(records: readonly ReturnSourceRecord[]): PreparedRecord[] {
   const byId = new Map<string, ReturnSourceRecord>()
-  for (const r of [...records].sort((a, b) => cmp(a.id, b.id))) if (!byId.has(r.id)) byId.set(r.id, r)
+  for (const r of [...records].sort((a, b) => cmp(a.tenantId, b.tenantId) || cmp(a.id, b.id))) {
+    const uid = uidOf(r)
+    if (!byId.has(uid)) byId.set(uid, r)
+  }
   const prepared: PreparedRecord[] = []
   const identity = new Map<string, PreparedRecord>()
   const lookalike = new Map<string, PreparedRecord>()
@@ -243,7 +249,7 @@ function prepareRecords(records: readonly ReturnSourceRecord[]): PreparedRecord[
       if (bill) refs.add(bill)
     }
     const p: PreparedRecord = {
-      rec, day, issues, duplicateOf: null, duplicateKind: null, duplicates: [], appliedTotal,
+      rec, uid: uidOf(rec), day, issues, duplicateOf: null, duplicateKind: null, duplicates: [], appliedTotal,
       refs: [...refs].filter((x) => x.length >= MIN_REFERENCE_LENGTH).sort(cmp),
     }
 
@@ -326,6 +332,24 @@ interface Edge {
   agreed: string[]
 }
 
+/**
+ * For a record that several reference-agreeing requests share: how much of its applied credit belongs to each.
+ * Each application counts only for the one request whose references include its bill. Returns null (send the
+ * record to review, allocate nothing) when an application's bill matches no contender or more than one.
+ */
+function attributeApplications(p: PreparedRecord, contenders: readonly Edge[]): Map<string, number> | null {
+  const out = new Map<string, number>()
+  if (p.rec.kind !== 'vendor_credit') return out
+  for (const app of p.rec.appliedToBills ?? []) {
+    const bill = normalizeReference(app.billRef)
+    const owners = contenders.filter((e) => e.q.refs.has(bill))
+    if (owners.length !== 1) return null
+    const key = owners[0].q.key
+    out.set(key, (out.get(key) ?? 0) + app.amountMinor)
+  }
+  return out
+}
+
 const SUPPLIER_STATEMENT_STATUSES: ReadonlySet<string> = new Set(['accepted', 'partial_acceptance', 'promised', 'credit_issued', 'already_refunded'])
 
 /**
@@ -399,7 +423,7 @@ export function matchReturns(
       if (p.issues.includes('currency_unknown')) { count('currency_unknown', r.id); continue }
       if (r.currency !== req.currency) { count('currency_mismatch', r.id); continue }
       if (r.sourceAccount && req.sourceAccount && r.sourceAccount !== req.sourceAccount) { count('source_account_mismatch', r.id); continue }
-      if (p.issues.includes('reversed')) { count('reversed_excluded', r.id); noteRecord(r.id, 'reversed', q.key); continue }
+      if (p.issues.includes('reversed')) { count('reversed_excluded', r.id); noteRecord(p.uid, 'reversed', q.key); continue }
       const conflictIssue = p.issues.find((i) => CONFLICT_ISSUES.has(i))
       if (conflictIssue) {
         q.conflicts.push(`record_integrity_conflict: record ${r.id} has ${conflictIssue.replace(/_/g, ' ')}`)
@@ -409,14 +433,14 @@ export function matchReturns(
       if (p.issues.includes('amount_unknown') || p.issues.includes('date_unknown')) { count('unevaluable_record', r.id); continue }
       if (p.day! < earliest) {
         count('possible_prior_return', r.id)
-        noteRecord(r.id, 'pre_request', q.key)
+        noteRecord(p.uid, 'pre_request', q.key)
         continue
       }
       const agreed = p.refs.filter((x) => q.refs.has(x))
       const tier: Tier = agreed.length ? 'reference' : r.amountMinor === req.requestedAmountMinor ? 'exact_amount' : 'weak'
       if (tier === 'weak') {
         count('unlinked_supplier_activity', r.id)
-        noteRecord(r.id, 'no_reference_or_amount_agreement', q.key)
+        noteRecord(p.uid, 'no_reference_or_amount_agreement', q.key)
         continue
       }
       edges.push({ q, p, tier, agreed })
@@ -441,11 +465,14 @@ export function matchReturns(
 
   // ---- ownership: who may take each record, and how much of it.
   const byRecord = new Map<string, Edge[]>()
-  for (const e of edges) byRecord.set(e.p.rec.id, [...(byRecord.get(e.p.rec.id) ?? []), e])
+  for (const e of edges) byRecord.set(e.p.uid, [...(byRecord.get(e.p.uid) ?? []), e])
   const owned = new Map<string, Array<{ e: Edge; share: number }>>()
   const own = (e: Edge, share: number) => owned.set(e.q.key, [...(owned.get(e.q.key) ?? []), { e, share }])
 
-  for (const [id, list] of [...byRecord.entries()].sort((a, b) => cmp(a[0], b[0]))) {
+  // Applied credit a shared record can evidence for each request: only applications to that request's own bills.
+  const appliedForRequest = new Map<string, number>()
+  for (const [uid, list] of [...byRecord.entries()].sort((a, b) => cmp(a[0], b[0]))) {
+    const id = list[0].p.rec.id
     const amount = list[0].p.rec.amountMinor!
     const byRef = list.filter((e) => e.tier === 'reference')
     const contenders = byRef.length ? byRef : list
@@ -457,10 +484,13 @@ export function matchReturns(
       continue
     }
     const demand = contenders.reduce((s, e) => s + e.q.req.requestedAmountMinor, 0)
-    if (byRef.length && demand <= amount) {
-      // Each reference-agreeing request can be satisfied in full from this one record.
+    const attribution = byRef.length && demand <= amount ? attributeApplications(list[0].p, contenders) : null
+    if (attribution) {
+      // Each reference-agreeing request can be satisfied in full from this one record, and any applied credit is
+      // attributed by the bill it was applied to, never by request order.
       for (const e of contenders) {
         own(e, e.q.req.requestedAmountMinor)
+        appliedForRequest.set(`${uid}|${e.q.key}`, attribution.get(e.q.key) ?? 0)
         e.q.notes.push(`shared_record: record ${id} agrees by reference with ${contenders.length} requests and covers all of them in full; each is allocated at most its own amount`)
       }
       continue
@@ -470,8 +500,11 @@ export function matchReturns(
     for (const e of contenders) {
       e.q.ambiguousRecords.add(id)
       for (const k of keys) if (k !== e.q.key) e.q.competing.add(k)
-      e.q.notes.push(`contested_record: record ${id} fits ${contenders.length} requests and ${byRef.length ? 'is smaller than their combined amount' : 'no reference breaks the tie'}; not allocated`)
-      noteRecord(id, 'contested', e.q.key)
+      const why = !byRef.length ? 'no reference breaks the tie'
+        : demand > amount ? 'is smaller than their combined amount'
+        : 'its credit applications cannot each be attributed to exactly one of these requests\' bills'
+      e.q.notes.push(`contested_record: record ${id} fits ${contenders.length} requests and ${why}; not allocated`)
+      noteRecord(uid, 'contested', e.q.key)
     }
   }
 
@@ -479,8 +512,8 @@ export function matchReturns(
   const recordRemaining = new Map<string, number>()
   const appliedRemaining = new Map<string, number>()
   for (const p of prepared) {
-    if (isMinor(p.rec.amountMinor)) recordRemaining.set(p.rec.id, p.rec.amountMinor)
-    appliedRemaining.set(p.rec.id, p.appliedTotal)
+    if (isMinor(p.rec.amountMinor)) recordRemaining.set(p.uid, p.rec.amountMinor)
+    appliedRemaining.set(p.uid, p.appliedTotal)
   }
 
   const coverage: CoverageState = !dataAsOf ? 'unknown' : 'current'
@@ -517,13 +550,13 @@ export function matchReturns(
     if (byRef.length && byRef.length < mine.length) {
       for (const o of mine.filter((x) => x.e.tier !== 'reference')) {
         q.notes.push(`superseded_by_reference_match: record ${o.e.p.rec.id} equals the requested amount but other records agree by reference; not linked`)
-        noteRecord(o.e.p.rec.id, 'superseded_by_reference_match', q.key)
+        noteRecord(o.e.p.uid, 'superseded_by_reference_match', q.key)
       }
     }
     if (!byRef.length && usable.length > 1) {
       for (const o of usable) {
         q.ambiguousRecords.add(o.e.p.rec.id)
-        noteRecord(o.e.p.rec.id, 'contested', q.key)
+        noteRecord(o.e.p.uid, 'contested', q.key)
       }
       q.notes.push(`multiple_exact_amount_records: ${usable.length} records each equal the requested amount and none agrees by reference; none linked`)
     }
@@ -535,13 +568,19 @@ export function matchReturns(
       let outstanding = req.requestedAmountMinor
       for (const { e, share } of usable) {
         const id = e.p.rec.id
-        const available = Math.min(share, recordRemaining.get(id) ?? 0)
+        const uid = e.p.uid
+        const available = Math.min(share, recordRemaining.get(uid) ?? 0)
         const take = Math.min(available, outstanding)
         if (take <= 0) continue
         const method = methodOf(e.p.rec)
-        const returned = method === 'refund' ? take : Math.min(take, appliedRemaining.get(id) ?? 0)
-        if (method === 'credit') appliedRemaining.set(id, (appliedRemaining.get(id) ?? 0) - returned)
-        recordRemaining.set(id, (recordRemaining.get(id) ?? 0) - take)
+        const sharedKey = `${uid}|${q.key}`
+        const appliedPool = Math.min(appliedRemaining.get(uid) ?? 0, appliedForRequest.get(sharedKey) ?? Infinity)
+        const returned = method === 'refund' ? take : Math.min(take, appliedPool)
+        if (method === 'credit') {
+          appliedRemaining.set(uid, (appliedRemaining.get(uid) ?? 0) - returned)
+          if (appliedForRequest.has(sharedKey)) appliedForRequest.set(sharedKey, appliedForRequest.get(sharedKey)! - returned)
+        }
+        recordRemaining.set(uid, (recordRemaining.get(uid) ?? 0) - take)
         outstanding -= take
         linked.push({
           requestKey: q.key, requestRef: q.ref, sourceRecordId: id, currency: req.currency, allocatedMinor: take,
@@ -552,7 +591,7 @@ export function matchReturns(
         else rationale.push(`matched_without_reference: record ${id} equals the requested amount exactly; supplier, currency and date agree; no reference agreement`)
         if (available > take) {
           rationale.push(`excess_not_attributed: record ${id} has ${available - take} minor units beyond this request's outstanding amount; the excess is not attributed to this request`)
-          noteRecord(id, 'excess_over_request', q.key)
+          noteRecord(uid, 'excess_over_request', q.key)
         }
         if (method === 'credit' && returned < take) {
           rationale.push(`credit_issued_not_applied: ${take - returned} minor units of credit ${id} are issued but not applied to any bill; issued is not applied is not returned`)
@@ -560,14 +599,14 @@ export function matchReturns(
       }
       for (const { e } of usable) if (!linked.some((a) => a.sourceRecordId === e.p.rec.id) && outstanding === 0) {
         q.notes.push(`request_already_covered: record ${e.p.rec.id} was not needed; the request's amount is already evidenced`)
-        noteRecord(e.p.rec.id, 'request_already_covered', q.key)
+        noteRecord(e.p.uid, 'request_already_covered', q.key)
       }
       const returnedTotal = linked.reduce((s, a) => s + a.returnedEvidenceMinor, 0)
       status = returnedTotal > 0 ? 'proposed_source_match' : base.customerRecordedMinor !== null ? 'customer_recorded' : 'unmatched'
     }
 
     if (status === 'conflict' || status === 'ambiguous') {
-      for (const { e } of mine) if (!q.ambiguousRecords.has(e.p.rec.id)) noteRecord(e.p.rec.id, `held_request_${status}`, q.key)
+      for (const { e } of mine) if (!q.ambiguousRecords.has(e.p.rec.id)) noteRecord(e.p.uid, `held_request_${status}`, q.key)
     }
     const returnedTotal = linked.reduce((s, a) => s + a.returnedEvidenceMinor, 0)
     const issuedNotApplied = linked.reduce((s, a) => s + (a.allocatedMinor - a.returnedEvidenceMinor), 0)
@@ -586,7 +625,7 @@ export function matchReturns(
       method = methods.length === 1 ? methods[0] : null
       if (methods.length > 1) rationale.push('mixed_methods: refunds and applied credits both evidence this request')
       linkedIds = linked.map((a) => a.sourceRecordId)
-      date = evidencing.map((a) => prepared.find((p) => p.rec.id === a.sourceRecordId)!.day!).sort(cmp).at(-1) ?? null
+      date = evidencing.map((a) => prepared.find((p) => p.rec.tenantId === req.tenantId && p.rec.id === a.sourceRecordId)!.day!).sort(cmp).at(-1) ?? null
       if (returnedTotal < req.requestedAmountMinor) rationale.push(`partial_return: source records evidence ${returnedTotal} of ${req.requestedAmountMinor} requested minor units`)
       else rationale.push(`full_amount_evidenced: source records evidence the full ${req.requestedAmountMinor} requested minor units`)
       rationale.push('gate_required: a proposed source match is not a case outcome; the case gate decides')
@@ -596,7 +635,7 @@ export function matchReturns(
       applied = false
       method = 'credit'
       linkedIds = linked.map((a) => a.sourceRecordId)
-      date = linked.map((a) => prepared.find((p) => p.rec.id === a.sourceRecordId)!.day!).sort(cmp).at(-1) ?? null
+      date = linked.map((a) => prepared.find((p) => p.rec.tenantId === req.tenantId && p.rec.id === a.sourceRecordId)!.day!).sort(cmp).at(-1) ?? null
       rationale.push('credit_only_not_returned: the linked records are supplier credit issued but not applied to any bill; this is not returned value')
     } else if (status === 'ambiguous') {
       linkedIds = [...q.ambiguousRecords]
@@ -639,7 +678,7 @@ export function matchReturns(
   for (const p of prepared) {
     const r = p.rec
     const id = r.id
-    const reasonMap = recordReasons.get(id) ?? new Map<string, Set<string>>()
+    const reasonMap = recordReasons.get(p.uid) ?? new Map<string, Set<string>>()
     const reasons: string[] = []
     const related = new Set<string>()
     let unallocated: number | null
@@ -649,7 +688,7 @@ export function matchReturns(
     } else if (p.issues.includes('reversed')) {
       unallocated = 0
     } else {
-      unallocated = isMinor(r.amountMinor) ? recordRemaining.get(id) ?? 0 : null
+      unallocated = isMinor(r.amountMinor) ? recordRemaining.get(p.uid) ?? 0 : null
     }
     for (const issue of p.issues) reasons.push(issue)
     for (const [reason, keys] of reasonMap) {

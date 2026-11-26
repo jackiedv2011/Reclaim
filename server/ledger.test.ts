@@ -8,7 +8,7 @@ import { setMemberRole, tenantContextFor, TenantAccessError } from './tenancy.ts
 import { createApp, type App } from './app.ts'
 import { loadConfig } from './config.ts'
 import { DevMailer } from './mailer.ts'
-import { LedgerError, confirmImportMapping, deriveFindings, proposeImportMapping, getSourceRecords, importCsv, listImports, listSourceRecords, resealLedger, vendorPeriodAggregates, type LedgerKeys } from './ledger.ts'
+import { LedgerError, confirmImportMapping, deriveFindings, proposeImportMapping, getSourceRecords, importCsv, importQuickBooksPull, listImports, listSourceRecords, resealLedger, vendorPeriodAggregates, type LedgerKeys } from './ledger.ts'
 import { parseCsv } from '../src/lib/csv.ts'
 import { formatSignature, headerKey } from '../src/ingestion/columnMapping.ts'
 import type { ParseResult } from '../src/types.ts'
@@ -108,6 +108,29 @@ describe('server ledger import', () => {
     expect(listSourceRecords(db, keys, alice).records).toHaveLength(8)
     const after = deriveFindings(db, keys, alice)
     expect(after.findings.map((f) => f.id)).toEqual(before.findings.map((f) => f.id))
+  })
+
+  it('treats the same payment from a CSV and a QuickBooks pull as one record, in either order, with no duplicate finding', () => {
+    const csvFile = 'vendor,invoice_number,invoice_date,payment_date,invoice_amount,amount_paid,currency\nAcme Supply,INV-90211,01/02/2026,01/20/2026,4500.00,4500.00,USD\nAcme Supply,INV-90212,01/02/2026,01/20/2026,4500.00,4500.00,USD\n'
+    const qboFile = 'vendor,invoice_number,invoice_date,invoice_amount,payment_date,amount_paid,currency,transaction_id,source_account,transaction_type\n'
+      + 'Acme Supply,INV-90211,2026-01-02,4500.00,2026-01-20,4500.00,USD,qbo:BillPayment:77,Checking,BillPayment\n'
+      + 'Acme Supply,INV-90212,2026-01-02,4500.00,2026-02-20,4500.00,USD,qbo:BillPayment:78,Checking,BillPayment\n'
+    for (const order of ['csv-first', 'qbo-first'] as const) {
+      const { db, keys, alice } = setup(keyed())
+      const csv = () => importCsv(db, keys, alice, { csv: csvFile })
+      const qbo = () => importQuickBooksPull(db, keys, alice, { realmId: '123', csv: qboFile, facts: { schemaVersion: 1, companyName: 'Synthetic Co', pulledAt: 1, payments: {}, vendors: {}, searched: { vendorCredits: 0, deposits: 0, purchases: 0, billPayments: 2 } } })
+      if (order === 'csv-first') csv()
+      else qbo()
+      const second = order === 'csv-first' ? qbo() : csv()
+      // INV-90211 on 20 Jan is the same payment in both sources. INV-90212 paid on 20 Jan (CSV) and again on 20 Feb (QuickBooks) is two payments.
+      expect(second?.coverage.dedup).toEqual({ newRecords: 1, alreadyImported: 1, repeatedWithinImport: 0 })
+      const overlap = second?.rowResults.find((r) => r.status === 'possible_overlap')
+      expect(overlap?.existingRecordId).toBeDefined()
+      expect(listSourceRecords(db, keys, alice).records).toHaveLength(3)
+      const { findings } = deriveFindings(db, keys, alice)
+      // The shared payment makes no claim; the genuine second payment of INV-90212 still does.
+      expect(findings.filter((f) => f.type === 'exact_duplicate').map((f) => [f.title, f.sourceRecordIds.length])).toEqual([['Duplicate payment of invoice INV-90212', 2]])
+    }
   })
 
   it('collapses a row repeated inside one file and reports a changed row under an existing identity as an overlap', () => {
@@ -281,11 +304,26 @@ describe('at-rest protection', () => {
     // Before the startup re-seal, reads fall back to the previous key.
     expect(listSourceRecords(db, rotating, alice).records).toHaveLength(7)
     expect(resealLedger(db, rotating)).toBe(8)
+    // While DATA_KEY_PREVIOUS stays configured, later boots find nothing left to re-seal.
+    expect(resealLedger(db, rotating)).toBe(0)
     const rotated = keyed(k2)
     expect(listSourceRecords(db, rotated, alice).records).toHaveLength(7)
     expect(importCsv(db, rotated, alice, { csv: FILE_A }).duplicateFile).toBe(true)
     expect(importCsv(db, rotated, alice, { csv: FILE_B }).coverage.dedup).toEqual({ newRecords: 1, alreadyImported: 2, repeatedWithinImport: 0 })
     expect(() => listSourceRecords(db, keyed(k1), alice)).toThrow()
+  })
+
+  it('still recognises a repeated QuickBooks pull after key rotation (the realm scope survives the re-seal)', () => {
+    const { db, alice } = setup()
+    const k1 = key()
+    const pull = { realmId: '123', csv: 'vendor,invoice_number,invoice_date,invoice_amount,payment_date,amount_paid,currency,transaction_id\nAcme Supply,INV-90211,2026-01-02,4500.00,2026-01-20,4500.00,USD,qbo:BillPayment:77\n',
+      facts: { schemaVersion: 1, companyName: 'Synthetic Co', pulledAt: 1, payments: {}, vendors: {}, searched: { vendorCredits: 0, deposits: 0, purchases: 0, billPayments: 1 } } } as const
+    expect(importQuickBooksPull(db, keyed(k1), alice, pull)?.duplicateFile).toBe(false)
+    const k2 = key()
+    expect(resealLedger(db, keyed(k2, k1))).toBe(2)
+    const after = importQuickBooksPull(db, keyed(k2), alice, pull)
+    expect(after?.duplicateFile).toBe(true)
+    expect(listImports(db, keyed(k2), alice)).toHaveLength(1)
   })
 })
 

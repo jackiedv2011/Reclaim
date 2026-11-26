@@ -123,13 +123,17 @@ const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const isMinor = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n > 0
 const isoDay = (v: string | null | undefined) => (v && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null)
 
-function dedupeById<T extends { id: string }>(items: readonly T[], same: (a: T, b: T) => boolean): { kept: T[]; conflicting: Set<string> } {
+/** Ids are only unique within a tenant, so items are keyed (and conflicts reported) by tenant + id. */
+const tenantKey = (tenantId: string, id: string) => `${tenantId}\u0000${id}`
+
+function dedupeById<T extends { id: string; tenantId: string }>(items: readonly T[], same: (a: T, b: T) => boolean): { kept: T[]; conflicting: Set<string> } {
   const kept = new Map<string, T>()
   const conflicting = new Set<string>()
-  for (const item of [...items].sort((a, b) => cmp(a.id, b.id))) {
-    const prior = kept.get(item.id)
-    if (!prior) kept.set(item.id, item)
-    else if (!same(prior, item)) conflicting.add(item.id)
+  for (const item of [...items].sort((a, b) => cmp(a.tenantId, b.tenantId) || cmp(a.id, b.id))) {
+    const k = tenantKey(item.tenantId, item.id)
+    const prior = kept.get(k)
+    if (!prior) kept.set(k, item)
+    else if (!same(prior, item)) conflicting.add(k)
   }
   return { kept: [...kept.values()], conflicting }
 }
@@ -145,7 +149,7 @@ export function reconcileSupplierCredits(input: ReconcileSupplierCreditsInput): 
   const applications = dedupeById(input.applications, (a, b) => a.creditId === b.creditId && a.amountMinor === b.amountMinor && a.billRef === b.billRef)
   const reversals = dedupeById(input.reversals, (a, b) => a.creditId === b.creditId && a.amountMinor === b.amountMinor)
 
-  const creditKey = (tenantId: string, id: string) => `${tenantId}\u0000${id}`
+  const creditKey = tenantKey
   const creditById = new Map(credits.kept.map((c) => [creditKey(c.tenantId, c.id), c]))
   const groupKey = (tenantId: string, vendorKey: string, currency: string | null) => `${tenantId}\u0000${vendorKey}\u0000${currency ?? ''}`
 
@@ -172,7 +176,7 @@ export function reconcileSupplierCredits(input: ReconcileSupplierCreditsInput): 
   for (const c of credits.kept) {
     const g = groupFor(c.tenantId, c.vendorKey, c.currency)
     g.credits.push(c)
-    if (credits.conflicting.has(c.id)) g.reasons.add('conflicting_duplicate_credit')
+    if (credits.conflicting.has(creditKey(c.tenantId, c.id))) g.reasons.add('conflicting_duplicate_credit')
   }
   for (const a of applications.kept) {
     const credit = creditById.get(creditKey(a.tenantId, a.creditId))

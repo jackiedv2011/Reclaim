@@ -55,6 +55,17 @@ describe('matchReturns: candidate filtering', () => {
     expect(m.rationale.join('\n')).not.toContain('other-tenant-rec')
   })
 
+  it('keeps two tenants’ records apart even when they carry the same record id', () => {
+    const reqB = syntheticRequest({ tenantId: SYNTH_TENANT_B, projectId: 'synthetic-project-b' })
+    const result = matchReturns([syntheticRequest(), reqB], [syntheticReturnRecord(), syntheticReturnRecord({ tenantId: SYNTH_TENANT_B })], AS_OF)
+    expect(result.matches.map((m) => [m.requestRef.projectId, m.status, m.amountMinor])).toEqual([
+      ['synthetic-project-1', 'proposed_source_match', 125_000],
+      ['synthetic-project-b', 'proposed_source_match', 125_000],
+    ])
+    expect(result.allocations).toHaveLength(2)
+    expect(result.unallocatedRecords).toEqual([])
+  })
+
   it('excludes a different currency without converting it', () => {
     const m = only(matchReturns([syntheticRequest()], [syntheticReturnRecord({ currency: 'CAD' })], AS_OF))
     expect(m.status).toBe('unmatched')
@@ -279,6 +290,32 @@ describe('matchReturns: credits', () => {
     const m = only(matchReturns([syntheticRequest()], [credit], AS_OF))
     expect(m).toMatchObject({ status: 'proposed_source_match', amountMinor: 40_000, applied: true, creditIssuedNotAppliedMinor: 85_000 })
     expect(has(m, 'credit_issued_not_applied')).toBe(true)
+  })
+
+  it('attributes a shared credit’s applied part to the request whose bill it was applied to, not by request order', () => {
+    const reqs = [
+      syntheticRequest({ findingId: 'f-a', references: ['SYN-INV-1001'], requestedAmountMinor: 40_000 }),
+      syntheticRequest({ findingId: 'f-b', references: ['SYN-INV-2002'], requestedAmountMinor: 60_000 }),
+    ]
+    // Memo names A's invoice; the only application is to B's bill.
+    const credit = syntheticVendorCredit({ memoReference: 'SYN-INV-1001', appliedToBills: [{ billRef: 'SYN-INV-2002', amountMinor: 60_000, date: '2026-09-20' }] })
+    const result = matchReturns(reqs, [credit], AS_OF)
+    const [a, b] = result.matches
+    expect(a).toMatchObject({ status: 'unmatched', applied: false, creditIssuedNotAppliedMinor: 40_000 })
+    expect(b).toMatchObject({ status: 'proposed_source_match', applied: true, amountMinor: 60_000, creditIssuedNotAppliedMinor: 0 })
+    expect(result.allocations.reduce((s, x) => s + x.returnedEvidenceMinor, 0)).toBe(60_000)
+  })
+
+  it('sends a shared credit to review when an application’s bill belongs to neither request', () => {
+    const reqs = [
+      syntheticRequest({ findingId: 'f-a', references: ['SYN-INV-1001'], requestedAmountMinor: 40_000 }),
+      syntheticRequest({ findingId: 'f-b', references: ['SYN-INV-1001'], requestedAmountMinor: 60_000 }),
+    ]
+    const credit = syntheticVendorCredit({ memoReference: 'SYN-INV-1001', appliedToBills: [{ billRef: 'SYN-BILL-7777', amountMinor: 60_000, date: '2026-09-20' }] })
+    const result = matchReturns(reqs, [credit], AS_OF)
+    expect(result.matches.map((m) => [m.status, m.amountMinor])).toEqual([['ambiguous', null], ['ambiguous', null]])
+    expect(result.allocations).toEqual([])
+    expect(result.matches.every((m) => has(m, 'contested_record'))).toBe(true)
   })
 
   it('treats credit applied beyond its amount as a conflict', () => {
