@@ -6,9 +6,9 @@ cd "${0:a:h}"
 B=${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}
 DEVICE=${DEVICE:-METAL}
 PUB=${PUB:-../media/checks}   # SCENES="free growth flat" PUB=../media/pricing for the Pricing page
-res=800
+res=${RES:-800}
 typeset -A BG
-BG=(exact cff5dc near cff5dc over cff5dc bank e3d5f7 outlier e3d5f7 shared e3d5f7 unclaimed fad9c7 missed fad9c7 free ebe7de growth ebe7de flat ebe7de)
+BG=(exact cff5dc near cff5dc over cff5dc bank e3d5f7 outlier e3d5f7 shared e3d5f7 unclaimed fad9c7 missed fad9c7 free ebe7de growth ebe7de flat ebe7de imprint 08100c)
 for scene in ${=${SCENES:-exact near over bank outlier shared unclaimed missed}}; do
   if [[ $1 == render ]]; then
     "$B" -b --factory-startup --python wc_models.py -- scene=$scene out=out/wc/$scene fps=30 res=$res spp=32 device=$DEVICE 2>&1 | grep -E "Traceback|Error|FILM"

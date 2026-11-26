@@ -5,14 +5,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Exporting from Xero — Reclaim</title>
-<meta name="description" content="How to export the bills, payments, vendors and credits Reclaim reads out of Xero, and what each file is for.">
+<meta name="description" content="How to get your payments out of Xero and into Reclaim.">
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="preconnect" href="https://cdnjs.cloudflare.com">
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=Geist+Mono:wght@400;500&family=JetBrains+Mono:wght@400;500&family=Schibsted+Grotesk:ital,wght@0,400..800;1,400..800&display=block" rel="stylesheet">
-
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="/pages.css">
 <script>try{if(sessionStorage.getItem('rc-visited'))document.documentElement.classList.add('is-return')}catch(e){}</script>
@@ -115,10 +114,9 @@
 
 <main class="page">
 
-  <!-- XERO EXPORT GUIDE.
-       The menu names and report names below follow Xero as we understand it today. Every step is
-       listed in scratchpad/unverified.md and has to be checked against Xero's own documentation
-       (Xero Central: export a report, https://central.xero.com/s/article/Export-a-report) before this page is deployed. -->
+  <!-- XERO EXPORT GUIDE. What Reclaim reads follows src/lib/csvMapping.ts, csv.ts and xlsx.ts and the
+       upload rules in src/components/audit/ImportPanel.tsx and ColumnMatch.tsx: keep the shared partials in step with them.
+       NOT confirmed: Xero Central asks for a login (tried 2026-11-24), so no menu path or report name is given on purpose. Add them once someone with a Xero account has checked. -->
   <div class="guide-page">
     <div class="nav-slot" data-theme="white"></div>
     <div class="the-container">
@@ -131,13 +129,11 @@
               <ul>
                 <li><a href="#what">What Reclaim reads</a></li>
                 <li><a href="#before">Before you begin</a></li>
-                <li><a href="#step-1">1. Open Reports</a></li>
-                <li><a href="#step-2">2. Set the date range</a></li>
-                <li><a href="#step-3">3. Export payable invoices</a></li>
-                <li><a href="#step-4">4. Export account transactions</a></li>
-                <li><a href="#step-5">5. Export your supplier list</a></li>
-                <li><a href="#step-6">6. Export credits and open items</a></li>
-                <li><a href="#step-7">7. Check the files before you upload</a></li>
+                <li><a href="#step-1">1. Run a payments report</a></li>
+                <li><a href="#step-2">2. Export it</a></li>
+                <li><a href="#step-3">3. Upload the file</a></li>
+                <li><a href="#step-4">4. Match the columns</a></li>
+                <li><a href="#step-5">5. Check it, then run the audit</a></li>
                 <li><a href="#troubleshooting">Troubleshooting</a></li>
               </ul>
             </div>
@@ -149,220 +145,146 @@
               <a href="/guides" class="rs-back"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>All guides</a>
               <div class="eyebrow type-mono">Export guide</div>
               <h1 class="title">Exporting from Xero</h1>
-              <p class="lede">Three reports and one contact export. Xero puts most of what Reclaim needs in the payables reports.</p>
+              <p class="lede">One list of payments, exported and uploaded as it is.</p>
             </header>
 
             <section id="what">
               <h2 class="blockhead">What Reclaim reads</h2>
               <div class="prose">
-                <p>Reclaim works from four exports out of Xero: your bills, the payments that went against them, your vendor list, and any credits. Uploading files connects nothing to your organisation and changes nothing inside it. You export the files, you upload them, and you decide what to do with what comes back.</p>
-                <p>The four files do different jobs, and the comparison only works when all four are there. A duplicate payment is invisible in the bill file alone; an unused credit is invisible in the payment file alone.</p>
+                <p>One file of the payments you made out of Xero: a CSV or an Excel workbook (.xlsx). Title lines at the top, totals, and reports grouped by vendor are fine, so you shouldn’t need to edit it first. Uploading a file connects nothing to your account and changes nothing inside it.</p>
+                <p>If your headings are ones Reclaim knows, it reads them straight away. If not, it shows you your own columns and asks which is which. Three are required. Each of the others turns on more checks.</p>
               </div>
-              <div class="tier" role="group" aria-label="The four exports">
+              <div class="tier" role="group" aria-label="The columns Reclaim reads">
                 <div class="tier__col">
-                  <p class="tier__tag">Files</p>
-                  <h3 class="tier__name">What to export</h3>
+                  <p class="tier__tag">Required</p>
+                  <h3 class="tier__name">Every payment needs</h3>
                   <ul>
-                    <li>Payable Invoice Detail</li>
-                    <li>Account Transactions</li>
-                    <li>Supplier contact export</li>
-                    <li>Aged Payables Detail</li>
+                    <li>Vendor</li>
+                    <li>Payment date</li>
+                    <li>Amount paid</li>
                   </ul>
                 </div>
                 <div class="tier__col">
-                  <p class="tier__tag">Purpose</p>
-                  <h3 class="tier__name">What each one does</h3>
+                  <p class="tier__tag">Add if you have them</p>
+                  <h3 class="tier__name">More checks</h3>
                   <ul>
-                    <li>Bills give every invoice its vendor, number, date and amount</li>
-                    <li>Payments show what actually left, and against which bill</li>
-                    <li>Vendors let two spellings of one supplier be recognised</li>
-                    <li>Credits show money already owed back to you</li>
+                    <li>Invoice number: duplicate payments</li>
+                    <li>Invoice amount: overpayments</li>
+                    <li>Invoice date and payment terms: early-payment discounts</li>
+                    <li>Bank account, last 4 digits: changed bank details</li>
                   </ul>
                 </div>
               </div>
-              <p class="kicker--foot">Reading time about four minutes · Export time about fifteen</p>
             </section>
 
             <section id="before">
               <h2 class="blockhead">Before you begin</h2>
               <div class="callout">
                 <p class="callout__label"><span class="mark" aria-hidden="true"></span>What you need</p>
-                <p>A Xero login with permission to run and export reports.</p>
-                <p>A date range in mind — two years is a good first pass.</p>
-                <p>Somewhere to put four files while you work.</p>
+                <p>A Xero login that can run and export reports.</p>
+                <p>A Reclaim account, to upload the file.</p>
               </div>
               <div class="callout callout--warning">
-                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Export permission is separate</p>
-                <p>In most systems, being able to see a report and being able to export it are two different permissions. If the export control is missing rather than greyed out, it is a permission question for whoever administers your account, not a problem with the report.</p>
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Your screen may differ</p>
+                <p>Menus and report names change between plans and over time. If yours don’t match, look for any report that lists the payments you made, or <a href="#contact" data-modal="talk">ask us</a>.</p>
               </div>
             </section>
 
           <section id="step-1" class="step">
             <header class="step__head">
               <span class="step__num">01</span>
-              <h2 class="step__title">Open Reports</h2>
+              <h2 class="step__title">Run a payments report</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Sign in to Xero and go to <strong>Accounting</strong>, then <strong>Reports</strong>. Three of the four exports in this guide start here; the fourth comes from your contact list.</p>
-                <p>If you have starred reports before, the ones below may already be on your dashboard. Otherwise use the search box at the top of the reports page.</p>
+                <p>In Xero’s reports, open one that lists the payments you made to suppliers, with a row for each payment. Set the period you want checked and run it.</p>
+                <p>You want the supplier’s name, the date the money left, the amount, and the supplier’s invoice number if the report can show it. A list of unpaid bills isn’t enough: Reclaim checks what was paid.</p>
               </div>
-              <pre class="code"><span class="cm"># the reports page</span>
-https://go.xero.com/app/<span class="hl">reports</span></pre>
-              
-              <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>One organisation at a time</p>
-                  <p>Xero keeps each organisation separate, and so should the upload. Exporting two organisations and uploading them together will make ordinary payments in one look like duplicates of the other.</p>
-                </div>
             </div>
           </section>
 
           <section id="step-2" class="step">
             <header class="step__head">
               <span class="step__num">02</span>
-              <h2 class="step__title">Set the date range</h2>
+              <h2 class="step__title">Export it</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Each report has a date selector at the top. Set the range you want, then select <strong>Update</strong> to re-run the report before exporting it.</p>
-                <p>Use the same range everywhere. A payment inside the window whose bill sits outside it will look unmatched, which is a cropping artefact rather than a finding.</p>
+                <p>Export the report to Excel rather than PDF, which loses the columns. You can upload the Excel file as it is.</p>
               </div>
-              
-              
-              <div class="callout-grid">
-                <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Two years is a good start</p>
-                  <p>Credits in particular can sit unapplied for a long time. A short window will find recent duplicates and miss the older money.</p>
-                </div>
-                <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Check the basis</p>
-                  <p>Where a Xero report offers a cash or accrual view, take the accrual one. Bills that are entered but unpaid are part of what Reclaim compares against.</p>
-                </div>
-              </div>
+              <pre class="code"><span class="cm"># in Xero</span>
+a row per payment, with
+<span class="hl">supplier · date paid · amount</span> · invoice number</pre>
             </div>
           </section>
 
           <section id="step-3" class="step">
             <header class="step__head">
               <span class="step__num">03</span>
-              <h2 class="step__title">Export payable invoices</h2>
+              <h2 class="step__title">Upload the file</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Run <strong>Payable Invoice Detail</strong>. It lists supplier bills line by line with their status, which is the base file for duplicate bills and for bills paid twice.</p>
-                <p>Select <strong>Export</strong> at the top of the report and choose <strong>Excel</strong>. Xero also offers PDF and Google Sheets; take the Excel file, because PDF loses the column structure Reclaim reads.</p>
+                <p><a href="/audit">Log in to Reclaim</a>, click <strong>Upload a ledger</strong> and drop the file in. It can be up to 50 MB. If a workbook has more than one sheet of rows, Reclaim asks which one to read.</p>
               </div>
-              <pre class="code"><span class="cm"># what this file should contain</span>
-supplier · date · <span class="hl">invoice number</span> · reference · amount · status</pre>
-              <div class="shot">
-                <div class="shot__frame">
-                  <table>
-                    <thead><tr><th>Supplier</th><th>Date</th><th>Invoice no.</th><th>Reference</th><th>Amount</th><th>Status</th></tr></thead>
-                    <tbody><tr><td>Northwind Packaging</td><td>12 Mar 2025</td><td>INV-4471</td><td>PO 8812</td><td>2,480.00</td><td>Paid</td></tr><tr><td>Northwind Packaging</td><td>12 Mar 2025</td><td>INV4471</td><td>PO 8812</td><td>2,480.00</td><td>Paid</td></tr><tr><td>Harbour Freight Co</td><td>09 Jan 2026</td><td>88213</td><td>—</td><td>915.40</td><td>Paid</td></tr></tbody>
-                  </table>
-                </div>
-                <p class="shot__cap"><span class="shot__cap-id">FILE-01</span><span>Supplier bills line by line, with their reference and status.</span></p>
+              <div class="callout">
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Files it can’t read</p>
+                <p>Old .xls files, workbooks with a password, and Apple Numbers files. Save those as .xlsx or CSV first. A PDF won’t work either.</p>
               </div>
-              
             </div>
           </section>
 
           <section id="step-4" class="step">
             <header class="step__head">
               <span class="step__num">04</span>
-              <h2 class="step__title">Export account transactions</h2>
+              <h2 class="step__title">Match the columns</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Run <strong>Account Transactions</strong> for your bank and credit card accounts. This is the payments side: what actually left the account, and when.</p>
-                <p>Payable Invoice Detail tells you what was owed. Account Transactions tells you what was paid. A duplicate payment is visible where those two disagree, and neither report shows it alone.</p>
+                <p>You’ll only see this step if Reclaim isn’t sure. It shows the first rows of your file, with a suggestion for each column it thinks it knows. Check every suggestion, fill in anything it left empty, then click <strong>Continue</strong>. Your file isn’t changed.</p>
               </div>
-              
               <div class="shot">
                 <div class="shot__frame">
                   <table>
-                    <thead><tr><th>Date</th><th>Account</th><th>Description</th><th>Reference</th><th>Spent</th></tr></thead>
-                    <tbody><tr><td>28 Dec 2025</td><td>Business account</td><td>Northwind Packaging</td><td>INV-4471</td><td>2,480.00</td></tr><tr><td>04 Jan 2026</td><td>Company card</td><td>Northwind Packaging</td><td>inv 4471</td><td>2,480.00</td></tr><tr><td>06 Feb 2026</td><td>Business account</td><td>Harbour Freight Co</td><td>88213</td><td>915.40</td></tr></tbody>
+                    <thead><tr><th>Reclaim needs</th><th>Your file calls it</th></tr></thead>
+                    <tbody><tr><td>Vendor</td><td>Contact</td></tr><tr><td>Payment date</td><td>Date</td></tr><tr><td>Amount paid</td><td>Credit</td></tr><tr><td>Invoice number</td><td>Reference</td></tr></tbody>
                   </table>
                 </div>
-                <p class="shot__cap"><span class="shot__cap-id">FILE-02</span><span>What actually left the account, from every account money leaves from.</span></p>
+                <p class="shot__cap"><span class="shot__cap-id">MADE UP</span><span>One way the columns of an export might match.</span></p>
               </div>
-              <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Include every account money leaves from</p>
-                  <p>Operating account, card accounts, and any account used for one-off supplier payments. A bill paid once from the main account and once from a card is exactly the case that gets missed.</p>
+              <div class="callout callout--warning">
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Check the invoice number twice</p>
+                <p>Some reports put a check or payment number in the number column. Reclaim compares the number printed on the vendor’s invoice. If your column is a payment number instead, choose <strong>Not in this file</strong>: matched by mistake, it can hide a bill that was paid twice.</p>
+              </div>
+              <div class="prose">
+                <p>It may also ask:</p>
+              </div>
+              <div class="callout-grid">
+                <div class="callout">
+                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Dates</p>
+                  <p>Which way round they are, if 03/04/2026 could be March 4 or April 3 and nothing else in the file settles it.</p>
                 </div>
+                <div class="callout">
+                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Amounts</p>
+                  <p>Whether negative amounts are payments. Many reports show money going out as a negative. Reclaim treats a negative as a refund or credit unless you tell it to flip the sign.</p>
+                </div>
+              </div>
             </div>
           </section>
 
           <section id="step-5" class="step">
             <header class="step__head">
               <span class="step__num">05</span>
-              <h2 class="step__title">Export your supplier list</h2>
+              <h2 class="step__title">Check it, then run the audit</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Go to <strong>Contacts</strong>, open your suppliers, and use the export option to download them as CSV.</p>
-                <p>This file is small and it matters more than its size suggests. The same supplier entered twice — once with a trading name, once with the registered name — produces two sets of bills that never get compared. The contact export is how Reclaim works out that they are one company.</p>
-              </div>
-              
-              <div class="shot">
-                <div class="shot__frame">
-                  <table>
-                    <thead><tr><th>Contact</th><th>Account number</th><th>Email</th><th>Status</th></tr></thead>
-                    <tbody><tr><td>Northwind Packaging</td><td>NORTH01</td><td>ap@northwind.example</td><td>Active</td></tr><tr><td>Northwind Pkg</td><td>NORTH02</td><td>ap@northwind.example</td><td>Archived</td></tr><tr><td>Harbour Freight Co</td><td>HARB01</td><td>billing@harbour.example</td><td>Active</td></tr></tbody>
-                  </table>
-                </div>
-                <p class="shot__cap"><span class="shot__cap-id">FILE-03</span><span>Suppliers, including archived ones. Two rows here can be one company.</span></p>
+                <p>Before any check runs, Reclaim shows how many payments and vendors it read, the dates they cover, how it read the file, and any rows it skipped. If the numbers don’t look right for the period, choose <strong>Check the column matches</strong> and go back. Otherwise, run the audit.</p>
               </div>
               <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Include archived contacts</p>
-                  <p>A supplier archived after a merge still has history attached. Leaving archived contacts out is one of the easier ways to hide a duplicate.</p>
-                </div>
-            </div>
-          </section>
-
-          <section id="step-6" class="step">
-            <header class="step__head">
-              <span class="step__num">06</span>
-              <h2 class="step__title">Export credits and open items</h2>
-            </header>
-            <div class="step__body">
-              <div class="prose">
-                <p>Run <strong>Aged Payables Detail</strong>. It shows what is outstanding per supplier, including credit notes that were raised and never applied.</p>
-                <p>An unapplied credit note is money you are owed sitting quietly on the supplier record. It does not chase itself, and it rarely shows up in a payment run.</p>
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>One company at a time</p>
+                <p>If you keep more than one set of books, upload each one separately. Mixing them can make ordinary payments look like duplicates. Keep the original export too, so you can trace a result back to it.</p>
               </div>
-              <pre class="code"><span class="cm"># the rows that matter here</span>
-type = <span class="hl">Credit Note</span>
-remaining credit <span class="hl">&gt; 0</span></pre>
-              <div class="shot">
-                <div class="shot__frame">
-                  <table>
-                    <thead><tr><th>Supplier</th><th>Date</th><th>Type</th><th>Remaining</th></tr></thead>
-                    <tbody><tr><td>Harbour Freight Co</td><td>14 Mar 2025</td><td>Credit Note</td><td>640.00</td></tr><tr><td>Delta Print Services</td><td>02 Nov 2025</td><td>Credit Note</td><td>1,225.00</td></tr><tr><td>Delta Print Services</td><td>22 Jan 2026</td><td>Bill</td><td>4,100.00</td></tr></tbody>
-                  </table>
-                </div>
-                <p class="shot__cap"><span class="shot__cap-id">FILE-04</span><span>What is outstanding per supplier, including credit notes never applied.</span></p>
-              </div>
-              
-            </div>
-          </section>
-
-          <section id="step-7" class="step">
-            <header class="step__head">
-              <span class="step__num">07</span>
-              <h2 class="step__title">Check the files before you upload</h2>
-            </header>
-            <div class="step__body">
-              <div class="prose">
-                <p>Open each export once before you send it. There are three things worth a glance.</p>
-                <p>That the first row is the column header and not the organisation name, which Xero sometimes places above it. That amounts came through as numbers. And that the file has rows in it at all, rather than an empty range you did not notice.</p>
-              </div>
-              
-              
-              <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Send them as they came out</p>
-                  <p>Do not tidy the files. Reclaim points every result at a row in the export you gave it, and a re-saved or reformatted file breaks that trail.</p>
-                </div>
             </div>
           </section>
 
@@ -370,24 +292,28 @@ remaining credit <span class="hl">&gt; 0</span></pre>
               <h2 class="blockhead">Troubleshooting</h2>
               <div class="acc">
                 <details open class="is-open">
-                  <summary>My report doesn't have an Export button</summary>
-                  <div class="panel"><div class="prose"><p>Older report versions in Xero export from a different menu, and some custom reports need to be saved first. If you cannot find it, send us a screenshot of the report header and we will point at the right control.</p></div></div>
+                  <summary>Reclaim can’t find a vendor, date or amount</summary>
+                  <div class="panel"><div class="prose"><p>The file may be a vendor list or a list of unpaid bills, which don’t say what was paid. You need a report with a row for each payment. If yours is one, check that each field in step 4 points at the right column, and that <strong>Headings are on row</strong> shows the right row. You can also compare it with the <a href="/sample-ledger.csv" download>sample CSV</a>.</p></div></div>
                 </details>
                 <details>
-                  <summary>Should I use Excel, CSV or Google Sheets?</summary>
-                  <div class="panel"><div class="prose"><p>Excel or CSV. Reclaim reads both. Avoid PDF — it looks the same to a person and loses the column structure entirely.</p></div></div>
+                  <summary>The vendor’s name is only written once</summary>
+                  <div class="panel"><div class="prose"><p>Reports grouped by vendor often put the name on a line above its payments. Tick <strong>Each vendor’s name is written once, above its payments</strong>, if it isn’t ticked already, and Reclaim carries the name down.</p></div></div>
                 </details>
                 <details>
-                  <summary>Do I need tracking categories?</summary>
-                  <div class="panel"><div class="prose"><p>No. Reclaim matches on supplier, amount, reference and date. Tracking categories are useful to you when you review a result, but nothing depends on them.</p></div></div>
+                  <summary>Some rows were skipped</summary>
+                  <div class="panel"><div class="prose"><p>A row is skipped when it has no vendor, no date Reclaim can read, or no amount. Title and total lines are meant to be skipped. Before you add anything, Reclaim says how many rows it will skip and shows the first few with the reason.</p></div></div>
                 </details>
                 <details>
-                  <summary>Can I upload the same range twice?</summary>
-                  <div class="panel"><div class="prose"><p>Yes, and it does no harm. Reclaim compares the records inside one upload; running a wider range later simply gives it more to compare.</p></div></div>
+                  <summary>Can I upload my bills, vendor list or credits too?</summary>
+                  <div class="panel"><div class="prose"><p>Not as separate files. Reclaim checks payments. If your bills file has invoice dates, amounts or terms, copy those columns next to the matching payments and more checks will run.</p></div></div>
+                </details>
+                <details>
+                  <summary>How far back should I go?</summary>
+                  <div class="panel"><div class="prose"><p>Two years is a sensible first pass. The file can be up to 50 MB. If yours is larger, split it by date and add each part to the same audit.</p></div></div>
                 </details>
                 <details>
                   <summary>Can Reclaim connect to Xero directly instead?</summary>
-                  <div class="panel"><div class="prose"><p>Not yet. A direct Xero connection is in development. For now, Reclaim works from exports you upload, so you choose exactly what you hand over. Nothing connects to your organisation and nothing is changed inside it.</p></div></div>
+                  <div class="panel"><div class="prose"><p>Not yet, and there is no Xero connection today. Reclaim works from the file you upload.</p></div></div>
                 </details>
               </div>
             </section>
@@ -414,7 +340,7 @@ remaining credit <span class="hl">&gt; 0</span></pre>
       <div class="ft-top">
         <div class="ft-about">
           <a href="/" class="hx-logo" aria-label="Reclaim home"><svg class="wheel" viewBox="0 0 26 23" fill="currentColor"><use href="#hx-wheel"/></svg><span class="word"><span class="letter">R</span><span class="letter">e</span><span class="letter">c</span><span class="letter">l</span><span class="letter">a</span><span class="letter">i</span><span class="letter">m</span></span></a>
-          <p class="ft-line">Finds duplicate payments, overpayments and forgotten credits in your books, and helps you get the money back.</p>
+          <p class="ft-line">Finds duplicate payments, overpayments and unclaimed discounts in your records, and helps you get duplicate payments back.</p>
           <a href="mailto:reclaimbusiness1@gmail.com" class="ft-mail">reclaimbusiness1@gmail.com</a>
         </div>
         <nav class="ft-cols" aria-label="Footer">
@@ -527,7 +453,6 @@ remaining credit <span class="hl">&gt; 0</span></pre>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.13.0/gsap.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.13.0/ScrollTrigger.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/lenis@1.3.4/dist/lenis.min.js"></script>
-
 <script src="/main.js"></script>
 <script src="/reels.js"></script>
 </body>

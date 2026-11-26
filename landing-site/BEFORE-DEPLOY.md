@@ -4,52 +4,42 @@ Everything in this file is content that is either **not yet verified** or **deli
 generic**. None of it is a bug; each item is a decision or a check that has to happen before the
 site is published. Delete a line once it is done.
 
-Last reviewed: 2026-09-17.
+Last reviewed: 2026-11-24.
 
 ---
 
 ## 1. Security page (`src/pages/security.html`)
 
-The page only states things that are true of the product as it works today: you choose the files,
-there is no connection to your accounting system, nothing is written back, nothing can move money,
-and every result points at a row.
+The page states what the code does today: you upload a CSV or Excel file, the checks run in the browser, signed-in audits
+are saved to the server, nothing is written to your books, nothing can move money, and AI gets one case at a time.
+The QuickBooks import is described as in testing. Do not call Intuit's grant read-only: it permits writes.
 
-**Deliberately not claimed** — the `#pending` section says so on the page itself:
+**Deliberately not claimed** (the `#pending` section says so). `docs/pilot-data-policy.md` has draft answers, but it
+is not a public commitment until Jagan and Sid approve it:
 
-- [ ] Where an uploaded file is held, and for how long after an audit finishes.
+- [ ] Where a saved audit is held, and for how long.
 - [ ] What is encrypted, in transit and at rest, named specifically.
-- [ ] How a customer removes what they uploaded, and what happens when they ask us to.
-
-Replace that section (and the three cards under it) with the real answers once storage, encryption,
-retention and deletion are settled **and verified against how the product actually behaves**.
+- [ ] What happens to backups after someone deletes their account.
 
 Also on that page:
 
 - [ ] `#reporting` says we do not run a bug bounty programme. True today. Revisit if that changes.
-- [ ] Terms of Service and Privacy links are `href="#"` placeholders in `#elsewhere` and the footer.
+- [x] Terms and Privacy links point at `/terms` and `/privacy`.
 
 ## 2. Guides (`src/pages/guides/*.html`)
 
-Every step was written from general knowledge of these products, **not** from the vendor
-documentation. Check each menu path, report name, button label and screenshot caption against the
-official docs and correct it before publishing. The per-guide checklist lives in
-`notes/unverified-guides.md`; the short version:
+Rewritten 2026-11-25 for the column-matching importer (`src/lib/csvMapping.ts`, `xlsx.ts`, local main a1b976e):
+CSV or Excel, and unknown headings are asked about. Deploy the guides only together with that importer.
+The shared steps are `src/partials/guide-file.html` and `guide-finish.html`; change them when the importer changes.
+What is and isn't confirmed for each product is in `notes/unverified-guides.md`.
 
-- [ ] QuickBooks Online — https://quickbooks.intuit.com/learn-support/en-us/help-article/export-reports/export-reports-lists-data-quickbooks-online/L0LqSlaNa_US_en_US
-- [ ] Xero — https://central.xero.com/s/article/Export-a-report
-- [ ] NetSuite — https://docs.oracle.com/en/cloud/saas/netsuite/
-- [ ] Bill — https://help.bill.com/
-
-Each guide file carries the same note as an HTML comment at the top.
-
-- [ ] The file-preview tables in the guide steps (`.shot`) use **made-up vendor names, invoice
-      numbers and amounts**. They illustrate the shape of a good export, not real data. Keep them
-      obviously fictional or replace them with a sanitised real export.
-- [ ] The security answer in each guide's FAQ repeats the security page. Update both together.
+- [ ] Have someone with a real account in each product follow its guide start to finish and upload the result.
+- [x] Raw exports import. Checked 2026-11-25 on the upload screen with made-up files shaped like each system's export.
+- [ ] Try a real export from each system; none has been tried.
 
 ## 3. Illustrative figures in the product story
 
-- [ ] The example result cards on the What It Finds pages (`src/pages/what-it-finds/*.html`) use
+- [ ] The example result cards on the What It Checks page use
       invented vendors, invoice numbers and amounts. They show what a finding looks like; they are
       not customer data and are not claims about typical recovery.
 - [ ] The app mock-ups on the landing page and the Platform pages show invented numbers for the
@@ -58,10 +48,7 @@ Each guide file carries the same note as an HTML comment at the top.
 No page states a real recovery amount, a success rate, or a customer outcome. Keep it that way
 until there is a verified figure to state.
 
-- [ ] The landing page (`src/pages/index.html`) still uses the words "recovery" and "recovered" in
-      the app mock-up and the copy around it. Every page built after it avoids that language on
-      purpose. The landing page was left as it was, apart from the shared nav and footer — bring it
-      in line when it is next revised.
+- [x] The landing page names only checks the app runs (no unused credits, duplicate bills or payment mismatches).
 
 ## 4. Research pages (`src/pages/research/*.html`)
 
@@ -83,20 +70,19 @@ linked on the page. The working notes are in `notes/research-sources.md`.
 
 ## 5. Popup ("Start an audit" / "Talk to us")
 
-- [ ] The modal is **front end only**. Submitting it shows the success state and sends nothing.
-      Wire it to a real endpoint (and decide where the data goes) before launch.
+- [x] The form posts to `/api/contact`. Confirm delivery on the real host before launch.
 - [x] The contact address in the footer is `reclaimbusiness1@gmail.com`.
 
 ## 6. Navigation and naming
 
-- [ ] **Pricing** is a nav link with `href="#"` and no page behind it. Either build the page or
-      remove the link before launch.
+- [x] Pricing has its own page.
 - [ ] The product name, the logo wordmark and the domain are not final.
 - [ ] Careers was deliberately left out.
 
-## 7. Company page (`src/pages/company.html`)
+## 7. About page (`src/pages/about.html`)
 
 - [ ] Nothing is claimed about team size, funding, location, customers or history, because none of
       it is settled. If any of that is added, it has to be true and checkable.
-- [ ] The "Where our numbers come from" tiles link straight to the publishers. Keep them in step
-      with `notes/research-sources.md`.
+- [ ] "Where we are" has to stay true of the product. Review it with each release.
+- [ ] Keep the source links in step with `notes/research-sources.md`.
+- [ ] APQC's sample size is 2,386 on the AP benchmarks page but 1,686 in the notes. Check which is current.

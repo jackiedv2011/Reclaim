@@ -3,7 +3,7 @@ Orthographic and transparent, so they sit on the page's coloured panels. Each lo
 
   "$B" -b --factory-startup --python wc_models.py -- scene=exact out=out/wc/exact fps=30 frames=1,60 res=640 spp=24 device=METAL
 
-scene: exact | near | over | bank | outlier | shared | unclaimed | missed | closing (a still) | free | growth | flat (the Pricing page).
+scene: exact | near | over | bank | outlier | shared | unclaimed | missed | closing (a still) | free | growth | flat (the Pricing page) | imprint (the About page).
 See render_wc.sh for the full set.
 """
 import bpy, math, os, shutil, sys
@@ -265,6 +265,31 @@ elif SCENE == 'closing':
     def pose(t):
         pass
     aim_z, scale = .15, 2.6
+elif SCENE == 'imprint':
+    # About: nine payments set in a slab; one lifts out, and the record it leaves is under it
+    P_, R_, SLAB, DEEP = .7, .29, .3, .1
+    slab = block('slab', INK, 2.36, 2.36, SLAB, r=.2, rnd=.03)
+    for i in range(9):
+        x, y = (i % 3 - 1) * P_, (i // 3 - 1) * P_
+        bpy.ops.mesh.primitive_cylinder_add(vertices=96, radius=R_ + .022, depth=1, location=(x, y, SLAB - DEEP + .5))
+        cut = bpy.context.object
+        cut.hide_render = True
+        cut.display_type = 'WIRE'
+        bo = slab.modifiers.new(f'cut{i}', 'BOOLEAN')
+        bo.operation, bo.object, bo.solver = 'DIFFERENCE', cut, 'EXACT'
+        if i == 4:
+            page = block('page', PAPER, R_ * 2, R_ * 2, .014, r=R_, rnd=.003, at=(x, y, SLAB - DEEP))
+            for k, (w, lx) in enumerate(((.2, -.1), (.34, -.03), (.34, .04))):
+                bar_on(page, .014, '#A39E91', .022, w, lx, 0)
+            bar_on(page, .014, GREEN, .05, .2, .13, .03)
+        else:
+            block(f'coin{i}', PAPER, R_ * 2, R_ * 2, .12, r=R_, rnd=.022, at=(x, y, SLAB - DEEP))
+    coin = move(block('coin', GREEN, R_ * 2, R_ * 2, .106, r=R_, rnd=.022))
+    def pose(t):
+        s = pulse(.6, 1.9, 3.5, 4.6, t)
+        coin.location = (0, 0, SLAB - DEEP + .014 + .053 + .86 * s)
+        coin.rotation_euler = (math.radians(13) * s, math.radians(-9) * s, 0)
+    aim_z, scale = .42, 3.6
 else:
     # thirty days: the discount window in green, and the payment landing after it closed
     block('plate', INK, 1.95, 1.65, .07, r=.12)

@@ -1,0 +1,28 @@
+            <section id="what">
+              <h2 class="blockhead">What Reclaim reads</h2>
+              <div class="prose">
+                <p>One file of the payments you made out of {{system}}: a CSV or an Excel workbook (.xlsx). Title lines at the top, totals, and reports grouped by vendor are fine, so you shouldn’t need to edit it first. Uploading a file connects nothing to your account and changes nothing inside it.</p>
+                <p>If your headings are ones Reclaim knows, it reads them straight away. If not, it shows you your own columns and asks which is which. Three are required. Each of the others turns on more checks.</p>
+              </div>
+              <div class="tier" role="group" aria-label="The columns Reclaim reads">
+                <div class="tier__col">
+                  <p class="tier__tag">Required</p>
+                  <h3 class="tier__name">Every payment needs</h3>
+                  <ul>
+                    <li>Vendor</li>
+                    <li>Payment date</li>
+                    <li>Amount paid</li>
+                  </ul>
+                </div>
+                <div class="tier__col">
+                  <p class="tier__tag">Add if you have them</p>
+                  <h3 class="tier__name">More checks</h3>
+                  <ul>
+                    <li>Invoice number: duplicate payments</li>
+                    <li>Invoice amount: overpayments</li>
+                    <li>Invoice date and payment terms: early-payment discounts</li>
+                    <li>Bank account, last 4 digits: changed bank details</li>
+                  </ul>
+                </div>
+              </div>
+            </section>

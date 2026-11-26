@@ -5,14 +5,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Security — Reclaim</title>
-<meta name="description" content="Upload exports from your accounting system, with nothing connected to your books. Reclaim cannot move money or change your books, contacts no vendor without your approval, and gives AI only the minimum it needs for one task.">
+<meta name="description" content="Start with a file you export yourself, with nothing connected to your books. Reclaim cannot move money, never writes to your books, contacts no vendor without your approval, and gives AI only the facts of one case.">
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="preconnect" href="https://cdnjs.cloudflare.com">
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=Geist+Mono:wght@400;500&family=JetBrains+Mono:wght@400;500&family=Schibsted+Grotesk:ital,wght@0,400..800;1,400..800&display=block" rel="stylesheet">
-
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="/pages.css">
 <script>try{if(sessionStorage.getItem('rc-visited'))document.documentElement.classList.add('is-return')}catch(e){}</script>
@@ -124,10 +123,10 @@
     <div class="sc-hero-copy">
       <div class="eyebrow type-mono">Security</div>
       <h1 class="type-h1" data-split="h1">You choose<br>what we see.</h1>
-      <p class="type-body-large">Upload exports from your accounting system, with nothing connected to your books. Reclaim can’t move money, can’t change your books, and contacts no vendor until you approve it.</p>
+      <p class="type-body-large">Start with a file you export yourself, with nothing connected to your books. Reclaim can’t move money, never writes to your books, and contacts no vendor until you approve it.</p>
     </div>
     <ul class="sc-promises">
-      <li><b>Read only</b><span>Nothing in your books changes</span></li>
+      <li><b>Never writes</b><span>Nothing in your books changes</span></li>
       <li><b>No payment rights</b><span>It can’t move or release money</span></li>
       <li><b>You approve</b><span>Nothing reaches a vendor without you</span></li>
     </ul>
@@ -136,7 +135,7 @@
   <section class="sc-section" id="reads" theme="grey">
     <div class="nav-slot" data-theme="grey"></div>
     <div class="section-head"><div class="eyebrow type-mono">What it reads</div><h2 class="type-h2" data-split="h2">What Reclaim reads.</h2></div>
-    <ul class="sc-cards"><li><span class="type-mono">01</span><b>The source you choose</b><p>Export the records you want checked from QuickBooks Online, Xero, Bill, NetSuite or any spreadsheet, and upload them. QuickBooks Online direct import is available for sandbox testing with separate Intuit authorization.</p></li><li><span class="type-mono">02</span><b>Yours to delete</b><p>You decide what you upload, and you can export or delete your data whenever you like.</p></li><li><span class="type-mono">03</span><b>Read, never write</b><p>The QuickBooks adapter uses read requests under an accounting grant that permits writes. Signed-in projects sync to Reclaim’s server. Your team handles accounting closeout.</p></li><li><span class="type-mono">04</span><b>No payment rights</b><p>Reclaim cannot move money or release a payment. Refunds and credits go straight to you; Reclaim never holds recovered funds.</p></li></ul>
+    <ul class="sc-cards"><li><span class="type-mono">01</span><b>The source you choose</b><p>You export the payments you want checked and upload them as a CSV or Excel file. A direct QuickBooks Online import is in testing and isn’t open to customers yet.</p></li><li><span class="type-mono">02</span><b>Yours to take or delete</b><p>From Settings you can download everything in your account, or delete the account and the audits in it.</p></li><li><span class="type-mono">03</span><b>Saved when you sign in</b><p>The checks run in your browser. Once you’re signed in, your audit is saved to Reclaim’s server so you can come back to it. Your team records the accounting in your own books.</p></li><li><span class="type-mono">04</span><b>No payment rights</b><p>Reclaim cannot move money or release a payment. Refunds and credits go straight to you; Reclaim never holds recovered funds.</p></li></ul>
   </section>
 
   <section class="sc-section" id="evidence" theme="white">
@@ -148,7 +147,7 @@
   <section class="sc-never" id="never" theme="black">
     <div class="nav-slot" data-theme="black"></div>
     <div class="section-head"><div class="eyebrow type-mono">Never</div><h2 class="type-h2" data-split="h2">What Reclaim never gets.</h2><p class="type-body-large">Three things Reclaim has no use for, and is built never to have.</p></div>
-    <ul class="sc-cards sc-cards-dark"><li><span class="type-mono">01</span><b>Your passwords</b><p>Connecting QuickBooks Online or Xero happens on their own sign-in and approval screen. Reclaim never asks for your password to your accounting system, your bank or a vendor portal.</p></li><li><span class="type-mono">02</span><b>Payment authority</b><p>Nothing in Reclaim can approve, release or reverse a payment. Whoever holds that authority today still holds it afterwards.</p></li><li><span class="type-mono">03</span><b>Your ledger, in an AI prompt</b><p>AI never browses your books. The financial engine works out the numbers; AI gets only the few facts one task needs, like the vendor, invoice and amount for a single email.</p></li></ul>
+    <ul class="sc-cards sc-cards-dark"><li><span class="type-mono">01</span><b>Your passwords</b><p>Reclaim never asks for your password to your accounting system, your bank or a vendor portal. The QuickBooks Online import in testing uses Intuit’s own sign-in. Intuit’s permission allows changes; Reclaim only sends read requests.</p></li><li><span class="type-mono">02</span><b>Payment authority</b><p>Nothing in Reclaim can approve, release or reverse a payment. Whoever holds that authority today still holds it afterwards.</p></li><li><span class="type-mono">03</span><b>Your ledger, in an AI prompt</b><p>AI doesn’t find the mistakes or work out the numbers. When you ask for an AI draft, it gets that one case: the vendor, the finding, the invoices and payments in it, their terms and the amount. It also gets your note, and the name, business name and email address in your sender details.</p></li></ul>
   </section>
 
   <section class="sc-section" id="pending" theme="grey">
@@ -158,9 +157,9 @@
         <div class="eyebrow type-mono">Still to come</div>
         <h2 class="type-h2" data-split="h2">What we’ll publish next.</h2>
         <p class="type-body-large">Some of what belongs on a security page depends on decisions we are still making about storage.</p>
-        <p class="sc-pending-note">Reclaim is built to keep each customer’s data separate, encrypt your financial records and connection tokens, and let you export or delete what it holds. Where that data is kept, how long, and exactly which standards protect it are not settled yet. We would rather leave that blank than guess, and fill it in once it is true and checked.</p>
+        <p class="sc-pending-note">Reclaim is built to keep each customer’s data separate, encrypt saved audits and connection tokens, and let you export or delete what it holds. Where that data will be kept, for how long, and exactly which standards protect it are not settled yet. We would rather leave that blank than guess, and fill it in once it is true and checked.</p>
       </div>
-      <ul class="sc-cards sc-cards-col"><li><span class="type-mono">01</span><b>Storage</b><p>Where your records are held, and for how long.</p></li><li><span class="type-mono">02</span><b>Encryption</b><p>What is encrypted in transit and at rest, named specifically.</p></li><li><span class="type-mono">03</span><b>Deletion</b><p>How you remove your data or disconnect, and what happens then.</p></li></ul>
+      <ul class="sc-cards sc-cards-col"><li><span class="type-mono">01</span><b>Storage</b><p>Where your records are held, and for how long.</p></li><li><span class="type-mono">02</span><b>Encryption</b><p>What is encrypted in transit and at rest, named specifically.</p></li><li><span class="type-mono">03</span><b>Deletion</b><p>What happens to backups after you delete, and how long that takes.</p></li></ul>
     </div>
   </section>
 
@@ -218,7 +217,7 @@
       <div class="ft-top">
         <div class="ft-about">
           <a href="/" class="hx-logo" aria-label="Reclaim home"><svg class="wheel" viewBox="0 0 26 23" fill="currentColor"><use href="#hx-wheel"/></svg><span class="word"><span class="letter">R</span><span class="letter">e</span><span class="letter">c</span><span class="letter">l</span><span class="letter">a</span><span class="letter">i</span><span class="letter">m</span></span></a>
-          <p class="ft-line">Finds duplicate payments, overpayments and forgotten credits in your books, and helps you get the money back.</p>
+          <p class="ft-line">Finds duplicate payments, overpayments and unclaimed discounts in your records, and helps you get duplicate payments back.</p>
           <a href="mailto:reclaimbusiness1@gmail.com" class="ft-mail">reclaimbusiness1@gmail.com</a>
         </div>
         <nav class="ft-cols" aria-label="Footer">
@@ -331,7 +330,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.13.0/gsap.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.13.0/ScrollTrigger.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/lenis@1.3.4/dist/lenis.min.js"></script>
-
 <script src="/main.js"></script>
 <script src="/reels.js"></script>
 </body>
