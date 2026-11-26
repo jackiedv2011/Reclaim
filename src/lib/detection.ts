@@ -1,4 +1,4 @@
-import type { APRecord, Finding, FindingClass, DetectionResult } from '@/types'
+import type { APRecord, Finding, FindingClass, DetectionResult } from '../types.ts'
 import { normalizeVendor, normalizeAccountLast4, daysBetween, parseTerms, formatCurrency, formatDate, plural, toCents } from './format.ts'
 import { normalizeReference, referenceStrength } from './sourceIdentity.ts'
 import { reviewMetadata } from './findingMetadata.ts'

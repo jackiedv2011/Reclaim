@@ -1,5 +1,9 @@
 import { DatabaseSync } from 'node:sqlite'
 import { rowFingerprint } from './uploads.ts'
+import { ensureTenancySchema } from './tenancy.ts'
+import { ensureLedgerSchema } from './ledger.ts'
+import { ensureColumnMappingSchema } from './columnMappings.ts'
+import { ensureLedgerSyncSchema } from './ledgerSync.ts'
 
 /**
  * SQLite through Node's built-in driver: no native dependency, one file on
@@ -138,6 +142,14 @@ export function openDatabase(path: string): DatabaseSync {
       }
     }
   }
+  // Additive (financial foundation workstream): organisations and memberships.
+  // Every account is migrated into a one-member organisation it owns.
+  ensureTenancySchema(db)
+  // Additive: tenant-scoped imports and source records (server ledger, C3).
+  ensureLedgerSchema(db)
+  ensureColumnMappingSchema(db)
+  // Additive: QuickBooks sync state and job receipts (C5).
+  ensureLedgerSyncSchema(db)
   return db
 }
 

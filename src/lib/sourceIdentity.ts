@@ -1,5 +1,5 @@
-import type { APRecord } from '@/types'
-import { normalizeVendor } from './format'
+import type { APRecord } from '../types.ts'
+import { normalizeVendor } from './format.ts'
 
 /** SHA-256 over UTF-8. Synchronous because CSV parsing and ledger merges are synchronous. */
 export function checksum(value: string): string {
