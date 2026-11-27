@@ -1,0 +1,145 @@
+{
+  "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
+  "response": {
+    "model": "recovery.overview",
+    "contractVersion": "0.1.2",
+    "metricDefinitionVersion": "recovery-v0.1",
+    "tenantId": "tenant_fixture_a",
+    "origin": "legacy_audit_snapshot",
+    "scope": {
+      "from": null,
+      "to": null,
+      "dateBasis": "none",
+      "currencies": [
+        "USD"
+      ]
+    },
+    "freshness": {
+      "computedAt": 1782907200000,
+      "sourceUpdatedAt": 1775088000000,
+      "stale": true,
+      "staleReason": "Newest source data is more than 35 days old."
+    },
+    "coverage": [
+      {
+        "check": "recovery_cases",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "flagged_for_review",
+        "status": "supported",
+        "reasons": []
+      },
+      {
+        "check": "supported_potential",
+        "status": "supported",
+        "reasons": []
+      },
+      {
+        "check": "promised",
+        "status": "supported",
+        "reasons": []
+      },
+      {
+        "check": "matched_returns",
+        "status": "not_run",
+        "reasons": [
+          "no_independent_return_matching"
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "case:audit_fixture_q1/exact_duplicate-rec_5-rec_6",
+        "label": "Fixture Coffee Co · exact_duplicate · requested"
+      },
+      {
+        "id": "case:audit_fixture_q2/amount_outlier-rec_7",
+        "label": "Fixture Coffee Co · amount_outlier · unreviewed"
+      }
+    ],
+    "exclusions": [
+      {
+        "code": "cross_audit_overlap",
+        "count": 1,
+        "amounts": [],
+        "detail": "Copies of the same case held by another saved audit; counted once."
+      }
+    ],
+    "warnings": [
+      {
+        "code": "cross_audit_cases_folded",
+        "detail": "1 cases appeared in more than one saved audit and were counted once."
+      },
+      {
+        "code": "cross_audit_case_states_differ",
+        "detail": "1 of those cases were at different stages in different audits; the most advanced stage is shown."
+      }
+    ],
+    "result": {
+      "byCurrency": [
+        {
+          "currency": "USD",
+          "flaggedForReviewMinor": 356975,
+          "flaggedForReviewCount": 1,
+          "supportedPotentialMinor": 0,
+          "supportedPotentialCount": 0,
+          "approvedOutstandingMinor": 91025,
+          "approvedOutstandingCount": 1,
+          "promisedMinor": 91025,
+          "promisedCount": 1,
+          "customerRecordedReturnsMinor": 50000,
+          "customerRecordedReturnsCount": 1,
+          "matchedReturnsMinor": null,
+          "matchedReturnsCount": null
+        }
+      ],
+      "counts": {
+        "cases": 2,
+        "claims": 1,
+        "nonClaims": 1,
+        "byStage": {
+          "unreviewed": 1,
+          "needs_info": 0,
+          "dismissed": 0,
+          "confirmed": 0,
+          "requested": 1,
+          "recovered": 0,
+          "not_recovered": 0
+        },
+        "partialReturns": 1,
+        "closedWithoutRecovery": 0,
+        "dismissed": 0,
+        "needingCustomerAction": 2
+      },
+      "dedup": {
+        "snapshotsRead": 3,
+        "casesCounted": 2,
+        "duplicatesFolded": 1,
+        "keysWithDifferingStates": 1
+      },
+      "returnMatching": {
+        "available": false,
+        "verified": 0,
+        "proposed": 0,
+        "ambiguous": 0,
+        "reversed": 0
+      },
+      "definitions": {
+        "flaggedForReview": "Open checks in the covered records that have not passed the evidence review; the amount is what the check flagged, not money a supplier owes.",
+        "supportedPotential": "For open cases whose evidence review passed, the supported amount minus any returns you recorded; the most a request could ask for, not a forecast.",
+        "approvedOutstanding": "For supplier requests you approved that are still open, the approved amount not yet covered by a return you recorded.",
+        "promised": "The latest amount a supplier said it would return on an open request, capped at what is still outstanding; a statement, not money received.",
+        "customerRecordedReturns": "Refunds and applied credits you recorded with a reference; they have not been matched to a bank or accounting record.",
+        "matchedReturns": "Returns independently matched to a bank or accounting record; not available yet, so shown as unavailable rather than zero.",
+        "partialReturns": "Open supplier requests where you recorded part of the money coming back.",
+        "closedWithoutRecovery": "Requests closed with no return recorded.",
+        "needingCustomerAction": "Cases where the next step is yours, including checks you have not reviewed yet."
+      }
+    }
+  }
+}

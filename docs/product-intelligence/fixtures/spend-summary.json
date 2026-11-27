@@ -1,0 +1,207 @@
+{
+  "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
+  "response": {
+    "model": "spend.summary",
+    "contractVersion": "0.1.2",
+    "metricDefinitionVersion": "spend-v0.1",
+    "tenantId": "tenant_fixture_a",
+    "origin": "legacy_audit_snapshot",
+    "scope": {
+      "from": null,
+      "to": null,
+      "dateBasis": "payment_date",
+      "currencies": [
+        "EUR",
+        "USD"
+      ]
+    },
+    "freshness": {
+      "computedAt": 1782907200000,
+      "sourceUpdatedAt": 1782907200000,
+      "stale": false,
+      "staleReason": null
+    },
+    "coverage": [
+      {
+        "check": "covered_spend",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "mixed_currency",
+          "settlement_unverified",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "net_spend",
+        "status": "not_run",
+        "reasons": [
+          "upstream_contract_pending"
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "import:audit_fixture_q1/batch_9faafaa0de374e785f06fbdea56aa98978b3d099d3fa63ff1af72090e9ff0337",
+        "label": "csv import, 11 rows"
+      },
+      {
+        "id": "import:audit_fixture_q2/batch_b54837420f6a08b870865937dca3576ef7987abc4d0b0243e7e75d7129df20d0",
+        "label": "csv import, 9 rows"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_0",
+        "label": "Fixture Property Mgmt 2026-01-01 USD 400000"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_1",
+        "label": "Fixture Property Mgmt 2026-02-01 USD 400000"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_10",
+        "label": "Fixture Euro Parts GmbH 2026-03-10 EUR 90000"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_2",
+        "label": "Fixture Property Mgmt 2026-03-01 USD 400000"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_3",
+        "label": "Fixture Coffee Co 2026-01-20 USD 120000"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_4",
+        "label": "Fixture Coffee Co 2026-02-05 USD 135050"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_5",
+        "label": "Fixture Coffee Co 2026-02-20 USD 141025"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_6",
+        "label": "Fixture Coffee Co 2026-03-02 USD 141025"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_7",
+        "label": "Fixture Office Supply 2026-01-25 USD 31040"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_8",
+        "label": "Fixture Office Supply 2026-02-24 USD 28960"
+      },
+      {
+        "id": "record:audit_fixture_q1/rec_9",
+        "label": "Fixture Office Supply 2026-03-05 USD -5000"
+      },
+      {
+        "id": "record:audit_fixture_q2/rec_3",
+        "label": "Fixture Property Mgmt 2026-04-01 USD 400000"
+      },
+      {
+        "id": "record:audit_fixture_q2/rec_4",
+        "label": "Fixture Property Mgmt 2026-05-01 USD 400000"
+      },
+      {
+        "id": "record:audit_fixture_q2/rec_5",
+        "label": "Fixture Property Mgmt 2026-06-01 USD 400000"
+      },
+      {
+        "id": "record:audit_fixture_q2/rec_6",
+        "label": "Fixture Coffee Co 2026-04-10 USD 130000"
+      },
+      {
+        "id": "record:audit_fixture_q2/rec_7",
+        "label": "Fixture Coffee Co 2026-05-12 USD 498000"
+      },
+      {
+        "id": "record:audit_fixture_q2/rec_8",
+        "label": "Fixture Coffee Co 2026-06-09 USD 129575"
+      }
+    ],
+    "exclusions": [
+      {
+        "code": "cross_audit_overlap",
+        "count": 3,
+        "amounts": [],
+        "detail": "Rows that appeared again in a later saved audit; each was counted once."
+      }
+    ],
+    "warnings": [
+      {
+        "code": "cross_audit_overlap_counted_once",
+        "detail": "3 rows appeared in more than one saved audit and were counted once (matched by vendor, invoice reference, payment date, amount and position in the file)."
+      }
+    ],
+    "result": {
+      "basis": "recorded_ap_payments_in_covered_records",
+      "byCurrency": [
+        {
+          "currency": "EUR",
+          "grossPaymentsMinor": 90000,
+          "paymentCount": 1,
+          "recordedRefundsAndCreditsMinor": 0,
+          "refundAndCreditCount": 0,
+          "vendorCount": 1
+        },
+        {
+          "currency": "USD",
+          "grossPaymentsMinor": 3754675,
+          "paymentCount": 15,
+          "recordedRefundsAndCreditsMinor": 5000,
+          "refundAndCreditCount": 1,
+          "vendorCount": 3
+        }
+      ],
+      "gross": [
+        {
+          "currency": "EUR",
+          "amountMinor": 90000
+        },
+        {
+          "currency": "USD",
+          "amountMinor": 3754675
+        }
+      ],
+      "recordedRefundsAndCredits": [
+        {
+          "currency": "USD",
+          "amountMinor": 5000
+        }
+      ],
+      "net": null,
+      "netUnavailableReason": "Net spend is not defined yet. How refunds, credits, voids, reversals and transfers offset payments is a financial-foundation decision; until it is made, refunds and credits are shown separately and never subtracted.",
+      "paymentCount": 16,
+      "refundAndCreditCount": 1,
+      "vendorCount": 4,
+      "settlement": "unknown"
+    }
+  },
+  "uiState": {
+    "state": "partial",
+    "reasons": [
+      "customer_supplied_source",
+      "mixed_currency",
+      "settlement_unverified",
+      "snapshot_not_continuous",
+      "upstream_contract_pending"
+    ],
+    "notices": [
+      {
+        "code": "customer_supplied_source",
+        "text": "Based on files and imports you provided; Reclaim has not independently verified them."
+      },
+      {
+        "code": "settlement_unverified",
+        "text": "Whether payments cleared is not known from these records."
+      },
+      {
+        "code": "snapshot_not_continuous",
+        "text": "Built from saved audits, not a continuous connection to your books."
+      },
+      {
+        "code": "upstream_contract_pending",
+        "text": "Part of this view uses an interim data source."
+      }
+    ]
+  }
+}

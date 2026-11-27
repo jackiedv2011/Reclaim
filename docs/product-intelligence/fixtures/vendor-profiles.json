@@ -1,0 +1,512 @@
+{
+  "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
+  "response": {
+    "model": "vendor_profiles",
+    "contractVersion": "0.1.2",
+    "metricDefinitionVersion": "vendor-profile-v0.1",
+    "tenantId": "tenant_fixture_a",
+    "origin": "legacy_audit_snapshot",
+    "scope": {
+      "from": "2026-01-20",
+      "to": "2026-06-09",
+      "dateBasis": "payment_date",
+      "currencies": [
+        "EUR",
+        "USD"
+      ]
+    },
+    "freshness": {
+      "computedAt": 1782907200000,
+      "sourceUpdatedAt": 1782907200000,
+      "stale": false,
+      "staleReason": null
+    },
+    "coverage": [
+      {
+        "check": "vendor_profiles",
+        "status": "limited",
+        "reasons": [
+          "cross_audit_overlap",
+          "customer_supplied_source",
+          "missing_category",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "canonical_vendor_identity",
+        "status": "limited",
+        "reasons": [
+          "upstream_contract_pending"
+        ]
+      },
+      {
+        "check": "vendor_baselines",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "insufficient_history",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "seasonal_comparison",
+        "status": "not_run",
+        "reasons": [
+          "customer_supplied_source",
+          "insufficient_history",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "recent_change",
+        "status": "limited",
+        "reasons": [
+          "customer_supplied_source",
+          "insufficient_history",
+          "snapshot_not_continuous",
+          "window_not_covered"
+        ]
+      },
+      {
+        "check": "matched_returns",
+        "status": "not_run",
+        "reasons": [
+          "no_independent_return_matching"
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "rule:vendor-profile-v0.1",
+        "label": "Vendor profile definition"
+      },
+      {
+        "id": "rule:baseline-v0.1",
+        "label": "Vendor baseline method"
+      },
+      {
+        "id": "import:audit_fixture_q1/batch_9faafaa0de374e785f06fbdea56aa98978b3d099d3fa63ff1af72090e9ff0337",
+        "label": "Import"
+      },
+      {
+        "id": "import:audit_fixture_q2/batch_b54837420f6a08b870865937dca3576ef7987abc4d0b0243e7e75d7129df20d0",
+        "label": "Import"
+      }
+    ],
+    "exclusions": [
+      {
+        "code": "cross_audit_duplicate_case",
+        "count": 1,
+        "amounts": [],
+        "detail": "The same check on the same payments in another audit, counted once."
+      }
+    ],
+    "warnings": [],
+    "result": {
+      "items": [
+        {
+          "vendorKey": "vendor_e0f43c8d84ae71849d5be4709a4c57dd12e474633b1852b7a65079778c1b346e",
+          "primaryName": "Fixture Coffee Co",
+          "aliases": {
+            "displayNamesSeen": [
+              {
+                "name": "Fixture Coffee Co",
+                "recordCount": 7,
+                "caseCount": 3
+              }
+            ],
+            "proposed": [],
+            "confirmedByCustomer": [],
+            "rejectedByCustomer": [],
+            "contradictions": [],
+            "identityNote": "Names are shown as recorded and never merged here. Canonical vendor identity is decided by the financial-foundation service."
+          },
+          "stableSupplierIds": [],
+          "coveredPeriod": {
+            "from": "2026-01-20",
+            "to": "2026-06-09"
+          },
+          "spend": [
+            {
+              "currency": "USD",
+              "grossPaymentsMinor": 1294675,
+              "paymentCount": 7,
+              "refundsAndCredits": {
+                "count": 0,
+                "amountMinor": 0
+              },
+              "unknownKindCount": 0
+            }
+          ],
+          "baselines": [
+            {
+              "version": "baseline-v0.1",
+              "vendorKey": "vendor_e0f43c8d84ae71849d5be4709a4c57dd12e474633b1852b7a65079778c1b346e",
+              "currency": "USD",
+              "status": "established",
+              "reasons": [],
+              "paymentCount": 7,
+              "undatedPaymentCount": 0,
+              "coveredMonths": 6,
+              "firstPaymentDate": "2026-01-20",
+              "lastPaymentDate": "2026-06-09",
+              "medianPaymentMinor": 135050,
+              "madMinor": 5975,
+              "medianGapDays": 16,
+              "toleranceMinor": 17925,
+              "lowerBoundMinor": 117125,
+              "upperBoundMinor": 152975,
+              "seasonal": {
+                "status": "not_supported",
+                "reasons": [
+                  "insufficient_history"
+                ],
+                "requiredCoveredMonths": 24,
+                "coveredMonths": 6
+              },
+              "sourceRecordIds": [
+                "audit_fixture_q1/rec_3",
+                "audit_fixture_q1/rec_4",
+                "audit_fixture_q1/rec_5",
+                "audit_fixture_q1/rec_6",
+                "audit_fixture_q2/rec_6",
+                "audit_fixture_q2/rec_7",
+                "audit_fixture_q2/rec_8"
+              ]
+            }
+          ],
+          "recurringSeries": [],
+          "recentChange": [
+            {
+              "currency": "USD",
+              "status": "insufficient_history",
+              "reasons": [
+                "insufficient_history",
+                "snapshot_not_continuous",
+                "window_not_covered"
+              ],
+              "recentWindow": {
+                "from": "2026-03-12",
+                "to": "2026-06-09"
+              },
+              "priorWindow": {
+                "from": "2025-12-12",
+                "to": "2026-03-11"
+              },
+              "recentGrossMinor": null,
+              "priorGrossMinor": null,
+              "recentPaymentCount": null,
+              "priorPaymentCount": null,
+              "changeBps": null
+            }
+          ],
+          "cases": {
+            "caseCount": 2,
+            "crossAuditDuplicates": 1,
+            "byStage": {
+              "unreviewed": 1,
+              "needs_info": 0,
+              "dismissed": 0,
+              "confirmed": 0,
+              "requested": 1,
+              "recovered": 0,
+              "not_recovered": 0
+            },
+            "supportedPotentialInPlay": [],
+            "customerRecordedReturn": [
+              {
+                "currency": "USD",
+                "amountMinor": 50000
+              }
+            ],
+            "matchedReturn": "not_available",
+            "caseIds": [
+              "audit_fixture_q1/exact_duplicate-rec_5-rec_6",
+              "audit_fixture_q2/amount_outlier-rec_7"
+            ]
+          },
+          "evidenceQuality": {
+            "recordCount": 7,
+            "withInvoiceReference": 7,
+            "withCategory": 7,
+            "withKnownCurrency": 7,
+            "withPaymentDate": 7,
+            "shareBps": {
+              "invoiceReference": 10000,
+              "category": 10000,
+              "knownCurrency": 10000,
+              "paymentDate": 10000
+            },
+            "note": "Completeness of the covered records (data quality). It says nothing about the supplier."
+          },
+          "memory": {
+            "inEffect": [],
+            "notInEffect": []
+          }
+        },
+        {
+          "vendorKey": "vendor_8d65b83a6ad1c03ca614669d5c7b79e751c37d827acc4423ec4ff0c34ae3449d",
+          "primaryName": "Fixture Euro Parts GmbH",
+          "aliases": {
+            "displayNamesSeen": [
+              {
+                "name": "Fixture Euro Parts GmbH",
+                "recordCount": 1,
+                "caseCount": 0
+              }
+            ],
+            "proposed": [],
+            "confirmedByCustomer": [],
+            "rejectedByCustomer": [],
+            "contradictions": [],
+            "identityNote": "Names are shown as recorded and never merged here. Canonical vendor identity is decided by the financial-foundation service."
+          },
+          "stableSupplierIds": [],
+          "coveredPeriod": {
+            "from": "2026-03-10",
+            "to": "2026-03-10"
+          },
+          "spend": [
+            {
+              "currency": "EUR",
+              "grossPaymentsMinor": 90000,
+              "paymentCount": 1,
+              "refundsAndCredits": {
+                "count": 0,
+                "amountMinor": 0
+              },
+              "unknownKindCount": 0
+            }
+          ],
+          "baselines": [
+            {
+              "version": "baseline-v0.1",
+              "vendorKey": "vendor_8d65b83a6ad1c03ca614669d5c7b79e751c37d827acc4423ec4ff0c34ae3449d",
+              "currency": "EUR",
+              "status": "insufficient_history",
+              "reasons": [
+                "insufficient_history",
+                "too_few_covered_months",
+                "too_few_payments"
+              ],
+              "paymentCount": 1,
+              "undatedPaymentCount": 0,
+              "coveredMonths": 1,
+              "firstPaymentDate": "2026-03-10",
+              "lastPaymentDate": "2026-03-10",
+              "medianPaymentMinor": 90000,
+              "madMinor": 0,
+              "medianGapDays": null,
+              "toleranceMinor": null,
+              "lowerBoundMinor": null,
+              "upperBoundMinor": null,
+              "seasonal": {
+                "status": "not_supported",
+                "reasons": [
+                  "insufficient_history"
+                ],
+                "requiredCoveredMonths": 24,
+                "coveredMonths": 1
+              },
+              "sourceRecordIds": [
+                "audit_fixture_q1/rec_10"
+              ]
+            }
+          ],
+          "recurringSeries": [],
+          "recentChange": [
+            {
+              "currency": "EUR",
+              "status": "insufficient_history",
+              "reasons": [
+                "insufficient_history",
+                "snapshot_not_continuous",
+                "window_not_covered"
+              ],
+              "recentWindow": {
+                "from": "2026-03-12",
+                "to": "2026-06-09"
+              },
+              "priorWindow": {
+                "from": "2025-12-12",
+                "to": "2026-03-11"
+              },
+              "recentGrossMinor": null,
+              "priorGrossMinor": null,
+              "recentPaymentCount": null,
+              "priorPaymentCount": null,
+              "changeBps": null
+            }
+          ],
+          "cases": {
+            "caseCount": 0,
+            "crossAuditDuplicates": 0,
+            "byStage": {
+              "unreviewed": 0,
+              "needs_info": 0,
+              "dismissed": 0,
+              "confirmed": 0,
+              "requested": 0,
+              "recovered": 0,
+              "not_recovered": 0
+            },
+            "supportedPotentialInPlay": [],
+            "customerRecordedReturn": [],
+            "matchedReturn": "not_available",
+            "caseIds": []
+          },
+          "evidenceQuality": {
+            "recordCount": 1,
+            "withInvoiceReference": 1,
+            "withCategory": 1,
+            "withKnownCurrency": 1,
+            "withPaymentDate": 1,
+            "shareBps": {
+              "invoiceReference": 10000,
+              "category": 10000,
+              "knownCurrency": 10000,
+              "paymentDate": 10000
+            },
+            "note": "Completeness of the covered records (data quality). It says nothing about the supplier."
+          },
+          "memory": {
+            "inEffect": [],
+            "notInEffect": []
+          }
+        },
+        {
+          "vendorKey": "vendor_3146dca62f0a9e37673e779cae1ce2a6fba2f68eb1bf0f49f0c097caf2a3d26d",
+          "primaryName": "Fixture Office Supply",
+          "aliases": {
+            "displayNamesSeen": [
+              {
+                "name": "Fixture Office Supply",
+                "recordCount": 3,
+                "caseCount": 0
+              }
+            ],
+            "proposed": [],
+            "confirmedByCustomer": [],
+            "rejectedByCustomer": [],
+            "contradictions": [],
+            "identityNote": "Names are shown as recorded and never merged here. Canonical vendor identity is decided by the financial-foundation service."
+          },
+          "stableSupplierIds": [],
+          "coveredPeriod": {
+            "from": "2026-01-25",
+            "to": "2026-03-05"
+          },
+          "spend": [
+            {
+              "currency": "USD",
+              "grossPaymentsMinor": 60000,
+              "paymentCount": 2,
+              "refundsAndCredits": {
+                "count": 1,
+                "amountMinor": -5000
+              },
+              "unknownKindCount": 0
+            }
+          ],
+          "baselines": [
+            {
+              "version": "baseline-v0.1",
+              "vendorKey": "vendor_3146dca62f0a9e37673e779cae1ce2a6fba2f68eb1bf0f49f0c097caf2a3d26d",
+              "currency": "USD",
+              "status": "insufficient_history",
+              "reasons": [
+                "insufficient_history",
+                "too_few_covered_months",
+                "too_few_payments"
+              ],
+              "paymentCount": 2,
+              "undatedPaymentCount": 0,
+              "coveredMonths": 2,
+              "firstPaymentDate": "2026-01-25",
+              "lastPaymentDate": "2026-02-24",
+              "medianPaymentMinor": 28960,
+              "madMinor": 0,
+              "medianGapDays": 30,
+              "toleranceMinor": null,
+              "lowerBoundMinor": null,
+              "upperBoundMinor": null,
+              "seasonal": {
+                "status": "not_supported",
+                "reasons": [
+                  "insufficient_history"
+                ],
+                "requiredCoveredMonths": 24,
+                "coveredMonths": 2
+              },
+              "sourceRecordIds": [
+                "audit_fixture_q1/rec_7",
+                "audit_fixture_q1/rec_8"
+              ]
+            }
+          ],
+          "recurringSeries": [],
+          "recentChange": [
+            {
+              "currency": "USD",
+              "status": "insufficient_history",
+              "reasons": [
+                "insufficient_history",
+                "snapshot_not_continuous",
+                "window_not_covered"
+              ],
+              "recentWindow": {
+                "from": "2026-03-12",
+                "to": "2026-06-09"
+              },
+              "priorWindow": {
+                "from": "2025-12-12",
+                "to": "2026-03-11"
+              },
+              "recentGrossMinor": null,
+              "priorGrossMinor": null,
+              "recentPaymentCount": null,
+              "priorPaymentCount": null,
+              "changeBps": null
+            }
+          ],
+          "cases": {
+            "caseCount": 0,
+            "crossAuditDuplicates": 0,
+            "byStage": {
+              "unreviewed": 0,
+              "needs_info": 0,
+              "dismissed": 0,
+              "confirmed": 0,
+              "requested": 0,
+              "recovered": 0,
+              "not_recovered": 0
+            },
+            "supportedPotentialInPlay": [],
+            "customerRecordedReturn": [],
+            "matchedReturn": "not_available",
+            "caseIds": []
+          },
+          "evidenceQuality": {
+            "recordCount": 3,
+            "withInvoiceReference": 3,
+            "withCategory": 0,
+            "withKnownCurrency": 3,
+            "withPaymentDate": 3,
+            "shareBps": {
+              "invoiceReference": 10000,
+              "category": 0,
+              "knownCurrency": 10000,
+              "paymentDate": 10000
+            },
+            "note": "Completeness of the covered records (data quality). It says nothing about the supplier."
+          },
+          "memory": {
+            "inEffect": [],
+            "notInEffect": []
+          }
+        }
+      ],
+      "nextCursor": "fixture%20office%20supply|vendor_3146dca62f0a9e37673e779cae1ce2a6fba2f68eb1bf0f49f0c097caf2a3d26d"
+    }
+  }
+}

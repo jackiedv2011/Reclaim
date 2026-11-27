@@ -19,6 +19,7 @@ import { AUDIT_TOO_LARGE, MAX_AUDIT_BYTES, checkRepeat, repeatMessage, rowFinger
 import { createBilling } from './billing.ts'
 import { createStripeClient, type StripeApi } from './stripe.ts'
 import { createGmailClient, createGmailRoutes, type GmailClient } from './gmail.ts'
+import { createIntelligenceRoutes } from './intelligence.ts'
 import { createLedgerRoutes } from './ledgerRoutes.ts'
 import { resealLedger } from './ledger.ts'
 import { OnboardingProfileSchema } from './onboarding.ts'
@@ -106,6 +107,9 @@ export function createApp(deps: AppDependencies): App {
   const gmailSendLimiter = new RateLimiter(30, 60 * 60 * 1000)
   const gmailClient = deps.gmail !== undefined ? deps.gmail : config.gmailSend ? createGmailClient(config.gmailSend.clientId, config.gmailSend.clientSecret) : null
   const gmailRoutes = createGmailRoutes({ db, appOrigin: config.appOrigin, production: config.production, gmail: gmailClient && config.gmailSend ? { client: gmailClient, tokenKey: config.gmailSend.tokenKey } : null, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), getProject: (userId, projectId) => projects.get(userId, projectId), listProjects: (userId) => projects.list(userId), allowSend: (id) => gmailSendLimiter.check(`gmail:${id}`), now: deps.now })
+
+  const intelligenceReadLimiter = new RateLimiter(300, 60 * 60 * 1000)
+  const intelligenceRoutes = config.intelligenceApi ? createIntelligenceRoutes({ projects, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), allowRead: (id) => intelligenceReadLimiter.check(`intelligence:${id}`), now: deps.now }) : null
 
   const sessionCookie = (token: string, maxAge: number) => serializeCookie(SESSION_COOKIE, token, { maxAge, secure: config.production })
   const clearSessionCookie = () => serializeCookie(SESSION_COOKIE, '', { maxAge: 0, secure: config.production })
@@ -668,6 +672,8 @@ export function createApp(deps: AppDependencies): App {
 
     const gmailResponse = await gmailRoutes.route(req)
     if (gmailResponse) return gmailResponse
+    const intelligenceResponse = intelligenceRoutes ? await intelligenceRoutes.route(req) : null
+    if (intelligenceResponse) return intelligenceResponse
 
     const ledgerResponse = await ledgerRoutes.route(req)
     if (ledgerResponse) return ledgerResponse

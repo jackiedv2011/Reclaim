@@ -1,0 +1,44 @@
+{
+  "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
+  "response": {
+    "model": "spend.summary",
+    "contractVersion": "0.1.2",
+    "metricDefinitionVersion": "spend-v0.1",
+    "tenantId": "tenant_fixture_a",
+    "origin": "legacy_audit_snapshot",
+    "scope": {
+      "from": null,
+      "to": null,
+      "dateBasis": "payment_date",
+      "currencies": []
+    },
+    "freshness": {
+      "computedAt": 1782907200000,
+      "sourceUpdatedAt": null,
+      "stale": false,
+      "staleReason": null
+    },
+    "coverage": [
+      {
+        "check": "covered_spend",
+        "status": "not_run",
+        "reasons": [
+          "customer_supplied_source",
+          "no_data",
+          "snapshot_not_continuous"
+        ]
+      },
+      {
+        "check": "net_spend",
+        "status": "not_run",
+        "reasons": [
+          "upstream_contract_pending"
+        ]
+      }
+    ],
+    "sources": [],
+    "exclusions": [],
+    "warnings": [],
+    "result": null
+  }
+}

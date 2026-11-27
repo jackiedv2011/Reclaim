@@ -59,6 +59,11 @@ export interface ServerConfig {
    */
   stripe: { secretKey: string; webhookSecret: string | null } | null
   /**
+   * Read-only product-intelligence API (server/intelligence.ts). Off unless
+   * RECLAIM_INTELLIGENCE_API=1; pending founder decisions on release scope.
+   */
+  intelligenceApi: boolean
+  /**
    * Server-authoritative ledger API (/api/ledger/*, server/ledgerRoutes.ts).
    * Off unless RECLAIM_SERVER_LEDGER=true; off, the browser ledger is the only path.
    */
@@ -118,6 +123,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ServerConfi
     dataKeys: dataKeysConfig(env),
     trustProxy: trustProxyConfig(env.TRUST_PROXY),
     gmailSend: gmailSendConfig(env, google),
+    intelligenceApi: env.RECLAIM_INTELLIGENCE_API === '1',
     serverLedger: env.RECLAIM_SERVER_LEDGER === 'true',
   }
 }
