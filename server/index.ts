@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { createApp } from './app.ts'
+import { createApp, type App } from './app.ts'
 import { loadConfig, type ServerConfig } from './config.ts'
 import { installHealthCheck } from './health.ts'
 
@@ -12,7 +12,14 @@ try {
   process.exit(1)
 }
 mkdirSync(dirname(resolve(config.databasePath)), { recursive: true })
-const app = createApp({ config, staticDir: config.production ? resolve('dist') : null })
+let app: App
+try {
+  app = createApp({ config, staticDir: config.production ? resolve('dist') : null })
+} catch (err) {
+  // Usually DATA_KEY not matching the database: the message says what to do.
+  console.error(err instanceof Error ? err.message : err)
+  process.exit(1)
+}
 installHealthCheck(app.server, app.db)
 const port = await app.listen()
 console.log(`Reclaim API listening on http://localhost:${port}`)

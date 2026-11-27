@@ -1,10 +1,18 @@
 import type { Finding } from '@/types'
+import { referenceStrength } from '@/lib/sourceIdentity'
 
 export interface EvidenceGap {
   label: string
   whyItMatters: string
   source: 'internal' | 'vendor'
   nextStep: string
+}
+
+const VENDOR_MASTER_GAP: EvidenceGap = {
+  label: 'Vendor master record',
+  whyItMatters: 'Confirms whether these are genuinely two different vendors or one vendor entered twice under different names.',
+  source: 'internal',
+  nextStep: 'Check the vendor master file for duplicate vendor records or a recent renumbering.',
 }
 
 /**
@@ -14,7 +22,7 @@ export interface EvidenceGap {
  */
 export function buildEvidenceGaps(finding: Finding): EvidenceGap[] {
   const gaps: EvidenceGap[] = []
-  const missingInvoiceRef = finding.relatedRecords.some((r) => r.invoiceNumber === null)
+  const missingInvoiceRef = finding.relatedRecords.some((r) => referenceStrength(r.invoiceNumber) === 'none')
 
   if (missingInvoiceRef) {
     gaps.push({
@@ -28,6 +36,7 @@ export function buildEvidenceGaps(finding: Finding): EvidenceGap[] {
   switch (finding.type) {
     case 'exact_duplicate':
     case 'near_duplicate':
+      if (finding.ruleId === 'cross_vendor_duplicate_v1') gaps.push(VENDOR_MASTER_GAP)
       gaps.push({
         label: 'Vendor statement',
         whyItMatters: 'A vendor statement would show how both payments were applied on their side.',
@@ -70,12 +79,7 @@ export function buildEvidenceGaps(finding: Finding): EvidenceGap[] {
     case 'missed_discount':
       break
     case 'shared_invoice_number':
-      gaps.push({
-        label: 'Vendor master record',
-        whyItMatters: 'Confirms whether these are genuinely two different vendors or one vendor entered twice under different names.',
-        source: 'internal',
-        nextStep: 'Check the vendor master file for duplicate vendor records or a recent renumbering.',
-      })
+      gaps.push(VENDOR_MASTER_GAP)
       break
   }
 

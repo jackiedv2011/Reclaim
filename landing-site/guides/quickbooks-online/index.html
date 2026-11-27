@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Exporting from QuickBooks Online — Reclaim</title>
-<meta name="description" content="How to export the bills, payments, vendors and credits Reclaim reads out of QuickBooks Online, and what each file is for.">
+<meta name="description" content="How to get your payments out of QuickBooks Online and into Reclaim.">
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -114,10 +114,9 @@
 
 <main class="page">
 
-  <!-- QUICKBOOKS ONLINE EXPORT GUIDE.
-       The menu names and report names below follow QuickBooks Online as we understand it today. Every step is
-       listed in scratchpad/unverified.md and has to be checked against QuickBooks Online's own documentation
-       (QuickBooks Online report list, https://quickbooks.intuit.com/learn-support/en-us/help-article/export-reports/export-reports-lists-data-quickbooks-online/L0LqSlaNa_US_en_US) before this page is deployed. -->
+  <!-- QUICKBOOKS ONLINE EXPORT GUIDE. What Reclaim reads follows src/lib/csvMapping.ts, csv.ts and xlsx.ts and the
+       upload rules in src/components/audit/ImportPanel.tsx and ColumnMatch.tsx: keep the shared partials in step with them.
+       Menu path and export label: Intuit, "Export reports to Excel", read 2026-11-24 (https://quickbooks.intuit.com/learn-support/en-us/help-article/report-management/export-reports-excel-quickbooks-online/L7iAoP97n_US_en_US). Report choice and columns: not confirmed in Intuit documentation. -->
   <div class="guide-page">
     <div class="nav-slot" data-theme="white"></div>
     <div class="the-container">
@@ -130,13 +129,11 @@
               <ul>
                 <li><a href="#what">What Reclaim reads</a></li>
                 <li><a href="#before">Before you begin</a></li>
-                <li><a href="#step-1">1. Open the Reports area</a></li>
-                <li><a href="#step-2">2. Set the date range</a></li>
-                <li><a href="#step-3">3. Export your bills and payments</a></li>
-                <li><a href="#step-4">4. Export the full transaction list</a></li>
-                <li><a href="#step-5">5. Export your vendor list</a></li>
-                <li><a href="#step-6">6. Export credits and open balances</a></li>
-                <li><a href="#step-7">7. Check the files before you upload</a></li>
+                <li><a href="#step-1">1. Run a payments report</a></li>
+                <li><a href="#step-2">2. Export it</a></li>
+                <li><a href="#step-3">3. Upload the file</a></li>
+                <li><a href="#step-4">4. Match the columns</a></li>
+                <li><a href="#step-5">5. Check it, then run the audit</a></li>
                 <li><a href="#troubleshooting">Troubleshooting</a></li>
               </ul>
             </div>
@@ -148,220 +145,146 @@
               <a href="/guides" class="rs-back"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>All guides</a>
               <div class="eyebrow type-mono">Export guide</div>
               <h1 class="title">Exporting from QuickBooks Online</h1>
-              <p class="lede">Four reports, each exported to Excel or CSV. Fifteen minutes the first time, less after that.</p>
+              <p class="lede">One list of payments, exported and uploaded as it is.</p>
             </header>
 
             <section id="what">
               <h2 class="blockhead">What Reclaim reads</h2>
               <div class="prose">
-                <p>Reclaim works from four exports out of QuickBooks Online: your bills, the payments that went against them, your vendor list, and any credits. Uploading files connects nothing to your account and changes nothing inside it. You export the files, you upload them, and you decide what to do with what comes back.</p>
-                <p>The four files do different jobs, and the comparison only works when all four are there. A duplicate payment is invisible in the bill file alone; an unused credit is invisible in the payment file alone.</p>
+                <p>One file of the payments you made out of QuickBooks Online: a CSV or an Excel workbook (.xlsx). Title lines at the top, totals, and reports grouped by vendor are fine, so you shouldn’t need to edit it first. Uploading a file connects nothing to your account and changes nothing inside it.</p>
+                <p>If your headings are ones Reclaim knows, it reads them straight away. If not, it shows you your own columns and asks which is which. Three are required. Each of the others turns on more checks.</p>
               </div>
-              <div class="tier" role="group" aria-label="The four exports">
+              <div class="tier" role="group" aria-label="The columns Reclaim reads">
                 <div class="tier__col">
-                  <p class="tier__tag">Files</p>
-                  <h3 class="tier__name">What to export</h3>
+                  <p class="tier__tag">Required</p>
+                  <h3 class="tier__name">Every payment needs</h3>
                   <ul>
-                    <li>Bills and Applied Payments</li>
-                    <li>Transaction List by Vendor</li>
-                    <li>Vendor Contact List</li>
-                    <li>Vendor Balance Detail</li>
+                    <li>Vendor</li>
+                    <li>Payment date</li>
+                    <li>Amount paid</li>
                   </ul>
                 </div>
                 <div class="tier__col">
-                  <p class="tier__tag">Purpose</p>
-                  <h3 class="tier__name">What each one does</h3>
+                  <p class="tier__tag">Add if you have them</p>
+                  <h3 class="tier__name">More checks</h3>
                   <ul>
-                    <li>Bills give every invoice its vendor, number, date and amount</li>
-                    <li>Payments show what actually left, and against which bill</li>
-                    <li>Vendors let two spellings of one supplier be recognised</li>
-                    <li>Credits show money already owed back to you</li>
+                    <li>Invoice number: duplicate payments</li>
+                    <li>Invoice amount: overpayments</li>
+                    <li>Invoice date and payment terms: early-payment discounts</li>
+                    <li>Bank account, last 4 digits: changed bank details</li>
                   </ul>
                 </div>
               </div>
-              <p class="kicker--foot">Reading time about four minutes · Export time about fifteen</p>
             </section>
 
             <section id="before">
               <h2 class="blockhead">Before you begin</h2>
               <div class="callout">
                 <p class="callout__label"><span class="mark" aria-hidden="true"></span>What you need</p>
-                <p>A QuickBooks Online login with permission to run and export reports.</p>
-                <p>A date range in mind — two years is a good first pass.</p>
-                <p>Somewhere to put four files while you work.</p>
+                <p>A QuickBooks Online login that can run and export reports.</p>
+                <p>A Reclaim account, to upload the file.</p>
               </div>
               <div class="callout callout--warning">
-                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Export permission is separate</p>
-                <p>In most systems, being able to see a report and being able to export it are two different permissions. If the export control is missing rather than greyed out, it is a permission question for whoever administers your account, not a problem with the report.</p>
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Your screen may differ</p>
+                <p>Menus and report names change between plans and over time. If yours don’t match, look for any report that lists the payments you made, or <a href="#contact" data-modal="talk">ask us</a>.</p>
               </div>
             </section>
 
           <section id="step-1" class="step">
             <header class="step__head">
               <span class="step__num">01</span>
-              <h2 class="step__title">Open the Reports area</h2>
+              <h2 class="step__title">Run a payments report</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Sign in to QuickBooks Online and open <strong>Reports</strong> from the left-hand menu. Everything in this guide comes from that one screen, so you can leave it open for all four exports.</p>
-                <p>The search box at the top of the report list is the quickest way to get to a report. Type part of the name rather than hunting through the categories — the report names below are exact.</p>
+                <p>Open <strong>Reports</strong>, then <strong>Standard reports</strong>, and search for a report that lists transactions by vendor, such as <strong>Transaction List by Vendor</strong>. Filter it to bill payments, and set the period you want checked.</p>
+                <p>Report names and columns vary by plan. If the report lets you choose columns, include the vendor, date, amount and invoice number.</p>
               </div>
-              <pre class="code"><span class="cm"># the reports list</span>
-https://qbo.intuit.com/app/<span class="hl">reports</span></pre>
-              
-              <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>One company at a time</p>
-                  <p>If you run more than one company file, export each one separately. Reclaim matches bills to payments inside a single set of books, so mixing two companies in one upload will produce results that look like duplicates but are not.</p>
-                </div>
             </div>
           </section>
 
           <section id="step-2" class="step">
             <header class="step__head">
               <span class="step__num">02</span>
-              <h2 class="step__title">Set the date range</h2>
+              <h2 class="step__title">Export it</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Every report has a <strong>Report period</strong> dropdown at the top. Set it to the window you want Reclaim to look at, then select <strong>Run report</strong>.</p>
-                <p>Use the same range for all four exports. If the ranges differ, a payment can land in one file while the bill it paid sits outside another, and that gap reads like a mismatch when it is only a cropping problem.</p>
+                <p>With the report open, choose <strong>Export/Print</strong>, then <strong>Export to Excel</strong>. QuickBooks saves an Excel file, which you can upload as it is.</p>
               </div>
-              
-              
-              <div class="callout-grid">
-                <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>How far back to go</p>
-                  <p>Two years is a sensible first pass. Duplicate payments are often months apart, and credits can sit unused for a year or more before anyone notices them.</p>
-                </div>
-                <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Accrual, not cash</p>
-                  <p>Where a report offers an accounting method, choose <strong>Accrual</strong>. Cash basis hides bills that have been entered but not yet paid, which is exactly the population worth checking.</p>
-                </div>
-              </div>
+              <pre class="code"><span class="cm"># in QuickBooks Online</span>
+Reports → Standard reports → your report
+Export/Print → <span class="hl">Export to Excel</span></pre>
             </div>
           </section>
 
           <section id="step-3" class="step">
             <header class="step__head">
               <span class="step__num">03</span>
-              <h2 class="step__title">Export your bills and payments</h2>
+              <h2 class="step__title">Upload the file</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Run <strong>Bills and Applied Payments</strong>. This report lists each bill with the payments applied against it, which is the single most useful file for finding an invoice that was paid more than once.</p>
-                <p>Select the export icon above the report and choose <strong>Export to Excel</strong>. CSV works too — Reclaim reads both.</p>
+                <p><a href="/audit">Log in to Reclaim</a>, click <strong>Upload a ledger</strong> and drop the file in. It can be up to 50 MB. If a workbook has more than one sheet of rows, Reclaim asks which one to read.</p>
               </div>
-              <pre class="code"><span class="cm"># what this file should contain</span>
-vendor · bill date · bill no. · amount · <span class="hl">payment date</span> · <span class="hl">payment amount</span></pre>
-              <div class="shot">
-                <div class="shot__frame">
-                  <table>
-                    <thead><tr><th>Vendor</th><th>Bill date</th><th>Bill no.</th><th>Amount</th><th>Paid</th></tr></thead>
-                    <tbody><tr><td>Northwind Packaging</td><td>12/03/2025</td><td>INV-4471</td><td>2,480.00</td><td>12/28/2025</td></tr><tr><td>Harbour Freight Co</td><td>01/09/2026</td><td>88213</td><td>915.40</td><td>02/06/2026</td></tr><tr><td>Delta Print Services</td><td>01/22/2026</td><td>DP-2207</td><td>4,100.00</td><td>—</td></tr></tbody>
-                  </table>
-                </div>
-                <p class="shot__cap"><span class="shot__cap-id">FILE-01</span><span>Bills with the payments applied against them. One row per application.</span></p>
+              <div class="callout">
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Files it can’t read</p>
+                <p>Old .xls files, workbooks with a password, and Apple Numbers files. Save those as .xlsx or CSV first. A PDF won’t work either.</p>
               </div>
-              
             </div>
           </section>
 
           <section id="step-4" class="step">
             <header class="step__head">
               <span class="step__num">04</span>
-              <h2 class="step__title">Export the full transaction list</h2>
+              <h2 class="step__title">Match the columns</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Run <strong>Transaction List by Vendor</strong>. This one catches everything the first report does not: bill payments recorded without a bill, expenses entered directly, checks, and card charges.</p>
-                <p>Before you export it, open <strong>Customize</strong> and make sure the columns include the transaction type, number, date, amount and memo. The memo field is often where a duplicate gives itself away.</p>
+                <p>You’ll only see this step if Reclaim isn’t sure. It shows the first rows of your file, with a suggestion for each column it thinks it knows. Check every suggestion, fill in anything it left empty, then click <strong>Continue</strong>. Your file isn’t changed.</p>
               </div>
-              
               <div class="shot">
                 <div class="shot__frame">
                   <table>
-                    <thead><tr><th>Date</th><th>Type</th><th>No.</th><th>Vendor</th><th>Memo</th><th>Amount</th></tr></thead>
-                    <tbody><tr><td>12/28/2025</td><td>Bill Payment</td><td>10442</td><td>Northwind Packaging</td><td>INV-4471</td><td>2,480.00</td></tr><tr><td>01/04/2026</td><td>Expense</td><td>—</td><td>Northwind Packaging</td><td>inv 4471</td><td>2,480.00</td></tr><tr><td>02/06/2026</td><td>Bill Payment</td><td>10517</td><td>Harbour Freight Co</td><td>88213</td><td>915.40</td></tr></tbody>
+                    <thead><tr><th>Reclaim needs</th><th>Your file calls it</th></tr></thead>
+                    <tbody><tr><td>Vendor</td><td>Contact</td></tr><tr><td>Payment date</td><td>Date</td></tr><tr><td>Amount paid</td><td>Credit</td></tr><tr><td>Invoice number</td><td>Reference</td></tr></tbody>
                   </table>
                 </div>
-                <p class="shot__cap"><span class="shot__cap-id">FILE-02</span><span>Every transaction per vendor, including anything entered without a bill.</span></p>
+                <p class="shot__cap"><span class="shot__cap-id">MADE UP</span><span>One way the columns of an export might match.</span></p>
               </div>
-              <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Why two files</p>
-                  <p>A bill paid twice through two different routes — once as a bill payment and once as a direct expense — only appears in both files together. Neither one shows it on its own.</p>
+              <div class="callout callout--warning">
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Check the invoice number twice</p>
+                <p>Some reports put a check or payment number in the number column. Reclaim compares the number printed on the vendor’s invoice. If your column is a payment number instead, choose <strong>Not in this file</strong>: matched by mistake, it can hide a bill that was paid twice.</p>
+              </div>
+              <div class="prose">
+                <p>It may also ask:</p>
+              </div>
+              <div class="callout-grid">
+                <div class="callout">
+                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Dates</p>
+                  <p>Which way round they are, if 03/04/2026 could be March 4 or April 3 and nothing else in the file settles it.</p>
                 </div>
+                <div class="callout">
+                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Amounts</p>
+                  <p>Whether negative amounts are payments. Many reports show money going out as a negative. Reclaim treats a negative as a refund or credit unless you tell it to flip the sign.</p>
+                </div>
+              </div>
             </div>
           </section>
 
           <section id="step-5" class="step">
             <header class="step__head">
               <span class="step__num">05</span>
-              <h2 class="step__title">Export your vendor list</h2>
+              <h2 class="step__title">Check it, then run the audit</h2>
             </header>
             <div class="step__body">
               <div class="prose">
-                <p>Run <strong>Vendor Contact List</strong> and export it the same way. It is a small file and it does more work than it looks like it should.</p>
-                <p>Duplicate vendor records are one of the quietest causes of a duplicate payment: the same supplier under two spellings, each with its own open bills, neither one visible from the other. The contact list is what lets Reclaim spot that the two are the same company.</p>
-              </div>
-              
-              <div class="shot">
-                <div class="shot__frame">
-                  <table>
-                    <thead><tr><th>Vendor</th><th>Company</th><th>Email</th><th>Status</th></tr></thead>
-                    <tbody><tr><td>Northwind Packaging</td><td>Northwind Packaging Ltd</td><td>ap@northwind.example</td><td>Active</td></tr><tr><td>Northwind Pkg</td><td>Northwind Packaging Ltd</td><td>ap@northwind.example</td><td>Inactive</td></tr><tr><td>Harbour Freight Co</td><td>Harbour Freight Co</td><td>billing@harbour.example</td><td>Active</td></tr></tbody>
-                  </table>
-                </div>
-                <p class="shot__cap"><span class="shot__cap-id">FILE-03</span><span>The vendor list. Two rows here can be one supplier.</span></p>
+                <p>Before any check runs, Reclaim shows how many payments and vendors it read, the dates they cover, how it read the file, and any rows it skipped. If the numbers don’t look right for the period, choose <strong>Check the column matches</strong> and go back. Otherwise, run the audit.</p>
               </div>
               <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Include inactive vendors</p>
-                  <p>Open <strong>Customize</strong> and set the vendor status to include inactive records. A vendor that was merged or deactivated last year can still be the reason two bills look unrelated.</p>
-                </div>
-            </div>
-          </section>
-
-          <section id="step-6" class="step">
-            <header class="step__head">
-              <span class="step__num">06</span>
-              <h2 class="step__title">Export credits and open balances</h2>
-            </header>
-            <div class="step__body">
-              <div class="prose">
-                <p>Run <strong>Vendor Balance Detail</strong>. It shows every open item per vendor, including vendor credits that were issued but never applied to a bill.</p>
-                <p>This is the file behind unused credits. A credit note sitting against a vendor you have since stopped using is money you already paid for and never took back.</p>
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>One company at a time</p>
+                <p>If you keep more than one set of books, upload each one separately. Mixing them can make ordinary payments look like duplicates. Keep the original export too, so you can trace a result back to it.</p>
               </div>
-              <pre class="code"><span class="cm"># the rows that matter here</span>
-transaction type = <span class="hl">Vendor Credit</span>
-open balance <span class="hl">&lt; 0</span></pre>
-              <div class="shot">
-                <div class="shot__frame">
-                  <table>
-                    <thead><tr><th>Vendor</th><th>Date</th><th>Type</th><th>Open balance</th></tr></thead>
-                    <tbody><tr><td>Harbour Freight Co</td><td>03/14/2025</td><td>Vendor Credit</td><td>-640.00</td></tr><tr><td>Delta Print Services</td><td>11/02/2025</td><td>Vendor Credit</td><td>-1,225.00</td></tr><tr><td>Delta Print Services</td><td>01/22/2026</td><td>Bill</td><td>4,100.00</td></tr></tbody>
-                  </table>
-                </div>
-                <p class="shot__cap"><span class="shot__cap-id">FILE-04</span><span>Open items per vendor. Negative balances are credits nobody used.</span></p>
-              </div>
-              
-            </div>
-          </section>
-
-          <section id="step-7" class="step">
-            <header class="step__head">
-              <span class="step__num">07</span>
-              <h2 class="step__title">Check the files before you upload</h2>
-            </header>
-            <div class="step__body">
-              <div class="prose">
-                <p>Open each file once. You are looking for three things, and they take about a minute between them.</p>
-                <p>First, that the header row is the real header and not a title line — QuickBooks sometimes puts the company name and the report period in the first few rows. Second, that amounts are numbers and not text. Third, that the file is not empty because the date range excluded everything.</p>
-              </div>
-              
-              
-              <div class="callout">
-                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Keep the originals</p>
-                  <p>Upload the exports as they came out. Reclaim reads the original columns, and every result it reports points back at a row in the file you gave it. Edited files break that link.</p>
-                </div>
             </div>
           </section>
 
@@ -369,24 +292,28 @@ open balance <span class="hl">&lt; 0</span></pre>
               <h2 class="blockhead">Troubleshooting</h2>
               <div class="acc">
                 <details open class="is-open">
-                  <summary>I can't find a report by that name</summary>
-                  <div class="panel"><div class="prose"><p>Report names vary a little by QuickBooks Online plan. If <strong>Bills and Applied Payments</strong> is not in your list, <strong>Transaction List by Vendor</strong> filtered to bills and bill payments covers the same ground. Send us what you can see and we will tell you which one to use.</p></div></div>
+                  <summary>Reclaim can’t find a vendor, date or amount</summary>
+                  <div class="panel"><div class="prose"><p>The file may be a vendor list or a list of unpaid bills, which don’t say what was paid. You need a report with a row for each payment. If yours is one, check that each field in step 4 points at the right column, and that <strong>Headings are on row</strong> shows the right row. You can also compare it with the <a href="/sample-ledger.csv" download>sample CSV</a>.</p></div></div>
                 </details>
                 <details>
-                  <summary>The export opens as one long column</summary>
-                  <div class="panel"><div class="prose"><p>That is a CSV being opened with the wrong delimiter. Re-export as Excel, or open the CSV through <strong>Data → From Text/CSV</strong> in Excel and set the delimiter to comma. Either way the file itself is fine.</p></div></div>
+                  <summary>The vendor’s name is only written once</summary>
+                  <div class="panel"><div class="prose"><p>Reports grouped by vendor often put the name on a line above its payments. Tick <strong>Each vendor’s name is written once, above its payments</strong>, if it isn’t ticked already, and Reclaim carries the name down.</p></div></div>
                 </details>
                 <details>
-                  <summary>Should I export as Excel or CSV?</summary>
-                  <div class="panel"><div class="prose"><p>Either. Excel keeps the column types, which saves a step, but Reclaim reads both. What matters more is that you do not re-save the file through another tool in between.</p></div></div>
+                  <summary>Some rows were skipped</summary>
+                  <div class="panel"><div class="prose"><p>A row is skipped when it has no vendor, no date Reclaim can read, or no amount. Title and total lines are meant to be skipped. Before you add anything, Reclaim says how many rows it will skip and shows the first few with the reason.</p></div></div>
                 </details>
                 <details>
-                  <summary>My date range covers two financial years</summary>
-                  <div class="panel"><div class="prose"><p>That is fine and often better. Duplicate payments cross year ends as easily as they cross months, and nothing in Reclaim depends on the range lining up with a reporting period.</p></div></div>
+                  <summary>Can I upload my bills, vendor list or credits too?</summary>
+                  <div class="panel"><div class="prose"><p>Not as separate files. Reclaim checks payments. If your bills file has invoice dates, amounts or terms, copy those columns next to the matching payments and more checks will run.</p></div></div>
                 </details>
                 <details>
-                  <summary>Can Reclaim connect to QuickBooks directly instead?</summary>
-                  <div class="panel"><div class="prose"><p>Not yet. A direct QuickBooks Online connection is in development. For now, Reclaim works from exports you upload, so you choose exactly what you hand over. Nothing connects to your account and nothing is changed inside it.</p></div></div>
+                  <summary>How far back should I go?</summary>
+                  <div class="panel"><div class="prose"><p>Two years is a sensible first pass. The file can be up to 50 MB. If yours is larger, split it by date and add each part to the same audit.</p></div></div>
+                </details>
+                <details>
+                  <summary>Can Reclaim connect to QuickBooks Online directly instead?</summary>
+                  <div class="panel"><div class="prose"><p>Not yet. A direct QuickBooks Online import is in testing and isn’t open to customers. For now, Reclaim works from the file you upload.</p></div></div>
                 </details>
               </div>
             </section>
@@ -413,7 +340,7 @@ open balance <span class="hl">&lt; 0</span></pre>
       <div class="ft-top">
         <div class="ft-about">
           <a href="/" class="hx-logo" aria-label="Reclaim home"><svg class="wheel" viewBox="0 0 26 23" fill="currentColor"><use href="#hx-wheel"/></svg><span class="word"><span class="letter">R</span><span class="letter">e</span><span class="letter">c</span><span class="letter">l</span><span class="letter">a</span><span class="letter">i</span><span class="letter">m</span></span></a>
-          <p class="ft-line">Finds duplicate payments, overpayments and forgotten credits in your books, and helps you get the money back.</p>
+          <p class="ft-line">Finds duplicate payments, overpayments and unclaimed discounts in your records, and helps you get duplicate payments back.</p>
           <a href="mailto:reclaimbusiness1@gmail.com" class="ft-mail">reclaimbusiness1@gmail.com</a>
         </div>
         <nav class="ft-cols" aria-label="Footer">

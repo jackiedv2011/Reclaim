@@ -42,6 +42,7 @@ export function recoveryLedger(state: CaseState): RecoveryLedgerEntry[] {
   )
   for (const event of state.history ?? []) {
     if (historyReturns.includes(event)) push('returned', event.at, event.amount ?? null, event.note ?? null)
+    if (event.action === 'recovery:settlement_corrected') push('reversed', event.at, event.amount ?? null, `Entry corrected. ${event.note ?? ''}`.trim())
     if (event.action === 'outcome:reopened' && (event.amount ?? 0) < 0) push('reversed', event.at, event.amount ?? null, 'Prior recorded return reversed')
   }
   for (const settlement of settlements) {

@@ -2,7 +2,8 @@ import { markRecoveryRequested, recordRecoveryOutcome, type ArchivedRequest, typ
 import { normalizeVendor } from '../lib/format.ts'
 import type { APRecord, Finding } from '../types.ts'
 import { latestVendorPosition, VENDOR_STATUS } from './vendorStatus.ts'
-import { activeReturned, verifiedReturned } from './financials.ts'
+import { activeReturned, settlementKey, settlementsOf, unrequestedRemainder, verifiedReturned } from './financials.ts'
+import { isWholeCents } from './validation.ts'
 
 const DAY = 86_400_000
 
@@ -17,6 +18,11 @@ export function beginNewRequestReview(state: CaseState, at = Date.now()): CaseSt
   if (Math.round(Math.max(state.legacyRecoveredAmount ?? 0, state.recoveredAmount ?? 0) * 100) > Math.round(verifiedReturned(state) * 100)) {
     throw new Error('Resolve the older unverified return amount before starting a new request.')
   }
+  return { ...openNewGeneration(state, at), requiresRevalidation: true }
+}
+
+/** The current request as a read-only snapshot, and an empty request ready for a fresh review or approval. */
+function openNewGeneration(state: CaseState, at: number): CaseState {
   const generation = state.activeRequestGeneration ?? 1
   const archived: ArchivedRequest = {
     generation, archivedAt: at, returnedAmountAtArchive: activeReturned(state),
@@ -39,8 +45,7 @@ export function beginNewRequestReview(state: CaseState, at = Date.now()): CaseSt
     approvedAt: null, requestedAmount: null,
     activeRequestGeneration: generation + 1,
     archivedRequests: [...(state.archivedRequests ?? []), archived],
-    requiresRevalidation: true,
-    recoverySettlements: [...(state.recoverySettlements ?? (state.recoveryVerification ? [state.recoveryVerification] : []))],
+    recoverySettlements: [...settlementsOf(state)],
     recoveryVerification: null,
     recoveredAmount: verifiedReturned(state),
     legacyRecoveredAmount: state.legacyRecoveredAmount,
@@ -58,6 +63,15 @@ export function addBusinessDays(start: number, days: number): number {
     if (date.getDay() !== 0 && date.getDay() !== 6) remaining--
   }
   return date.getTime()
+}
+
+/**
+ * Hand an internal check (an overpayment or a bank change, say) to whoever will
+ * look into it. There is no vendor, recipient or amount: nothing is being asked for.
+ */
+export function fileInternalReview(state: CaseState, note: { subject: string; body: string }, at = Date.now()): CaseState {
+  if (state.recoveryStage !== 'confirmed') throw new Error('Review this check before filing it.')
+  return { ...markRecoveryRequested({ ...state, recoverySubject: note.subject, recoveryDraft: note.body }, 0), recoveryRequestedAt: at }
 }
 
 export function setContactHold(state: CaseState, reason: string | null): CaseState {
@@ -188,6 +202,7 @@ export function recordVendorUpdate(state: CaseState, update: VendorUpdate, now =
   const remainingCents = Math.max(0, Math.round((state.requestedAmount ?? 0) * 100) - Math.round(activeReturned(state) * 100))
   if (info.amount === 'none' && update.amount !== undefined) throw new Error('This kind of reply does not carry an amount.')
   if (info.amount === 'required' && update.amount === undefined) throw new Error('Enter the amount the vendor accepted.')
+  if (update.amount === 0) throw new Error('Enter an amount above $0, or leave it blank if the vendor gave no figure.')
   if (update.amount !== undefined && (!Number.isFinite(update.amount) || update.amount < 0 || update.amount > (state.requestedAmount ?? Infinity))) {
     throw new Error('The vendor amount must be within the requested amount.')
   }
@@ -206,44 +221,78 @@ function startOfDay(time: number): number {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
 }
 
+/**
+ * What a person enters when money arrives. `amount` is the whole amount that
+ * came back; the case stores how much of it counts. The rest only ever steers
+ * this call and is never saved.
+ */
+export interface SettlementInput extends RecoveryVerification {
+  /** What the records support for the whole case; money above the request still counts up to this. */
+  supportedAmount?: number
+  /** The person confirmed that more arrived than was asked for. */
+  excessConfirmed?: boolean
+  /** Correct an existing return (see settlementKey) instead of adding one. */
+  replaces?: string
+  /** With `replaces`: take that return off the case. */
+  remove?: boolean
+}
+
 /** A promise and a credit memo are evidence of progress, never settled value. */
-export function verifyRecovery(state: CaseState, proof: RecoveryVerification): CaseState {
+export function verifyRecovery(state: CaseState, input: SettlementInput, now = Date.now()): CaseState {
   if (state.recoveryStage !== 'requested') throw new Error('A request must be open before recording returned value.')
-  const requested = state.requestedAmount ?? 0
-  const alreadyReturned = activeReturned(state)
-  const caseReturned = verifiedReturned(state)
-  const remainingCents = Math.round(requested * 100) - Math.round(alreadyReturned * 100)
   const generation = state.activeRequestGeneration ?? 1
-  const normalized: RecoveryVerification = {
-    amount: proof.amount, method: proof.method, source: proof.source,
-    reference: proof.reference.trim(), settledAt: proof.settledAt,
-    appliedToBill: proof.appliedToBill?.trim(),
-    ...(generation > 1 ? { requestGeneration: generation } : {}),
+  const recorded = settlementsOf(state)
+  const replacing = input.replaces === undefined ? -1 : recorded.findIndex((entry) => (entry.requestGeneration ?? 1) === generation && settlementKey(entry) === input.replaces)
+  if (input.replaces !== undefined && replacing < 0) throw new Error('That return is no longer on this case.')
+  const prior = recorded.filter((_, index) => index !== replacing)
+  // Everything below is judged as if the entry being corrected had never been recorded.
+  const base: CaseState = replacing < 0 ? state : { ...state, recoverySettlements: prior, recoveryVerification: prior.at(-1) ?? null }
+  if (input.remove) {
+    const left = verifiedReturned(base)
+    return { ...base, recoveredAmount: prior.length ? left : null, ...(prior.length ? {} : { recoveredVia: null, recoveryOutcomeNote: null }) }
   }
-  const prior = state.recoverySettlements ?? (state.recoveryVerification ? [state.recoveryVerification] : [])
-  if (prior.some((entry) => entry.method === normalized.method && entry.reference.toLowerCase() === normalized.reference.toLowerCase() && entry.appliedToBill === normalized.appliedToBill)) {
+  const requested = state.requestedAmount ?? 0
+  const alreadyReturned = activeReturned(base)
+  const caseReturned = verifiedReturned(base)
+  const remainingCents = Math.round(requested * 100) - Math.round(alreadyReturned * 100)
+  const reference = input.reference.trim()
+  const appliedToBill = input.appliedToBill?.trim()
+  if (prior.some((entry) => settlementKey(entry) === settlementKey({ method: input.method, reference, appliedToBill }))) {
     throw new Error('This settlement reference was already recorded.')
   }
-  if (!Number.isFinite(proof.amount) || Math.abs(proof.amount * 100 - Math.round(proof.amount * 100)) > 0.000001) throw new Error('Settled amount must be recorded in whole cents.')
-  if (!Number.isFinite(proof.amount) || proof.amount <= 0 || Math.round(proof.amount * 100) > remainingCents) {
-    throw new Error('Settled amount must be positive and no more than the remaining requested balance.')
+  const { amount } = input
+  if (!isWholeCents(amount)) throw new Error('Settled amount must be recorded in whole cents.')
+  const receivedCents = Math.round(amount * 100)
+  if (receivedCents <= 0 || remainingCents <= 0 || (receivedCents > remainingCents && !input.excessConfirmed)) {
+    throw new Error('Settled amount must be positive and no more than the remaining requested balance, unless you confirm that more arrived.')
   }
-  if (!proof.reference.trim()) throw new Error('A settlement reference is required.')
-  if ((proof.method === 'credit' || proof.method === 'offset') && !proof.appliedToBill?.trim()) {
+  if (!reference) throw new Error('A settlement reference is required.')
+  if (!Number.isFinite(input.settledAt) || input.settledAt <= 0) throw new Error('Enter the date the money arrived.')
+  if (input.settledAt > now + CLOCK_SLACK) throw new Error('A return cannot be dated in the future.')
+  if ((input.method === 'credit' || input.method === 'offset') && !appliedToBill) {
     throw new Error('Enter the bill where this credit was actually applied.')
   }
-  const returned = Math.round(caseReturned * 100 + proof.amount * 100) / 100
-  const fullyReturned = Math.round(alreadyReturned * 100 + proof.amount * 100) === Math.round(requested * 100)
+  // Money above the request counts toward the case only as far as the records support a claim.
+  const supportedCents = input.supportedAmount === undefined ? 0 : Math.round(input.supportedAmount * 100) - Math.round(caseReturned * 100)
+  const countedCents = Math.min(receivedCents, Math.max(remainingCents, supportedCents))
+  const normalized: RecoveryVerification = {
+    amount: countedCents / 100, method: input.method, source: input.source,
+    reference, settledAt: input.settledAt, appliedToBill,
+    ...(generation > 1 ? { requestGeneration: generation } : {}),
+    ...(receivedCents > countedCents ? { receivedAmount: receivedCents / 100 } : {}),
+  }
+  const returned = (Math.round(caseReturned * 100) + countedCents) / 100
+  const fullyReturned = countedCents >= remainingCents
   return {
-    ...state,
+    ...base,
     recoveryStage: fullyReturned ? 'recovered' : 'requested',
     recoveredAmount: returned,
-    legacyRecoveredAmount: state.legacyRecoveredAmount ?? (prior.length === 0 && (state.recoveredAmount ?? 0) > 0 ? state.recoveredAmount : null),
-    recoveredVia: proof.method,
-    recoveryOutcomeNote: normalized.reference,
-    recoveryResolvedAt: fullyReturned ? proof.settledAt : null,
+    legacyRecoveredAmount: state.legacyRecoveredAmount ?? (recorded.length === 0 && (state.recoveredAmount ?? 0) > 0 ? state.recoveredAmount : null),
+    recoveredVia: input.method,
+    recoveryOutcomeNote: reference,
+    recoveryResolvedAt: fullyReturned ? input.settledAt : null,
     recoveryVerification: normalized,
-    recoverySettlements: [...prior, normalized],
+    recoverySettlements: replacing < 0 ? [...prior, normalized] : recorded.map((entry, index) => (index === replacing ? normalized : entry)),
     nextFollowUpAt: fullyReturned ? null : state.nextFollowUpAt,
   }
 }
@@ -255,9 +304,9 @@ export function recordHistoricalSettlement(state: CaseState, generation: number,
   if (!Number.isFinite(proof.amount) || proof.amount <= 0 || Math.abs(proof.amount * 100 - Math.round(proof.amount * 100)) > 0.000001) throw new Error('Enter a positive settled amount in whole cents.')
   if (!proof.reference.trim() || !Number.isFinite(proof.settledAt) || proof.settledAt <= 0) throw new Error('A settlement reference and date are required.')
   if ((proof.method === 'credit' || proof.method === 'offset') && !proof.appliedToBill?.trim()) throw new Error('Enter the bill where this credit was actually applied.')
-  const prior = state.recoverySettlements ?? (state.recoveryVerification ? [state.recoveryVerification] : [])
+  const prior = settlementsOf(state)
   const normalized: RecoveryVerification = { amount: proof.amount, method: proof.method, source: proof.source, reference: proof.reference.trim(), settledAt: proof.settledAt, appliedToBill: proof.appliedToBill?.trim(), requestGeneration: generation }
-  if (prior.some((entry) => entry.method === normalized.method && entry.reference.toLowerCase() === normalized.reference.toLowerCase() && (entry.appliedToBill ?? '') === (normalized.appliedToBill ?? ''))) throw new Error('This settlement reference was already recorded.')
+  if (prior.some((entry) => settlementKey(entry) === settlementKey(normalized))) throw new Error('This settlement reference was already recorded.')
   const oldReturned = prior.filter((entry) => (entry.requestGeneration ?? 1) === generation).reduce((sum, entry) => sum + entry.amount, 0)
   if (Math.round((oldReturned + proof.amount) * 100) > Math.round((archived.requestedAmount ?? 0) * 100)) throw new Error('The return exceeds the remaining amount of the earlier request.')
   const total = Math.round((verifiedReturned(state) + proof.amount) * 100) / 100
@@ -277,13 +326,21 @@ export function closeWithoutRecovery(state: CaseState, reason: string, at = Date
   return { ...recordRecoveryOutcome(state, 'not_recovered', null, reason.trim()), recoveryResolvedAt: at, nextFollowUpAt: null }
 }
 
-/** Resume pursuing an unpaid remainder while keeping its recorded settlements intact. */
-export function reopenRemainingBalance(state: CaseState, at = Date.now()): CaseState {
+/**
+ * Resume pursuing what is left, keeping the recorded returns. A balance closed
+ * short goes back to waiting on the vendor. When the whole request was paid but
+ * the records support more, the rest needs a new request: the paid one is
+ * archived and a fresh one waits for approval, capped by what earlier returns
+ * leave. The caller passes what the records support when it knows it.
+ */
+export function reopenRemainingBalance(state: CaseState, at = Date.now(), supportedAmount?: number): CaseState {
   if (state.requiresRevalidation) throw new Error('Preserve the historical request before starting a new supplier review.')
   const requestedCents = Math.round((state.requestedAmount ?? 0) * 100)
   const returnedCents = Math.round(activeReturned(state) * 100)
-  if (state.recoveryStage !== 'recovered' || returnedCents <= 0 || returnedCents >= requestedCents) {
-    throw new Error('Only a closed case with a partially returned remaining balance can be reopened this way.')
+  if (state.recoveryStage !== 'recovered' || returnedCents <= 0) throw new Error('Only a closed case with a partially returned remaining balance can be reopened this way.')
+  if (returnedCents >= requestedCents) {
+    if (supportedAmount !== undefined && unrequestedRemainder(state, supportedAmount) === null) throw new Error('There is no remaining balance to pursue on this case.')
+    return { ...openNewGeneration(state, at), decision: 'confirmed', reason: state.reason, decidedAt: state.decidedAt, recoveryStage: 'confirmed', requiresRevalidation: false }
   }
   return {
     ...state,

@@ -1,264 +1,76 @@
 ---
 title: About — Reclaim
-description: Why Reclaim exists, what we believe about accounts payable, and the published research behind it. Every figure on this page links to the organization that published it.
+description: Why Reclaim exists, what we hold to, what works today and what comes next. Every figure on this page links to the organization that published it.
 folder: about
 template: about
 ---
-  <!-- COMPANY.
-       Every figure quoted here is from landing-site/notes/research-sources.md and links to the primary
-       source. Nothing about team size, funding, location or customers is claimed, because none of
-       that has been settled or verified yet. -->
-
-  <!-- HERO (black) -->
-  <section class="section hero-about" theme="black">
+  <!-- ABOUT. A letter, not a grid of cards. Nothing about team size, funding, location or customers is claimed, because
+       none of that has been settled or verified. Figures come from notes/research-sources.md and link to the publisher.
+       "Where we are" has to stay true of the product: src/lib/detection.ts (checks), docs/release-readiness-*.md.
+       The object is blender/wc_models.py scene=imprint (render_wc.sh: SCENES=imprint PUB=../media/about). -->
+  <section class="ab-hero" theme="black">
     <div class="nav-slot" data-theme="black"></div>
-    <div class="the-container">
-      <div class="the-grid">
-        <div class="content">
-          <div class="preheading type-h3" data-split="h2">Reclaim was built on one fact:</div>
-          <h1 class="heading heading1 type-h1" data-split="h1">Money that leaves<br>by mistake<br>leaves a record.</h1>
-        </div>
-      </div>
+    <div class="ab-hero-in">
+      <div class="eyebrow type-mono">About</div>
+      <h1 class="type-h1" data-split="h1">Money that leaves by mistake leaves a record.</h1>
+      <p class="type-body-large">We build software that reads that record, shows you what it found, and helps you ask for the money back.</p>
+      <video class="ab-object" data-reel data-page-baked src="/media/about/imprint.webm" poster="/media/about/imprint.webp" width="1000" height="1000" loop muted playsinline preload="metadata" aria-hidden="true"></video>
     </div>
   </section>
 
-  <div class="article-sections">
-
-    <!-- WHO WE ARE -->
-    <section class="rounded-section shouldAnimate" id="who" theme="white">
-      <div class="bg bg-top" theme="black"></div>
-      <div class="bg bg-bottom" theme="white"></div>
-      <div class="nav-slot" data-theme="white"></div>
-      <div class="rs-scale" theme="white">
-        <div class="article-section">
-          <div class="content">
-
-            <div class="article-module article-content">
-              <div class="the-grid">
-                <div class="the-col"><div class="richtext">
-                  <h2>We build one thing<br>and build it properly.</h2>
-                  <p>Reclaim reads the records your accounting system already holds — bills, payments, vendors, credits — and shows where the same invoice went out twice, where a payment came to more than the bill, and where a credit was issued and never used. Then, with your approval, it asks the vendor for the money back and follows the case until it has actually arrived.</p>
-                </div></div>
-              </div>
-            </div>
-
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- FIRST PRINCIPLES -->
-    <section class="rounded-section" id="beliefs" theme="white">
-      <div class="bg bg-top" theme="white"></div>
-      <div class="bg bg-bottom" theme="white"></div>
-      <div class="nav-slot" data-theme="white"></div>
-      <div class="rs-scale" theme="white">
-        <div class="article-section">
-          <div class="content">
-
-            <div class="article-module article-content">
-              <div class="the-grid">
-                <div class="the-col"><div class="richtext">
-                  <h4>What we believe</h4>
-                  <p>Five things we hold to, and build everything else from.</p>
-                </div></div>
-              </div>
-            </div>
-
-            <div class="article-module article-horizontal-rows">
-              <div class="the-container">
-                <div class="the-grid">
-                  <ul class="rows">
-                    <li class="row">
-                      <div class="row__index"><span class="row__accent" aria-hidden="true"></span><span class="row__num">01</span></div>
-                      <h3 class="row__heading type-h5">Mistakes in accounts payable are normal, not rare.</h3>
-                      <p class="row__desc type-body-base">APQC's benchmark of 2,386 companies puts duplicate or erroneous payments at 1.5% of all disbursements at the median.</p>
-                    </li>
-                    <li class="row">
-                      <div class="row__index"><span class="row__accent" aria-hidden="true"></span><span class="row__num">02</span></div>
-                      <h3 class="row__heading type-h5">The evidence is already sitting in your own records.</h3>
-                      <p class="row__desc type-body-base">Nothing has to be reconstructed. The bill, the payment and the credit are already in the books your system keeps today.</p>
-                    </li>
-                    <li class="row">
-                      <div class="row__index"><span class="row__accent" aria-hidden="true"></span><span class="row__num">03</span></div>
-                      <h3 class="row__heading type-h5">A number without the row behind it is only a guess.</h3>
-                      <p class="row__desc type-body-base">Every result names the records behind it and the fields that matched. If we can't point at it, we don't claim it, and a promised refund isn't money back until it arrives.</p>
-                    </li>
-                    <li class="row">
-                      <div class="row__index"><span class="row__accent" aria-hidden="true"></span><span class="row__num">04</span></div>
-                      <h3 class="row__heading type-h5">Access should be the least anyone asks for.</h3>
-                      <p class="row__desc type-body-base">Reclaim works from files you upload, with no connection to your accounting system. It can't change your books or move money, and AI only ever sees what one task needs.</p>
-                    </li>
-                    <li class="row">
-                      <div class="row__index"><span class="row__accent" aria-hidden="true"></span><span class="row__num">05</span></div>
-                      <h3 class="row__heading type-h5">The decision always stays with you, start to finish.</h3>
-                      <p class="row__desc type-body-base">Nothing goes to a vendor until you approve it, and disputes come back to you. What to raise, what to write off and what to leave alone is your call throughout.</p>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-            </div>
-
-            <div class="article-module article-content">
-              <div class="the-grid">
-                <div class="the-col"><div class="richtext">
-                  <p><span class="type-body-headline">Accounts payable is where a company's money actually leaves, and it is also where the work is most repetitive. Nearly one invoice in five needs a person to step in.</span></p>
-                  <p>Ardent Partners puts the average invoice exception rate at 18.4% and the average cost of processing a single invoice at $9.84. Those are rates, not accidents.</p>
-                  <p>They repeat every year, and the records that would show them are already sitting in the books. What has been missing is a plain way to read those records, point at the rows, and see the money through to the point where it is actually back.</p>
-                  <p>That is what we build.</p>
-                </div></div>
-              </div>
-            </div>
-
-            <div class="article-module article-quote">
-              <div class="the-container">
-                <div class="the-grid">
-                  <div class="the-col">
-                    <div class="quote type-quote">We would rather show you three findings you can check than thirty you have to believe. A number on a screen means nothing until you can open the row behind it, see the two records side by side, and decide for yourself whether it is worth chasing. That is the only kind of number worth having.</div>
-                    <div class="author"></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- WHERE THE NUMBERS COME FROM -->
-    <section class="rounded-section" id="sources" theme="white">
-      <div class="bg bg-top" theme="white"></div>
-      <div class="bg bg-bottom" theme="white"></div>
-      <div class="nav-slot" data-theme="white"></div>
-      <div class="rs-scale" theme="white">
-        <div class="article-section">
-          <div class="content">
-
-            <div class="article-module article-content">
-              <div class="the-grid">
-                <div class="the-col"><div class="richtext">
-                  <h4>Where our numbers come from</h4>
-                </div></div>
-              </div>
-            </div>
-
-            <div class="article-module article-columns has-bg">
-              <div class="the-grid">
-                <ul class="items" data-cols="4">
-                  <li class="type-article-columns-item-link item-wrap"><a class="article-columns-item-link item" href="https://www.apqc.org/resources/benchmarking/open-standards-benchmarking/measures/percentage-total-annual-number" target="_blank" rel="noopener">
-                    <svg class="icon" aria-hidden="true"><use href="#i-mark-chart"/></svg><div class="heading">APQC</div>
-                  </a></li>
-                  <li class="type-article-columns-item-link item-wrap"><a class="article-columns-item-link item" href="https://payablesplace.ardentpartners.com/2026/01/state-of-epayables-part-nine-ap-benchmarks-and-best-in-class-performance/" target="_blank" rel="noopener">
-                    <svg class="icon" aria-hidden="true"><use href="#i-mark-clock"/></svg><div class="heading">Ardent Partners</div>
-                  </a></li>
-                  <li class="type-article-columns-item-link item-wrap"><a class="article-columns-item-link item" href="https://www.acfe.com/fraud-resources/report-to-the-nations" target="_blank" rel="noopener">
-                    <svg class="icon" aria-hidden="true"><use href="#i-mark-scale"/></svg><div class="heading">ACFE</div>
-                  </a></li>
-                  <li class="type-article-columns-item-link item-wrap"><a class="article-columns-item-link item" href="https://www.financialprofessionals.org/about/learn-more/press-releases/Details/over-75-percent-of-us-firms-experienced-payments-fraud-in-2025-while-ai-adoption-for-fraud-mitigation-lags" target="_blank" rel="noopener">
-                    <svg class="icon" aria-hidden="true"><use href="#i-mark-alert"/></svg><div class="heading">AFP</div>
-                  </a></li>
-                  <li class="type-article-columns-item-link item-wrap"><a class="article-columns-item-link item" href="https://www.ic3.gov/AnnualReport/Reports/2025_IC3Report.pdf" target="_blank" rel="noopener">
-                    <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><div class="heading">FBI IC3</div>
-                  </a></li>
-                  <li class="type-article-columns-item-link item-wrap"><a class="article-columns-item-link item" href="https://www.gao.gov/products/gao-26-108694" target="_blank" rel="noopener">
-                    <svg class="icon" aria-hidden="true"><use href="#i-mark-coin"/></svg><div class="heading">US GAO</div>
-                  </a></li>
-                </ul>
-              </div>
-            </div>
-
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- WHAT WE'RE BUILDING -->
-    <section class="rounded-section" id="building" theme="white">
-      <div class="bg bg-top" theme="white"></div>
-      <div class="bg bg-bottom" theme="white"></div>
-      <div class="nav-slot" data-theme="white"></div>
-      <div class="rs-scale" theme="white">
-        <div class="article-section">
-          <div class="content">
-
-            <div class="article-module article-content">
-              <div class="the-grid">
-                <div class="the-col"><div class="richtext">
-                  <h4>What we're building</h4>
-                  <p>Reclaim starts with five kinds of money: the same payment made twice, the same bill entered twice, a payment larger than its bill, a payment that doesn't match what was billed, and a vendor credit issued and never used. For each one it finds the case, proves it from your records, runs the recovery once you approve it, and checks that the money actually came back.</p>
-                  <p>Next, Reclaim takes on more of the routine work: reading vendor replies, gathering evidence, and suggesting the next step. After that, it reads more than your ledger: supplier statements, your AP inbox and your bank, so it can find credits your books never recorded and keep watching for new mistakes.</p>
-                  <p>What won't change is the part we care about most: every result keeps pointing at the records it came from.</p>
-                </div></div>
-              </div>
-            </div>
-
-          </div>
-        </div>
-      </div>
-    </section>
-
-  </div>
-
-  <!-- FROM THE RESEARCH -->
-  <section class="section latest-updates" theme="white">
+  <section class="ab-letter" theme="white">
     <div class="nav-slot" data-theme="white"></div>
-    <div class="the-container">
-      <div class="the-grid">
-        <h2 class="heading2 heading type-h2" data-split="h2">From the research</h2>
-      </div>
+    <div class="ab-letter-in">
+      <p>A business pays the same invoice twice. Nobody meant to. One copy came by email, the other by post, and the numbers differ by a dash.</p>
+      <p>It isn’t unusual. APQC’s benchmark puts duplicate or erroneous payments at <a href="https://www.apqc.org/resources/benchmarking/open-standards-benchmarking/measures/percentage-total-annual-number" target="_blank" rel="noopener">1.5% of disbursements</a> at the median organization.</p>
+      <p>Both payments are still in the books, a few rows apart. Someone has to look, and then someone has to ask.</p>
+      <p><em>That’s the job we built Reclaim to do.</em></p>
     </div>
-    <div class="article-module article-carousel">
-      <div class="the-grid">
-        <div class="carousel-prev-next-controls controls">
-          <button type="button" class="hover-loop cta-button-square prev" size="medium" aria-label="Previous"><span class="inner"><svg class="icon"><use href="#i-arrow"/></svg></span></button>
-          <button type="button" class="hover-loop cta-button-square next" size="medium" aria-label="Next"><span class="inner"><svg class="icon"><use href="#i-arrow"/></svg></span></button>
-        </div>
-        <div class="carousel-wrapper">
-          <div class="offset">
-            <div class="swiper">
-              <ul class="swiper-wrapper">
-                <li class="swiper-slide"><div class="article-list-item size-medium carousel-cell" layout="case-study"><a href="/research/ap-benchmarks">
-                  <div class="thumbnail"><img class="media" src="/assets/dept-warehousing.png" alt="" loading="lazy"></div>
-                  <div class="content">
-                    <div class="top">
-                      <div class="row"><h3 class="name type-h5">How often payments go out wrong</h3><span class="hover-loop up-right cta-button-square button" theme="black" size="medium"><span class="inner"><svg class="icon"><use href="#i-arrow-ur"/></svg></span></span></div>
-                    </div>
-                    <div class="bottom type-body-xs"><span class="tag"><svg class="icon" aria-hidden="true"><use href="#i-mark-chart"/></svg><span class="label">Benchmark</span></span><span class="tag"><svg class="icon" aria-hidden="true"><use href="#i-tile-files"/></svg><span class="label">APQC · Ardent</span></span></div>
-                  </div>
-                </a></div></li>
-                <li class="swiper-slide"><div class="article-list-item size-medium carousel-cell" layout="case-study"><a href="/research/occupational-fraud-2026">
-                  <div class="thumbnail"><img class="media" src="/assets/dept-finance.png" alt="" loading="lazy"></div>
-                  <div class="content">
-                    <div class="top">
-                      <div class="row"><h3 class="name type-h5">What billing schemes cost</h3><span class="hover-loop up-right cta-button-square button" theme="black" size="medium"><span class="inner"><svg class="icon"><use href="#i-arrow-ur"/></svg></span></span></div>
-                    </div>
-                    <div class="bottom type-body-xs"><span class="tag"><svg class="icon" aria-hidden="true"><use href="#i-mark-scale"/></svg><span class="label">Report</span></span><span class="tag"><svg class="icon" aria-hidden="true"><use href="#i-tile-files"/></svg><span class="label">ACFE</span></span></div>
-                  </div>
-                </a></div></li>
-                <li class="swiper-slide"><div class="article-list-item size-medium carousel-cell" layout="case-study"><a href="/research/payments-fraud-2025">
-                  <div class="thumbnail"><img class="media" src="/assets/dept-procurement.png" alt="" loading="lazy"></div>
-                  <div class="content">
-                    <div class="top">
-                      <div class="row"><h3 class="name type-h5">Payments fraud in 2025</h3><span class="hover-loop up-right cta-button-square button" theme="black" size="medium"><span class="inner"><svg class="icon"><use href="#i-arrow-ur"/></svg></span></span></div>
-                    </div>
-                    <div class="bottom type-body-xs"><span class="tag"><svg class="icon" aria-hidden="true"><use href="#i-mark-alert"/></svg><span class="label">Survey</span></span><span class="tag"><svg class="icon" aria-hidden="true"><use href="#i-tile-files"/></svg><span class="label">AFP · FBI</span></span></div>
-                  </div>
-                </a></div></li>
-                <li class="swiper-slide"><div class="article-list-item size-medium carousel-cell" layout="case-study"><a href="/research/improper-payments">
-                  <div class="thumbnail"><img class="media" src="/assets/dept-inventory.png" alt="" loading="lazy"></div>
-                  <div class="content">
-                    <div class="top">
-                      <div class="row"><h3 class="name type-h5">$186 billion in improper payments</h3><span class="hover-loop up-right cta-button-square button" theme="black" size="medium"><span class="inner"><svg class="icon"><use href="#i-arrow-ur"/></svg></span></span></div>
-                    </div>
-                    <div class="bottom type-body-xs"><span class="tag"><svg class="icon" aria-hidden="true"><use href="#i-mark-coin"/></svg><span class="label">Report</span></span><span class="tag"><svg class="icon" aria-hidden="true"><use href="#i-tile-files"/></svg><span class="label">US GAO</span></span></div>
-                  </div>
-                </a></div></li>
-              </ul>
-            </div>
-          </div>
-        </div>
+  </section>
+
+  <section class="ab-hold" theme="grey">
+    <div class="nav-slot" data-theme="grey"></div>
+    <div class="ab-hold-in">
+      <div class="ab-hold-head">
+        <div class="eyebrow type-mono">What we hold to</div>
+        <h2 class="type-h2" data-split="h2">Five things we won’t trade.</h2>
       </div>
+      <ol class="ab-hold-list">
+        <li><h3>Show the row.</h3><p>Every finding names the payments behind it and what matched. If we can’t point at it, we don’t claim it.</p></li>
+        <li><h3>A flag isn’t a debt.</h3><p>A match is a reason to look. You check it against your bank and your bills before it becomes a request.</p></li>
+        <li><h3>Ask for less access.</h3><p>You can start with a file you export yourself. Reclaim can’t move money and never writes to your books.</p></li>
+        <li><h3>You decide.</h3><p>Nothing goes to a vendor until you approve it. What to raise and what to leave alone is your call.</p></li>
+        <li><h3>Count what came back.</h3><p>A promised refund isn’t money back. It counts when you record that it arrived, or that the credit was used.</p></li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="ab-where" theme="black">
+    <div class="nav-slot" data-theme="black"></div>
+    <div class="section-head"><div class="eyebrow type-mono">Where we are</div><h2 class="type-h2" data-split="h2">What works, and what doesn’t yet.</h2></div>
+    <ol class="ab-where-line">
+      <li class="is-now"><span class="type-mono">Today</span><h3>Upload, check, ask, track</h3><p>Eight checks on an export of your payments, with the evidence for each finding. A proven duplicate gets a drafted request, your approval, and a case you follow to the end.</p></li>
+      <li><span class="type-mono">In testing</span><h3>QuickBooks Online import</h3><p>Bringing payments in directly instead of by file. It isn’t open to customers yet.</p></li>
+      <li><span class="type-mono">Later</span><h3>More than your ledger</h3><p>Supplier statements and your bank, so Reclaim can find credits your books never recorded and confirm refunds for itself.</p></li>
+    </ol>
+  </section>
+
+  <section class="ab-sources" theme="white">
+    <div class="nav-slot" data-theme="white"></div>
+    <div class="ab-sources-in">
+      <div class="ab-sources-head">
+        <div class="eyebrow type-mono">Sources</div>
+        <h2 class="type-h3" data-split="h2">Where our numbers come from.</h2>
+        <a class="ab-more" href="/research">Read the research<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      </div>
+      <ul class="ab-sources-list">
+        <li><a href="https://www.apqc.org/resources/benchmarking/open-standards-benchmarking/measures/percentage-total-annual-number" target="_blank" rel="noopener"><b>APQC</b><span>How often payments are duplicate or erroneous</span><svg class="icon" aria-hidden="true"><use href="#i-arrow-ur"/></svg></a></li>
+        <li><a href="https://payablesplace.ardentpartners.com/2026/01/state-of-epayables-part-nine-ap-benchmarks-and-best-in-class-performance/" target="_blank" rel="noopener"><b>Ardent Partners</b><span>How often invoices need a person to step in</span><svg class="icon" aria-hidden="true"><use href="#i-arrow-ur"/></svg></a></li>
+        <li><a href="https://www.acfe.com/fraud-resources/report-to-the-nations" target="_blank" rel="noopener"><b>ACFE</b><span>What billing schemes cost, and how long they run</span><svg class="icon" aria-hidden="true"><use href="#i-arrow-ur"/></svg></a></li>
+        <li><a href="https://www.financialprofessionals.org/about/learn-more/press-releases/Details/over-75-percent-of-us-firms-experienced-payments-fraud-in-2025-while-ai-adoption-for-fraud-mitigation-lags" target="_blank" rel="noopener"><b>AFP</b><span>How many firms faced payments fraud</span><svg class="icon" aria-hidden="true"><use href="#i-arrow-ur"/></svg></a></li>
+        <li><a href="https://www.ic3.gov/AnnualReport/Reports/2025_IC3Report.pdf" target="_blank" rel="noopener"><b>FBI IC3</b><span>Losses to business email compromise</span><svg class="icon" aria-hidden="true"><use href="#i-arrow-ur"/></svg></a></li>
+        <li><a href="https://www.gao.gov/products/gao-26-108694" target="_blank" rel="noopener"><b>US GAO</b><span>Improper payments across the federal government</span><svg class="icon" aria-hidden="true"><use href="#i-arrow-ur"/></svg></a></li>
+      </ul>
     </div>
   </section>
 

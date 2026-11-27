@@ -52,6 +52,16 @@ export function checkRepeatUpload(records: APRecord[], projectId: string | null)
   return checkRepeat(fresh, (fp) => registry[fp] !== undefined && registry[fp] !== projectId)
 }
 
+/**
+ * Forget an audit's rows. Only for an audit the account never stored (it was
+ * refused, or removed before it was saved): nothing was audited on the server,
+ * so its ledger is still new there. Deleting a saved audit doesn't release its
+ * rows, here or on the server.
+ */
+export function forgetUpload(projectId: string): void {
+  write(Object.fromEntries(Object.entries(read()).filter(([, owner]) => owner !== projectId)))
+}
+
 export function rememberUpload(records: APRecord[], projectId: string): void {
   const registry = read()
   for (const fp of fingerprintsOf(records)) registry[fp] ??= projectId

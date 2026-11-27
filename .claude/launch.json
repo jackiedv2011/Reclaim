@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "ap-leak-finder-dev",
+      "name": "reclaim-app",
       "runtimeExecutable": "npm",
       "runtimeArgs": [
         "run",

@@ -62,6 +62,12 @@ async function signUpAndVerify(client: Client, input: typeof alice) {
   return verified.body.user
 }
 
+/** External AI is off for every account until its owner turns it on and consents to a task's field set. */
+async function enableAiDrafts(client: Client) {
+  expect((await client.call('/api/ai/policy', { method: 'PUT', json: { mode: 'on_demand', acknowledged: true } })).status).toBe(200)
+  expect((await client.post('/api/ai/tasks/draft_recovery_request/consent', { scope: 'field_set' })).status).toBe(201)
+}
+
 function seedAuthorized(userId: string, project: Record<string, unknown>): void {
   new ProjectStore(app.db, config.dataKeys).upsert(userId, project)
 }
@@ -359,6 +365,7 @@ describe('plans and entitlements', () => {
     for (const id of ['p1', 'p2', 'p3', 'p4', 'p5']) expect((await c.put(`/api/projects/${id}`, project(id))).status).toBe(200)
     expect((await c.get('/api/account/entitlements')).body).toMatchObject({ plan: 'growth', limits: { auditsPerMonth: null, findingsVisible: null, blocksRepeatUploads: false, aiDrafts: true }, canStartAudit: true })
     seedAuthorized(user.id, saved.project)
+    await enableAiDrafts(c)
     expect((await c.post('/api/ai/draft', draftPayload)).status).toBe(200)
     // a plan is per account: Bob is still Free
     const b = new Client()
@@ -446,41 +453,74 @@ describe('plans and entitlements', () => {
 })
 
 describe('ai drafting', () => {
-  it('requires a session, validates the payload, and returns the draft', async () => {
-    const saved = authorizedProject('s1', { vendor: 'Sierra Coffee Supply', invoice: 'INV-1', amount: 6800, requested: 6800 })
-    const payload = {
-      projectId: 's1', findingId: saved.findingId,
-      vendor: 'Sierra Coffee Supply', findingType: 'Exact duplicate payment', findingTitle: 'Duplicate payment of invoice INV-1', explanation: 'Paid twice.', evidenceStrength: 'strong',
-      amountFlagged: 6800, amountRequested: 6800, method: 'refund', recoveryStage: 'confirmed',
-      rows: [{ invoiceNumber: 'INV-1', invoiceDate: '2025-01-05', paymentDate: '2025-02-02', invoiceAmount: 6800, amountPaid: 6800, terms: null }],
-      userContext: '', sender: { businessName: 'Bean Co', senderName: 'Alice Ng', senderEmail: 'alice@example.com' },
-    }
+  const saved = authorizedProject('s1', { vendor: 'Sierra Coffee Supply', invoice: 'INV-1', amount: 6800, requested: 6800 })
+  const payload = {
+    projectId: 's1', findingId: saved.findingId,
+    vendor: 'Sierra Coffee Supply', findingType: 'Exact duplicate payment', findingTitle: 'Duplicate payment of invoice INV-1', explanation: 'Paid twice.', evidenceStrength: 'strong',
+    amountFlagged: 6800, amountRequested: 6800, method: 'refund', recoveryStage: 'confirmed',
+    rows: [{ invoiceNumber: 'INV-1', invoiceDate: '2025-01-05', paymentDate: '2025-02-02', invoiceAmount: 6800, amountPaid: 6800, terms: null }],
+    userContext: '', sender: { businessName: 'Bean Co', senderName: 'Alice Ng', senderEmail: 'alice@example.com' },
+  }
+  const withState = (patch: Record<string, unknown>) => ({ ...saved.project, environment: { ...saved.project.environment, caseStates: { [saved.findingId]: { ...saved.project.environment.caseStates[saved.findingId], ...patch } } } })
+
+  it('requires a session and a valid payload, and sends nothing while external AI is off (the default)', async () => {
     expect((await new Client().post('/api/ai/draft', payload)).status).toBe(401)
     const c = new Client()
     const user = await signUpAndVerify(c, alice)
     await c.post('/api/dev/plan', { plan: 'growth' })
     expect((await c.post('/api/ai/draft', { ...payload, extra: 'smuggled' })).status).toBe(400)
     expect((await c.post('/api/ai/draft', { ...payload, rows: [{ ...payload.rows[0], bankAccountLast4: '1234' }] })).status).toBe(400)
-    // Nothing is drafted until the case is saved on this account with evidence and an approval.
-    expect((await c.post('/api/ai/draft', payload)).body.code).toBe('recovery_not_authorized')
     seedAuthorized(user.id, saved.project)
-    expect((await c.post('/api/ai/draft', { ...payload, amountRequested: 5000, amountFlagged: 6800 })).body.code).toBe('recovery_not_authorized')
-    const unapproved = { ...saved.project, environment: { ...saved.project.environment, caseStates: {} } }
-    seedAuthorized(user.id, unapproved)
+    vi.mocked(drafts.draft).mockClear()
+    const off = await c.post('/api/ai/draft', payload)
+    expect(off.status).toBe(403)
+    expect(off.body.code).toBe('ai_off')
+    // On, but no consent to this task's fields yet.
+    await c.call('/api/ai/policy', { method: 'PUT', json: { mode: 'on_demand', acknowledged: true } })
+    expect((await c.post('/api/ai/draft', payload)).body.code).toBe('ai_consent_required')
+    expect(drafts.draft).not.toHaveBeenCalled()
+  })
+
+  it('drafts from the stored case, before approval, with names and the sender email kept out of the packet', async () => {
+    const c = new Client()
+    const user = await signUpAndVerify(c, alice)
+    await c.post('/api/dev/plan', { plan: 'growth' })
+    await enableAiDrafts(c)
+    // Nothing is drafted until the case is saved on this account and passes the evidence gate.
     expect((await c.post('/api/ai/draft', payload)).body.code).toBe('recovery_not_authorized')
-    seedAuthorized(user.id, saved.project)
-    // Browser-supplied allegations and resolution cannot override the saved case.
+    // Confirmed with evidence but not yet approved: a draft is allowed, and is not an approval.
+    seedAuthorized(user.id, withState({ approvedAt: null }))
+    const early = await c.post('/api/ai/draft', { ...payload, amountRequested: 5000 })
+    expect(early.status).toBe(200)
+    // Browser-supplied allegations cannot override the saved case.
     const ok = await c.post('/api/ai/draft', { ...payload, vendor: 'Someone Else', findingTitle: 'Vendor committed fraud', explanation: 'Vendor admitted fraud.', method: 'credit', recoveryStage: 'recovered', rows: [{ ...payload.rows[0], invoiceNumber: 'FAKE' }] })
     expect(ok.status).toBe(200)
-    expect(ok.body).toEqual({ subject: 'Re: Sierra Coffee Supply', body: 'Please refund 6800.' })
-    expect(drafts.draft).toHaveBeenLastCalledWith(expect.objectContaining({ vendor: 'Sierra Coffee Supply', method: 'refund', recoveryStage: 'confirmed', findingTitle: 'Duplicate payment of invoice INV-1', explanation: 'The saved payment records show the same invoice paid twice.', rows: expect.arrayContaining([expect.objectContaining({ invoiceNumber: 'INV-1' })]) }))
-    expect(drafts.draft).toHaveBeenLastCalledWith(expect.not.objectContaining({ extra: expect.anything() }))
-    const closed = { ...saved.project, environment: { ...saved.project.environment, caseStates: { [saved.findingId]: { ...saved.project.environment.caseStates[saved.findingId], recoveryStage: 'recovered' } } } }
-    seedAuthorized(user.id, closed)
+    expect(ok.body).toMatchObject({ subject: 'Re: Sierra Coffee Supply', body: 'Please refund 6800.' })
+    const sent = vi.mocked(drafts.draft).mock.lastCall![0]
+    expect(sent).toMatchObject({ vendor: '[[SUPPLIER]]', method: 'credit', findingTitle: 'The same invoice appears to have been paid more than once.', rows: [expect.objectContaining({ invoiceNumber: '[[INVOICE_1]]' }), expect.anything()], sender: { businessName: '[[SENDER_BUSINESS]]', senderName: '[[SENDER_NAME]]', senderEmail: '' } })
+    expect(JSON.stringify(sent)).not.toMatch(/Sierra|INV-1|alice@example\.com|Bean Co|fraud|FAKE|2025-/)
+    // Recorded in the invocation ledger, without the packet or the draft.
+    const ledger = await c.get('/api/ai/invocations')
+    expect(ledger.body.invocations[0]).toMatchObject({ task: 'draft_recovery_request', outcome: 'ok', finding_id: saved.findingId })
+    expect(JSON.stringify(ledger.body)).not.toMatch(/Sierra|refund 6800/)
+    // Over what the evidence supports, already sent, or closed: refused.
+    expect((await c.post('/api/ai/draft', { ...payload, amountRequested: 6800.01, amountFlagged: 6800.01 })).body.code).toBe('recovery_not_authorized')
+    seedAuthorized(user.id, withState({ recoveryStage: 'recovered' }))
     expect((await c.post('/api/ai/draft', payload)).body.code).toBe('recovery_not_authorized')
-    const alreadySent = { ...saved.project, environment: { ...saved.project.environment, caseStates: { [saved.findingId]: { ...saved.project.environment.caseStates[saved.findingId], recoveryStage: 'requested' } } } }
-    seedAuthorized(user.id, alreadySent)
+    seedAuthorized(user.id, withState({ recoveryStage: 'requested' }))
     expect((await c.post('/api/ai/draft', payload)).body.code).toBe('recovery_not_authorized')
+  })
+
+  it('turning AI off again revokes the consent', async () => {
+    const c = new Client()
+    const user = await signUpAndVerify(c, alice)
+    await c.post('/api/dev/plan', { plan: 'growth' })
+    seedAuthorized(user.id, saved.project)
+    await enableAiDrafts(c)
+    expect((await c.post('/api/ai/draft', payload)).status).toBe(200)
+    await c.call('/api/ai/policy', { method: 'PUT', json: { mode: 'off', acknowledged: true } })
+    await c.call('/api/ai/policy', { method: 'PUT', json: { mode: 'on_demand', acknowledged: true } })
+    expect((await c.post('/api/ai/draft', payload)).body.code).toBe('ai_consent_required')
   })
 })
 

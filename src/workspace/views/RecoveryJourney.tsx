@@ -3,7 +3,10 @@ import { CalendarClock, CircleCheck } from 'lucide-react'
 import { formatCurrency } from '@/lib/format'
 import { type CaseState, type RecoveryMethod, type RecoveryVerification, type VendorUpdate, type VendorUpdateStatus } from '@/ledger/caseState'
 import { latestVendorPosition, VENDOR_STATUS, VENDOR_STATUS_ORDER } from '@/recovery/vendorStatus'
-import { activeReturned, verifiedReturned } from '@/recovery/financials'
+import { activeReturned, settlementKey, settlementsOf, verifiedReturned } from '@/recovery/financials'
+import { evaluateEligibility } from '@/recovery/eligibility'
+import type { SettlementInput } from '@/recovery/model'
+import { isWholeCents, LIMITS } from '@/recovery/validation'
 import type { Finding } from '@/types'
 
 const SETTLEMENT_METHOD_LABEL: Record<RecoveryMethod, string> = { refund: 'Cash refund', credit: 'Applied vendor credit', offset: 'Payment offset' }
@@ -20,7 +23,18 @@ const dateValue = (time: number | null | undefined) => {
 }
 const dateFromInput = (value: string) => (value ? new Date(`${value}T12:00:00`).getTime() : null)
 const parseMoney = (value: string) => Number(value.replace(/[$,\s]/g, ''))
-const wholeCents = (value: number) => Math.abs(value * 100 - Math.round(value * 100)) <= 0.000001
+
+/**
+ * When the money arrived, from the day picked: now for today, otherwise that
+ * day, but never before a reply already logged on it (a refund promised and
+ * received the same day came after the promise).
+ */
+function arrivedAt(day: string, replies: VendorUpdate[], now: number): number | null {
+  if (!day) return null
+  if (day === dateValue(now)) return now
+  const noon = dateFromInput(day)!
+  return Math.max(noon, ...replies.filter((reply) => dateValue(reply.at) === day).map((reply) => reply.at))
+}
 
 type Tab = 'reply' | 'money' | 'close'
 
@@ -53,6 +67,10 @@ export function RecoveryProgressPanel({ finding, state, onVendorUpdate, onFollow
   const [amount, setAmount] = useState(remaining.toFixed(2))
   const [method, setMethod] = useState<RecoveryMethod>(state.requestedResolution ?? 'refund')
   const [source, setSource] = useState<RecoveryVerification['source']>('manual')
+  const [arrivedOn, setArrivedOn] = useState(() => dateValue(Date.now()))
+  const [excessConfirmed, setExcessConfirmed] = useState(false)
+  /** The recorded return being corrected, by its key. */
+  const [correcting, setCorrecting] = useState<string | null>(null)
   const [reference, setReference] = useState('')
   const [appliedToBill, setAppliedToBill] = useState('')
   const [closeReason, setCloseReason] = useState('')
@@ -60,17 +78,46 @@ export function RecoveryProgressPanel({ finding, state, onVendorUpdate, onFollow
   const [proofError, setProofError] = useState('')
   const [closeError, setCloseError] = useState('')
 
-  useEffect(() => { setAmount(remaining.toFixed(2)) }, [remaining])
+  useEffect(() => { setAmount(remaining.toFixed(2)); setExcessConfirmed(false) }, [remaining])
   useEffect(() => { setFollowUpDate(dateValue(state.nextFollowUpAt)) }, [state.nextFollowUpAt])
 
   const statusInfo = VENDOR_STATUS[status]
+  const gate = evaluateEligibility(finding)
+  const corrected = correcting === null ? null : settlementsOf(state).find((entry) => settlementKey(entry) === correcting) ?? null
+  // What this entry may be: the open balance, plus the return it replaces.
+  const open = Math.round(remaining * 100 + (corrected?.amount ?? 0) * 100) / 100
+  const enteredExcess = Math.round(parseMoney(amount) * 100) - Math.round(open * 100)
+  const supportedExcess = gate.potentialAmountMinor === null ? 0 : Math.max(0, gate.potentialAmountMinor - Math.round(verifiedReturned(state) * 100) + Math.round((corrected?.amount ?? 0) * 100) - Math.round(open * 100))
+  const uncounted = Math.max(0, enteredExcess - supportedExcess)
+
+  const startCorrection = (entry: RecoveryVerification) => {
+    setTab('money')
+    setCorrecting(settlementKey(entry))
+    setAmount((entry.receivedAmount ?? entry.amount).toFixed(2))
+    setMethod(entry.method)
+    setSource(entry.source)
+    setReference(entry.reference)
+    setAppliedToBill(entry.appliedToBill ?? '')
+    setArrivedOn(dateValue(entry.settledAt))
+    setExcessConfirmed(false)
+    setProofError('')
+  }
+  const clearEntry = () => {
+    setCorrecting(null)
+    setAmount(remaining.toFixed(2))
+    setReference('')
+    setAppliedToBill('')
+    setArrivedOn(dateValue(Date.now()))
+    setExcessConfirmed(false)
+  }
 
   const logUpdate = () => {
     if (!responseNote.trim()) { setVendorError('Describe what the vendor said or what you sent.'); return }
     const parsedAmount = statusInfo.amount !== 'none' && responseAmount.trim() ? parseMoney(responseAmount) : undefined
     if (statusInfo.amount === 'required' && parsedAmount === undefined) { setVendorError('Enter the amount the vendor accepted.'); return }
+    if (parsedAmount === 0) { setVendorError('Enter an amount above $0, or leave it blank if the vendor gave no figure.'); return }
     if (parsedAmount !== undefined && (!Number.isFinite(parsedAmount) || parsedAmount < 0 || parsedAmount > requested)) { setVendorError('Vendor amount must be within the requested amount.'); return }
-    if (parsedAmount !== undefined && !wholeCents(parsedAmount)) { setVendorError('Enter dollars and cents only.'); return }
+    if (parsedAmount !== undefined && !isWholeCents(parsedAmount)) { setVendorError('Enter dollars and cents only.'); return }
     if (status === 'partial_acceptance' && parsedAmount !== undefined && (parsedAmount <= 0 || Math.round(parsedAmount * 100) >= Math.round(remaining * 100))) {
       setVendorError(`A partial acceptance is more than $0 and less than ${formatCurrency(remaining)}. For the whole amount, choose "Accepted the claim".`)
       return
@@ -90,24 +137,49 @@ export function RecoveryProgressPanel({ finding, state, onVendorUpdate, onFollow
   const recordSettlement = () => {
     if (state.requestedAmount == null) { setProofError('The original requested amount is missing. Confirm it from the request before recording a return.'); return }
     const parsed = parseMoney(amount)
-    if (!Number.isFinite(parsed) || parsed <= 0 || Math.round(parsed * 100) > Math.round(remaining * 100)) { setProofError(`Enter a settled amount from $0.01 to ${formatCurrency(remaining)}.`); return }
-    if (!wholeCents(parsed)) { setProofError('Enter dollars and cents only.'); return }
+    if (!Number.isFinite(parsed) || parsed <= 0) { setProofError('Enter the amount that arrived, $0.01 or more.'); return }
+    if (enteredExcess > 0 && !excessConfirmed) { setProofError(`That is ${formatCurrency(enteredExcess / 100)} more than the ${formatCurrency(open)} still open on this request. Check the amount, or confirm below that more arrived.`); return }
+    if (!isWholeCents(parsed)) { setProofError('Enter dollars and cents only.'); return }
     if (!reference.trim()) { setProofError('Enter a settlement reference.'); return }
     if ((method === 'credit' || method === 'offset') && !appliedToBill.trim()) { setProofError('Enter the bill where the credit was actually applied.'); return }
-    const prior = state.recoverySettlements ?? (state.recoveryVerification ? [state.recoveryVerification] : [])
-    if (prior.some((entry) => entry.method === method && entry.reference.toLowerCase() === reference.trim().toLowerCase() && (entry.appliedToBill ?? undefined) === (appliedToBill.trim() || undefined))) {
+    const settledAt = arrivedAt(arrivedOn, state.vendorUpdates ?? [], Date.now())
+    if (settledAt === null || arrivedOn > dateValue(Date.now())) { setProofError('Choose the day the money arrived. It cannot be in the future.'); return }
+    if (finding.evidence?.priorReturns?.some((entry) => entry.reference.trim().toLowerCase() === reference.trim().toLowerCase())) {
+      setProofError('This return is already part of the evidence review, so it is already taken off the request.')
+      return
+    }
+    const key = settlementKey({ method, reference, appliedToBill: method === 'refund' ? undefined : appliedToBill })
+    if (settlementsOf(state).some((entry) => settlementKey(entry) === key && key !== correcting)) {
       setProofError('This settlement reference was already recorded. Check the earlier return before adding another.')
       return
     }
     setProofError('')
     try {
-      onVerify(finding.id, { amount: parsed, method, source, reference: reference.trim(), appliedToBill: appliedToBill.trim() || undefined, settledAt: Date.now() })
+      const entry: SettlementInput = {
+        amount: parsed, method, source, reference: reference.trim(), appliedToBill: method === 'refund' ? undefined : appliedToBill.trim() || undefined, settledAt,
+        ...(gate.potentialAmountMinor === null ? {} : { supportedAmount: gate.potentialAmountMinor / 100 }),
+        ...(enteredExcess > 0 ? { excessConfirmed: true } : {}),
+        ...(correcting !== null ? { replaces: correcting } : {}),
+      }
+      onVerify(finding.id, entry)
     } catch (error) {
       setProofError(error instanceof Error ? error.message : 'That return could not be recorded.')
       return
     }
-    setReference('')
-    setAppliedToBill('')
+    clearEntry()
+  }
+
+  const removeReturn = () => {
+    if (!corrected) return
+    try {
+      const entry: SettlementInput = { ...corrected, replaces: correcting!, remove: true }
+      onVerify(finding.id, entry)
+    } catch (error) {
+      setProofError(error instanceof Error ? error.message : 'That return could not be removed.')
+      return
+    }
+    setProofError('')
+    clearEntry()
   }
 
   return (
@@ -140,6 +212,8 @@ export function RecoveryProgressPanel({ finding, state, onVendorUpdate, onFollow
                 <li key={`m-${entry.at}-${index}`} data-kind="money">
                   <div><strong>{formatCurrency(entry.settlement.amount)} came back</strong><time>{short.format(entry.settlement.settledAt)}</time></div>
                   <p>{SETTLEMENT_METHOD_LABEL[entry.settlement.method]} · {entry.settlement.reference}{entry.settlement.appliedToBill ? ` · applied to ${entry.settlement.appliedToBill}` : ''}</p>
+                  <ExcessNote entry={entry.settlement} />
+                  <button type="button" className="wk-linklike" onClick={() => startCorrection(entry.settlement)} aria-label={`Correct the ${formatCurrency(entry.settlement.amount)} return, ${entry.settlement.reference}`}>Correct this entry</button>
                 </li>
               ))}
           </ol>
@@ -207,11 +281,17 @@ export function RecoveryProgressPanel({ finding, state, onVendorUpdate, onFollow
           </div>
         ) : tab === 'money' ? (
           <div className="wk-stack" role="tabpanel" aria-label="Record money back">
+            {corrected ? <div className="wk-callout" role="status"><div className="wk-callout-body"><p><strong>Correcting the {formatCurrency(corrected.amount)} return, {corrected.reference}.</strong> Other recorded returns stay as they are, and the change is kept in the case history.</p></div></div> : null}
             <p className="wk-field-hint">Record a refund once it lands in your bank, or a credit once it is applied to a real bill. A promise or an issued credit is not money back.</p>
             <div className="wk-fields">
               <div className="wk-field">
                 <label htmlFor="settled-amount">Amount settled</label>
-                <input id="settled-amount" className="wk-input" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+                <input id="settled-amount" className="wk-input" inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value); setExcessConfirmed(false) }} />
+                <span className="wk-field-hint">The whole amount that arrived for this case.</span>
+              </div>
+              <div className="wk-field">
+                <label htmlFor="settled-date">Date it arrived</label>
+                <input id="settled-date" type="date" className="wk-input" max={dateValue(Date.now())} value={arrivedOn} onChange={(e) => setArrivedOn(e.target.value)} />
               </div>
               <div className="wk-field">
                 <label htmlFor="settled-method">Came back as</label>
@@ -232,19 +312,31 @@ export function RecoveryProgressPanel({ finding, state, onVendorUpdate, onFollow
               </div>
               <div className="wk-field">
                 <label htmlFor="settled-reference">Settlement reference</label>
-                <input id="settled-reference" className="wk-input" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="ACH ID, credit memo or entry ID" />
+                <input id="settled-reference" className="wk-input" maxLength={LIMITS.reference} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="ACH ID, credit memo or entry ID" />
+                <span className="wk-field-hint">If one payment covered several cases, use the same reference on each and enter only this case’s part here.</span>
               </div>
               {method !== 'refund' ? (
                 <div className="wk-field">
                   <label htmlFor="applied-bill">Bill where applied</label>
-                  <input id="applied-bill" className="wk-input" value={appliedToBill} onChange={(e) => setAppliedToBill(e.target.value)} placeholder="Bill or invoice ID" />
+                  <input id="applied-bill" className="wk-input" maxLength={LIMITS.reference} value={appliedToBill} onChange={(e) => setAppliedToBill(e.target.value)} placeholder="Bill or invoice ID" />
                 </div>
               ) : null}
             </div>
+            {enteredExcess > 0 ? (
+              <label className="wk-radio">
+                <input type="checkbox" checked={excessConfirmed} onChange={(e) => { setExcessConfirmed(e.target.checked); setProofError('') }} />
+                <span>
+                  {formatCurrency(enteredExcess / 100)} more than the request arrived. {uncounted > 0 ? `${formatCurrency(uncounted / 100)} is above what the records support: it is noted on the case and not counted as recovered.` : 'The records support it, so it counts toward this case.'}
+                </span>
+              </label>
+            ) : null}
             {proofError ? <p className="wk-field-error" role="alert">{proofError}</p> : null}
             <div className="wk-actions">
-              <button type="button" className="wk-btn" data-variant="primary" data-size="sm" onClick={recordSettlement}>Record settled value</button>
-              <span className="wk-field-hint">{formatCurrency(remaining)} remains on this request.</span>
+              <button type="button" className="wk-btn" data-variant="primary" data-size="sm" onClick={recordSettlement}>{corrected ? 'Save correction' : 'Record settled value'}</button>
+              {corrected ? <>
+                <button type="button" className="wk-btn" data-variant="outline" data-size="sm" onClick={removeReturn}>Remove this return</button>
+                <button type="button" className="wk-btn" data-variant="ghost" data-size="sm" onClick={() => { setProofError(''); clearEntry() }}>Cancel</button>
+              </> : <span className="wk-field-hint">{formatCurrency(remaining)} remains on this request.</span>}
             </div>
           </div>
         ) : (
@@ -267,6 +359,12 @@ export function RecoveryProgressPanel({ finding, state, onVendorUpdate, onFollow
       </div>
     </section>
   )
+}
+
+/** A return that was larger than the claim: what arrived, and what of it counts. */
+function ExcessNote({ entry }: { entry: RecoveryVerification }) {
+  if (entry.receivedAmount === undefined || entry.receivedAmount <= entry.amount) return null
+  return <p className="wk-field-hint">{formatCurrency(entry.receivedAmount)} arrived. {formatCurrency(Math.round((entry.receivedAmount - entry.amount) * 100) / 100)} is more than this claim and is not counted as recovered. Check with the vendor what it was for.</p>
 }
 
 /** After money came back: the closeout in the customer's own books. */
@@ -299,6 +397,7 @@ export function RecoveryAccountingPanel({ finding, state, onReconcile }: { findi
         </div>
       </div>
       <div className="wk-panelcard-body wk-stack">
+        {settlements.map((entry) => <ExcessNote key={settlementKey(entry)} entry={entry} />)}
         {state.reconciledAt && !editing ? (
           <div className="wk-callout" data-tone="done">
             <CircleCheck aria-hidden="true" />

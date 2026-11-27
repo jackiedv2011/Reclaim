@@ -1,13 +1,13 @@
-import { evaluateEligibility, type SupplierContact } from '@/recovery/eligibility'
+import { evaluateEligibility, type ClaimFinding, type SupplierContact } from '@/recovery/eligibility'
+import { LIMITS, validEmail } from '@/recovery/validation'
 import { projectSync } from '@/ledger/projectSync'
 import { useEffect, useMemo, useState } from 'react'
 import { CircleCheck, Copy, Download, Lightbulb, PauseCircle, Sparkles } from 'lucide-react'
 import { formatCurrency } from '@/lib/format'
-import { generateLetter } from '@/lib/letters'
+import { billName, generateLetter } from '@/lib/letters'
 import type { SenderProfile } from '@/lib/senderProfile'
 import { buildDraftRequest, DraftUnavailableError, requestAiDraft } from '@/lib/ai/draftClient'
 import { type CaseState, type RecoveryMethod } from '@/ledger/caseState'
-import type { Finding } from '@/types'
 import type { PlanLimits } from '@/lib/plans'
 import { UpgradeDialog } from '@/components/plan/UpgradeDialog'
 import { GmailSendStep } from '@/components/gmail/Gmail'
@@ -56,7 +56,7 @@ export function RecoveryRequestPanel({
   recommendation,
   sample = false,
 }: {
-  finding: Finding
+  finding: ClaimFinding
   suggestedContact?: SupplierContact
   projectId?: string
   state: CaseState
@@ -83,8 +83,8 @@ export function RecoveryRequestPanel({
   const generated = useMemo(() => {
     const amount = parseMoney(amountInput)
     // A partial request lowers the ask; the facts the letter states still come from the finding.
-    return generateLetter(finding, sender, method, Number.isFinite(amount) && amount > 0 ? amount : finding.dollarImpact)
-  }, [finding, sender, method, amountInput])
+    return generateLetter(finding, sender, method, Number.isFinite(amount) && amount > 0 ? amount : finding.dollarImpact, previousReturned)
+  }, [finding, sender, method, amountInput, previousReturned])
   const [subject, setSubject] = useState(state.recoverySubject ?? generated.subject)
   const [body, setBody] = useState(state.recoveryDraft ?? generated.body)
   const [edited, setEdited] = useState(Boolean(state.recoveryDraft))
@@ -102,9 +102,9 @@ export function RecoveryRequestPanel({
   const [includeEvidence, setIncludeEvidence] = useState(Boolean(state.recoveryEvidenceAttachment))
   const evidenceSummary = finding.evidence
     ? [
-        `Invoice ${finding.evidence.obligation.obligationId}`,
+        ...(billName(finding) ? [billName(finding)!.replace(/^i/, 'I')] : []),
         ...finding.evidence.payments.map((payment) => `Payment ${payment.paymentId} · ${formatCurrency(payment.amountMinor / 100)}`),
-      ].join('\n')
+      ].join('\n').slice(0, LIMITS.text)
     : ''
 
   // Until the reviewer edits the text, keep it in step with the method/amount they pick.
@@ -126,7 +126,7 @@ export function RecoveryRequestPanel({
         : null
 
   const isVendorLetter = finding.class === 'recoverable'
-  const recipientValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail.trim())
+  const recipientValid = validEmail(recipientEmail)
   const pkg: RequestPackage = { subject: subject.trim(), body: body.trim(), requestedAmount: amount, method, recipientEmail: recipientEmail.trim(), recipientConfirmed, evidenceAttachment: includeEvidence ? evidenceAttachment.trim() : null }
   const disclosureNote = knownBeforeReclaim ? knownBeforeNote.trim() || null : null
   const approvedForCurrent =
@@ -141,7 +141,7 @@ export function RecoveryRequestPanel({
     (state.knownBeforeNote ?? null) === disclosureNote &&
     recipientConfirmed && !state.contactHold
   const disclosureMissing = knownBeforeReclaim === null || (knownBeforeReclaim === true && !knownBeforeNote.trim())
-  const canApprove = !amountError && !state.contactHold && !disclosureMissing && recipientValid && recipientConfirmed && Boolean(pkg.subject && pkg.body) && (!includeEvidence || Boolean(pkg.evidenceAttachment))
+  const canApprove = !amountError && !state.contactHold && !disclosureMissing && recipientValid && recipientConfirmed && Boolean(pkg.subject && pkg.body) && pkg.subject.length <= LIMITS.subject && pkg.body.length <= LIMITS.text && (!includeEvidence || Boolean(pkg.evidenceAttachment))
 
   const copy = async () => {
     try {
@@ -244,11 +244,11 @@ export function RecoveryRequestPanel({
 
         <div className="wk-field">
           <label htmlFor="request-subject">Subject</label>
-          <input id="request-subject" className="wk-input" value={subject} readOnly={!canEdit} onChange={(e) => { setSubject(e.target.value); setEdited(true) }} />
+          <input id="request-subject" className="wk-input" maxLength={LIMITS.subject} value={subject} readOnly={!canEdit} onChange={(e) => { setSubject(e.target.value); setEdited(true) }} />
         </div>
         <div className="wk-field">
           <label htmlFor="request-body">Message</label>
-          <textarea id="request-body" className="wk-input wk-letter" rows={14} value={body} readOnly={!canEdit} onChange={(e) => { setBody(e.target.value); setEdited(true) }} />
+          <textarea id="request-body" className="wk-input wk-letter" rows={14} maxLength={LIMITS.text} value={body} readOnly={!canEdit} onChange={(e) => { setBody(e.target.value); setEdited(true) }} />
         </div>
         {isVendorLetter ? (
           <details className="wk-evq-details">
@@ -259,7 +259,7 @@ export function RecoveryRequestPanel({
             </label>
             {includeEvidence ? <>
               <label className="wk-field">Preview and edit payment-evidence.txt
-                <textarea className="wk-input" rows={5} maxLength={5000} value={evidenceAttachment} onChange={(event) => setEvidenceAttachment(event.target.value)} />
+                <textarea className="wk-input" rows={5} maxLength={LIMITS.text} value={evidenceAttachment} onChange={(event) => setEvidenceAttachment(event.target.value)} />
               </label>
               <button type="button" className="wk-btn" data-variant="outline" disabled={!pkg.evidenceAttachment} onClick={() => downloadText('payment-evidence.txt', pkg.evidenceAttachment ?? '')}>Download attachment for manual sending</button>
             </> : <p className="wk-field-hint">Only the message will be included.</p>}
@@ -409,7 +409,7 @@ export function RecoveryRequestPanel({
       {!isVendorLetter ? (
         <div className="wk-panelcard-body wk-subsection">
           <div className="wk-actions">
-            <button type="button" className="wk-btn" data-variant="primary" data-size="sm" onClick={() => onMarkRequested({ ...pkg, requestedAmount: finding.dollarImpact })}>Mark as filed</button>
+            <button type="button" className="wk-btn" data-variant="primary" data-size="sm" onClick={() => onMarkRequested({ ...pkg, requestedAmount: 0, recipientEmail: '', recipientConfirmed: false, evidenceAttachment: null })}>Mark as filed</button>
             <span className="wk-field-hint">Records that the check has been handed to the right person.</span>
           </div>
         </div>

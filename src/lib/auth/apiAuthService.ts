@@ -63,7 +63,44 @@ export async function call<T>(path: string, init: RequestInit & { json?: unknown
 }
 
 type Failure = { message?: string; code?: string; fields?: Record<string, string> }
-const failure = (body: Failure | null, fallback: string): AuthError => ({ ok: false, message: body?.message ?? fallback, fields: body?.fields, code: body?.code } as AuthError)
+
+const UNREACHABLE: AuthError = { ok: false, code: 'network', message: 'Couldn’t reach Reclaim. Check your connection and try again.' }
+const TROUBLE: AuthError = { ok: false, code: 'server_error', message: 'Reclaim is having trouble right now. Try again in a minute.' }
+
+/** True for a failure that says nothing about what was typed: the same request may work in a minute. */
+export const isTemporary = (result: AuthError): boolean => result.code === 'network' || result.code === 'server_error'
+
+/**
+ * A call that never throws. Only an answer Reclaim itself wrote is shown as
+ * the reason: a proxy's error page, or a network's own sign-in page, is not a
+ * wrong password.
+ */
+async function ask<T>(path: string, json: unknown, okStatus = 200): Promise<{ ok: true; body: T } | AuthError> {
+  let answer: { status: number; body: (T & Failure) | null }
+  try {
+    answer = await call<(T & Failure) | null>(path, { method: 'POST', json })
+  } catch {
+    return UNREACHABLE
+  }
+  const { status, body } = answer
+  if (body === null || typeof body !== 'object') return TROUBLE
+  if (status === okStatus) return { ok: true, body }
+  if (typeof body.message !== 'string' || !body.message) return TROUBLE
+  return { ok: false, message: body.message, fields: body.fields, code: body.code }
+}
+
+/** The signed-in account in an answer, or a failure. */
+async function askForUser(path: string, json: unknown): Promise<AuthOutcome> {
+  const result = await ask<{ user?: ServerUser }>(path, json)
+  if (!result.ok) return result
+  return result.body.user ? { ok: true, user: toAuthUser(result.body.user) } : TROUBLE
+}
+
+/** For account updates whose caller carries on without an answer. */
+async function userOrNull(path: string, json?: unknown): Promise<AuthUser | null> {
+  const result = await askForUser(path, json)
+  return result.ok ? result.user : null
+}
 
 export async function fetchProviders(): Promise<Providers> {
   try {
@@ -94,26 +131,32 @@ export async function signUp(input: {
   acceptedTerms: boolean
   termsVersion: string
 }): Promise<SignUpResult> {
-  const { status, body } = await call<{ requiresVerification: boolean; email?: string; user?: ServerUser } & Failure>('/api/auth/signup', { method: 'POST', json: input })
-  if (status !== 201) return failure(body, 'Could not create the account.')
-  if (body.requiresVerification) return { ok: true, requiresVerification: true, email: body.email ?? input.email }
-  return { ok: true, requiresVerification: false, user: toAuthUser(body.user!) }
+  const result = await ask<{ requiresVerification: boolean; email?: string; user?: ServerUser }>('/api/auth/signup', input, 201)
+  if (!result.ok) return result
+  const { requiresVerification, email, user } = result.body
+  if (requiresVerification) return { ok: true, requiresVerification: true, email: email ?? input.email }
+  return user ? { ok: true, requiresVerification: false, user: toAuthUser(user) } : TROUBLE
 }
 
 export async function verifyEmail(token: string): Promise<AuthOutcome> {
-  const { status, body } = await call<{ user: ServerUser } & Failure>('/api/auth/verify-email', { method: 'POST', json: { token } })
-  if (status !== 200) return failure(body, 'This link is not valid.')
-  return { ok: true, user: toAuthUser(body.user) }
+  return askForUser('/api/auth/verify-email', { token })
 }
 
+/** Throws with a message for the reader when the request didn't get through. */
 export async function resendVerification(email: string): Promise<void> {
-  await call('/api/auth/resend-verification', { method: 'POST', json: { email } })
+  await askOrThrow('/api/auth/resend-verification', { email })
 }
+
+async function askOrThrow(path: string, json: unknown): Promise<void> {
+  const result = await ask(path, json)
+  if (!result.ok) throw new Error(result.message)
+}
+
+/** What to show for an error thrown by one of the calls here. */
+export const messageOf = (err: unknown): string => (err instanceof Error && err.message ? err.message : TROUBLE.message)
 
 export async function logIn(input: { email: string; password: string; rememberMe: boolean }): Promise<LogInResult> {
-  const { status, body } = await call<{ user: ServerUser } & Failure>('/api/auth/login', { method: 'POST', json: input })
-  if (status !== 200) return failure(body, "That email and password don't match.") as LogInResult
-  return { ok: true, user: toAuthUser(body.user) }
+  return askForUser('/api/auth/login', input)
 }
 
 export async function logOut(): Promise<void> {
@@ -124,20 +167,23 @@ export async function logOut(): Promise<void> {
   }
 }
 
+/** Throws with a message for the reader when the request didn't get through. */
 export async function requestPasswordReset(email: string): Promise<void> {
-  await call('/api/auth/forgot-password', { method: 'POST', json: { email } })
+  await askOrThrow('/api/auth/forgot-password', { email })
 }
 
 export async function resetPassword(token: string, password: string, confirmPassword: string): Promise<AuthOutcome> {
-  const { status, body } = await call<{ user: ServerUser } & Failure>('/api/auth/reset-password', { method: 'POST', json: { token, password, confirmPassword } })
-  if (status !== 200) return failure(body, 'Could not reset the password.')
-  return { ok: true, user: toAuthUser(body.user) }
+  return askForUser('/api/auth/reset-password', { token, password, confirmPassword })
 }
 
 /** Development only: the emails the server would have sent to this address. */
 export async function devMailbox(email: string): Promise<Array<{ subject: string; link: string | null; body: string }>> {
-  const { status, body } = await call<{ messages: Array<{ subject: string; link: string | null; body: string }> }>(`/api/dev/mailbox?to=${encodeURIComponent(email)}`)
-  return status === 200 ? body.messages : []
+  try {
+    const { status, body } = await call<{ messages: Array<{ subject: string; link: string | null; body: string }> } | null>(`/api/dev/mailbox?to=${encodeURIComponent(email)}`)
+    return status === 200 ? (body?.messages ?? []) : []
+  } catch {
+    return []
+  }
 }
 
 /** What this account may do right now — the server's answer, never a client-side guess. */
@@ -151,32 +197,32 @@ export async function fetchEntitlements(): Promise<Entitlements | null> {
 }
 
 export async function markOnboardingSeen(): Promise<AuthUser | null> {
-  const { status, body } = await call<{ user: ServerUser }>('/api/account/onboarding-seen', { method: 'POST' })
-  return status === 200 ? toAuthUser(body.user) : null
+  return userOrNull('/api/account/onboarding-seen')
 }
 
 /** Records that the dashboard tour was finished or skipped, so it never opens again for this account. */
 export async function markTourSeen(): Promise<AuthUser | null> {
-  const { status, body } = await call<{ user: ServerUser }>('/api/account/tour-seen', { method: 'POST' })
-  return status === 200 ? toAuthUser(body.user) : null
+  return userOrNull('/api/account/tour-seen')
 }
 
 /** Saves onboarding's answers on the account; also marks onboarding as done. */
 export async function saveOnboarding(profile: OnboardingProfile): Promise<AuthUser | null> {
-  const { status, body } = await call<{ user: ServerUser }>('/api/account/onboarding', { method: 'POST', json: profile })
-  return status === 200 ? toAuthUser(body.user) : null
+  return userOrNull('/api/account/onboarding', profile)
 }
 
 /** Asks the server to upgrade. Today the server answers "coming soon"; the message is shown as-is. */
 export async function requestUpgrade(): Promise<{ ok: boolean; message: string }> {
-  const { status, body } = await call<{ message?: string }>('/api/account/upgrade', { method: 'POST' })
-  return { ok: status === 200, message: body?.message ?? 'Upgrading is coming soon.' }
+  try {
+    const { status, body } = await call<{ message?: string } | null>('/api/account/upgrade', { method: 'POST' })
+    return { ok: status === 200, message: body?.message ?? 'Upgrading is coming soon.' }
+  } catch {
+    return { ok: false, message: UNREACHABLE.message }
+  }
 }
 
 /** Development only: switch the signed-in account's plan to exercise the paid-plan surface. */
 export async function setDevPlan(plan: Plan): Promise<AuthUser | null> {
-  const { status, body } = await call<{ user: ServerUser }>('/api/dev/plan', { method: 'POST', json: { plan } })
-  return status === 200 ? toAuthUser(body.user) : null
+  return userOrNull('/api/dev/plan', { plan })
 }
 
 /** Same-origin download of everything the account holds, as JSON (the server sets the filename). */
@@ -184,14 +230,11 @@ export const ACCOUNT_EXPORT_URL = '/api/account/export'
 
 /** Deletes the account and all its data. The server checks the typed email; the session ends with it. */
 export async function deleteAccount(confirmEmail: string): Promise<{ ok: true } | AuthError> {
-  const { status, body } = await call<Failure>('/api/account/delete', { method: 'POST', json: { confirmEmail } })
-  if (status !== 200) return failure(body, 'Could not delete the account. Nothing was deleted.')
-  return { ok: true }
+  const result = await ask('/api/account/delete', { confirmEmail })
+  return result.ok ? { ok: true } : result
 }
 
 /** Records acceptance of the Terms and Privacy Policy version shown to the person. */
 export async function acceptTerms(termsVersion: string): Promise<AuthOutcome> {
-  const { status, body } = await call<{ user: ServerUser } & Failure>('/api/account/accept-terms', { method: 'POST', json: { termsVersion } })
-  if (status !== 200) return failure(body, 'Could not record your acceptance. Try again.')
-  return { ok: true, user: toAuthUser(body.user) }
+  return askForUser('/api/account/accept-terms', { termsVersion })
 }

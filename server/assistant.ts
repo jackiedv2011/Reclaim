@@ -2,6 +2,8 @@ import type { DatabaseSync } from 'node:sqlite'
 import type { ProjectStore } from './projectStore.ts'
 import { HttpError } from './http.ts'
 import { evaluateEligibility } from '../src/recovery/eligibility.ts'
+import { claimContext } from '../src/recovery/claimLinks.ts'
+import type { CaseState as SavedCaseState } from '../src/ledger/caseState.ts'
 import type { Finding } from '../src/types.ts'
 
 export const HELP_VERSION = 'reclaim-help-2026-10-20'
@@ -27,7 +29,9 @@ export function getCaseFacts(projects: ProjectStore, userId: string, projectId: 
   const revision = projects.revision(userId, projectId)
   if (!row || revision === null) throw new HttpError(404, 'That case is not in this account.')
   const records = new Map((env?.records ?? []).map((record) => [record.id, record]))
-  const finding = { ...row, relatedRecords: row.relatedRecords.map((ref) => records.get(ref.id) ?? ref) } as Finding
+  const withRows = (f: StoredFinding) => ({ ...f, relatedRecords: f.relatedRecords.map((ref) => records.get(ref.id) ?? ref) }) as Finding
+  // Includes what an earlier case on the same payments already has out or back.
+  const finding = claimContext((env?.result?.findings ?? []).map(withRows), env?.caseStates as Record<string, SavedCaseState> | undefined).finding(withRows(row))
   return { finding, state: env?.caseStates?.[findingId] ?? {}, revision }
 }
 
@@ -52,8 +56,15 @@ export function getAmountBreakdown(facts: CaseFacts): { text: string; citations:
   const evidence = facts.finding.evidence!
   const payments = evidence.payments.reduce((total, payment) => total + payment.amountMinor, 0)
   const money = (minor: number) => `${gate.currency} ${(minor / 100).toFixed(2)}`
+  const { overpaymentMinor, refundedMinor, appliedCreditMinor, linkedReturnedMinor, linkedOutstandingMinor } = gate.amountBreakdown
+  const less = [
+    [refundedMinor, 'already refunded'], [appliedCreditMinor, 'already credited'],
+    [linkedReturnedMinor, 'returned on an earlier case for these payments'], [linkedOutstandingMinor, 'still requested on an earlier case for these payments'],
+  ].filter(([minor]) => minor).map(([minor, label]) => `${money(minor as number)} ${label}`)
   return {
-    text: `The reviewed settled payments total ${money(payments)}. The identified obligation is ${money(evidence.obligation.amountMinor)}. Their difference is ${money(gate.potentialAmountMinor)} as a possible request, subject to the customer's approval.`,
+    text: less.length
+      ? `The reviewed settled payments total ${money(payments)}. The identified obligation is ${money(evidence.obligation.amountMinor)}, a difference of ${money(overpaymentMinor)}. After ${less.join(' and ')}, ${money(gate.potentialAmountMinor)} is left as a possible request, subject to the customer's approval.`
+      : `The reviewed settled payments total ${money(payments)}. The identified obligation is ${money(evidence.obligation.amountMinor)}. Their difference is ${money(gate.potentialAmountMinor)} as a possible request, subject to the customer's approval.`,
     citations: [...evidence.payments.map((payment) => ({ id: `record:${payment.recordId}`, label: `Payment ${payment.paymentId}` })), { id: `obligation:${evidence.obligation.obligationId}`, label: 'Reviewed obligation' }],
     established: true,
   }

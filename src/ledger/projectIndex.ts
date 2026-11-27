@@ -30,12 +30,12 @@ export const ACTIVE_PROJECT_KEY = () => storageKey(ACTIVE_PROJECT_BASE)
  */
 const memoryIndex = new Map<string, LedgerProjectSummary[]>()
 
-export function readProjectIndex(): LedgerProjectSummary[] {
+export function readProjectIndex(key = PROJECT_INDEX_KEY()): LedgerProjectSummary[] {
   if (typeof window === 'undefined') return []
-  const inMemory = memoryIndex.get(PROJECT_INDEX_KEY())
+  const inMemory = memoryIndex.get(key)
   if (inMemory) return inMemory.toSorted((a, b) => b.updatedAt - a.updatedAt)
   try {
-    const raw = window.localStorage.getItem(PROJECT_INDEX_KEY())
+    const raw = window.localStorage.getItem(key)
     if (!raw) return []
     return (JSON.parse(raw) as LedgerProjectSummary[]).map((item) => item.summaryVersion === 2 ? item : ({ ...item, flaggedValue: item.flaggedValue ?? (item as unknown as { recoveryValue?: number }).recoveryValue ?? 0, potentialRecoveryValue: 0, recoveryActiveCount: 0, recoveryActiveValue: 0 })).toSorted((a, b) => b.updatedAt - a.updatedAt)
   } catch {
@@ -43,14 +43,19 @@ export function readProjectIndex(): LedgerProjectSummary[] {
   }
 }
 
-export function writeProjectIndex(projects: LedgerProjectSummary[]): void {
+export function writeProjectIndex(projects: LedgerProjectSummary[], key = PROJECT_INDEX_KEY()): void {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(PROJECT_INDEX_KEY(), JSON.stringify(projects))
-    memoryIndex.delete(PROJECT_INDEX_KEY())
+    window.localStorage.setItem(key, JSON.stringify(projects))
+    memoryIndex.delete(key)
   } catch {
-    memoryIndex.set(PROJECT_INDEX_KEY(), projects)
+    memoryIndex.set(key, projects)
   }
+}
+
+/** Drop indexes held only in this tab, for keys under `prefix`. */
+export function forgetMemoryIndex(prefix: string): void {
+  for (const key of memoryIndex.keys()) if (key.startsWith(prefix)) memoryIndex.delete(key)
 }
 
 export function hasSavedLocalWork(): boolean {

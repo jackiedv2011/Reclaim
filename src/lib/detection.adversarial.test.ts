@@ -84,15 +84,19 @@ describe('every finding is a sane money figure', () => {
 })
 
 describe('Rule 1 — exact duplicates: overlap and refunds', () => {
-  it('POS: a case or spacing change is a reference variant for review, not an exact raw match', () => {
+  it('POS: a case or spacing change is the same invoice; other punctuation is a reference variant', () => {
     const findings = run([
       rec({ vendor: 'Case Co', invoiceNumber: 'INV-100', amountPaid: 500 }),
       rec({ vendor: 'Case Co', invoiceNumber: '  inv-100 ', amountPaid: 500, paymentDate: d(2025, 1, 9) }),
     ])
-    expect(ofType(findings, 'exact_duplicate')).toHaveLength(0)
-    const variant = findings.filter((f) => f.ruleId === 'invoice_reference_variant_v1')
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({ ruleId: 'exact_repeated_payment_v1', classification: 'review_needed', dollarImpact: 500 })
+    const variant = run([
+      rec({ vendor: 'Case Co', invoiceNumber: 'INV-100', amountPaid: 500 }),
+      rec({ vendor: 'Case Co', invoiceNumber: 'inv/100', amountPaid: 500, paymentDate: d(2025, 1, 9) }),
+    ])
     expect(variant).toHaveLength(1)
-    expect(variant[0].classification).toBe('review_needed')
+    expect(variant[0]).toMatchObject({ ruleId: 'invoice_reference_variant_v1', classification: 'review_needed' })
   })
 
   it('FP/over-claim: two repeated-amount clusters never claim more than was overpaid on the invoice', () => {

@@ -5,7 +5,9 @@ const reduced = () => typeof window !== 'undefined' && !!window.matchMedia?.('(p
 /**
  * A figure that counts up to its value when it first appears and glides
  * between values when it changes, easing out like the rest of the motion.
- * The exact amount is always in the DOM once the animation settles.
+ * The exact amount is always in the DOM once the animation settles, and a timer
+ * puts it there even when the browser pauses animation frames (a background or
+ * hidden tab), so a figure never stays at $0.
  */
 export function CountUp({ value, format, duration = 900 }: { value: number; format: (value: number) => string; duration?: number }) {
   const [shown, setShown] = useState(() => (reduced() ? value : 0))
@@ -28,7 +30,15 @@ export function CountUp({ value, format, duration = 900 }: { value: number; form
       if (t < 1) frame = requestAnimationFrame(tick)
     }
     frame = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(frame)
+    const settle = setTimeout(() => {
+      cancelAnimationFrame(frame)
+      from.current = value
+      setShown(value)
+    }, duration + 150)
+    return () => {
+      cancelAnimationFrame(frame)
+      clearTimeout(settle)
+    }
   }, [value, duration])
 
   return <>{format(shown)}</>

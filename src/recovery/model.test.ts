@@ -290,7 +290,8 @@ describe('recovery lifecycle', () => {
     expect(reopened.recoverySettlements).toEqual(partial.recoverySettlements)
     expect(reopened.nextFollowUpAt).toBe(addBusinessDays(monday + 4000, 5))
     expect(withHistory(closed, reopened, null).history?.at(-1)).toMatchObject({ action: 'recovery:remainder_reopened', amount: 400 })
-    expect(() => reopenRemainingBalance(verifyRecovery(partial, { amount: 400, method: 'refund', source: 'bank', reference: 'ACH-2', settledAt: monday + 2000 }))).toThrow(/remaining balance/i)
+    // Paid in full with nothing more supported: there is no balance to reopen.
+    expect(() => reopenRemainingBalance(verifyRecovery(partial, { amount: 400, method: 'refund', source: 'bank', reference: 'ACH-2', settledAt: monday + 2000 }), monday + 3000, 1000)).toThrow(/remaining balance/i)
   })
 
   it('does not let a settlement exceed the amount requested or close before outreach', () => {

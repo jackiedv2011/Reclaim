@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useAuth } from '@/lib/auth/AuthContext'
+import { messageOf } from '@/lib/auth/apiAuthService'
 import { AuthSplit, SplitField } from '@/pages/AuthSplit'
 
 export function ResetPasswordPage() {
@@ -22,8 +23,15 @@ export function ResetPasswordPage() {
     if (Object.keys(errors).length > 0) return
 
     setSubmitting(true)
-    const result = await resetPassword(token, password, confirmPassword)
-    setSubmitting(false)
+    let result: Awaited<ReturnType<typeof resetPassword>>
+    try {
+      result = await resetPassword(token, password, confirmPassword)
+    } catch (err) {
+      setFormError(messageOf(err))
+      return
+    } finally {
+      setSubmitting(false)
+    }
     if (!result.ok) {
       setFieldErrors(result.fields ?? {})
       setFormError(result.fields ? null : result.message)

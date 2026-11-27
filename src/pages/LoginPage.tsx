@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { nextAfterAuth } from '@/pages/authRedirect'
 import { useAuth } from '@/lib/auth/AuthContext'
+import { messageOf } from '@/lib/auth/apiAuthService'
 import { validateLogIn } from '@/lib/auth/localAuthService'
 import { AuthSplit, leavePage, SplitField } from '@/pages/AuthSplit'
 import { DevInbox } from '@/pages/DevInbox'
@@ -28,17 +29,26 @@ export function LoginPage() {
   const [submitting, setSubmitting] = useState(false)
   const [unverified, setUnverified] = useState<string | null>(null)
   const [resent, setResent] = useState(false)
+  const [resendError, setResendError] = useState<string | null>(null)
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
     setFormError(null)
+    setResendError(null)
     const errors = validateLogIn({ email, password })
     setFieldErrors(errors)
     if (Object.keys(errors).length > 0) return
 
     setSubmitting(true)
-    const result = await logIn({ email, password, rememberMe })
-    setSubmitting(false)
+    let result: Awaited<ReturnType<typeof logIn>>
+    try {
+      result = await logIn({ email, password, rememberMe })
+    } catch (err) {
+      setFormError(messageOf(err))
+      return
+    } finally {
+      setSubmitting(false)
+    }
     if (!result.ok) {
       setFieldErrors(result.fields ?? {})
       setFormError(result.fields ? null : result.message)
@@ -74,13 +84,19 @@ export function LoginPage() {
                 className="rc-btn"
                 data-theme="dark"
                 onClick={async () => {
-                  await resendVerification(unverified)
-                  setResent(true)
+                  setResendError(null)
+                  try {
+                    await resendVerification(unverified)
+                    setResent(true)
+                  } catch (err) {
+                    setResendError(messageOf(err))
+                  }
                 }}
               >
                 Send the confirmation link again
               </button>
             ) : null}
+            {resendError ? <p>{resendError}</p> : null}
             {resent ? <p>A new link is on its way.</p> : null}
           </div>
         ) : null}

@@ -53,7 +53,7 @@ export function DecisionDialog({ finding, open, onOpenChange, onSave, initial = 
             <div>
               <DialogPrimitive.Title className="wk-display wk-h2">Review this finding</DialogPrimitive.Title>
               <DialogPrimitive.Description className="wk-dim">
-                {finding.vendor} · {formatCurrency(finding.dollarImpact)}. What do the records tell you?
+                {finding.vendor} · {formatCurrency(finding.dollarImpact, finding.currency)}. What do the records tell you?
               </DialogPrimitive.Description>
             </div>
             <DialogPrimitive.Close className="wk-panel-close" aria-label="Close">

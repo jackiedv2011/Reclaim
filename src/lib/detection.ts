@@ -1,6 +1,7 @@
-import type { APRecord, Finding, FindingClass, DetectionResult } from '@/types'
-import { normalizeVendor, normalizeAccountLast4, daysBetween, parseTerms, formatCurrency, formatDate, plural, toCents } from './format.ts'
-import { normalizeReference, referenceStrength } from './sourceIdentity.ts'
+import type { APRecord, Finding, FindingClass, DetectionResult } from '../types.ts'
+import { normalizeVendor, normalizeAccountLast4, daysBetween, parseTerms, formatCurrency, formatDate, plural, toCents, type ParsedTerms } from './format.ts'
+import { normalizeReference, referenceKey, referenceStrength } from './sourceIdentity.ts'
+import { nearIdenticalVendorNames } from './vendorResolution.ts'
 import { reviewMetadata } from './findingMetadata.ts'
 
 /** The review window for same-vendor, same-amount signals. It selects rows to review; it is not a recovery threshold. */
@@ -12,6 +13,19 @@ export const DEFAULT_REVIEW_WINDOW_DAYS = 45
  * pairs are only matched inside this shorter window.
  */
 export const NO_REFERENCE_WINDOW_DAYS = 14
+
+/** A negative row with no reference is taken to undo a payment of exactly its amount made at most this long before it. */
+export const REVERSAL_WINDOW_DAYS = 30
+/**
+ * A reference one vendor repeats on three or more dates names an account, a
+ * lease or a purchase order rather than an invoice — unless the payments all
+ * fall inside one short burst, which is what one invoice paid over and over
+ * looks like. Four dates are no longer a burst once they spread over weeks.
+ */
+const REUSED_REFERENCE_MIN_DATES = 3
+const REUSED_REFERENCE_BURST_DAYS = 45
+const REUSED_REFERENCE_MANY_DATES = 4
+const REUSED_REFERENCE_MANY_DATES_MIN_DAYS = 21
 
 const EPSILON = 0.01
 /**
@@ -60,61 +74,291 @@ const OUTLIER_MIN_MULTIPLE = 3
 const OUTLIER_MIN_PAYMENTS = 5
 
 const centsToDollars = (cents: number) => cents / 100
-const vendorIdentity = (record: APRecord) => record.stableSupplierId ? `supplier:${record.stableSupplierId.trim().toLowerCase()}` : record.quickbooks?.vendorId ? `qbo:${record.quickbooks.vendorId}` : record.canonicalVendorId ?? normalizeVendor(record.vendor)
-
 function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b)
   const mid = Math.floor(sorted.length / 2)
   return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
 }
 
-/** Credits and refunds booked against an invoice, keyed like Rule 1's groups. Consumed as findings net them off, so a refund is only ever counted once. */
-type RefundPool = Map<string, number>
+const DAY_MS = 24 * 60 * 60 * 1000
+const calendarDay = (d: Date) => Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS)
 
-function invoiceKey(r: APRecord): string {
-  const raw = r.source?.raw?.invoice_number
-  const reference = typeof raw === 'string' ? raw : r.invoiceNumber!
-  return `${vendorIdentity(r)}|${reference}`
+/** Transaction types that are not money paid to a vendor, whatever their sign: bills, credits, voids, journals. */
+const NOT_A_PAYMENT = new Set([
+  'void', 'voided', 'voided_payment', 'voided_check', 'void_payment', 'void_check', 'reversal', 'reversed', 'payment_reversal',
+  'credit', 'credit_memo', 'credit_note', 'vendor_credit', 'supplier_credit', 'bill_credit', 'credit_card_credit',
+  'refund', 'vendor_refund', 'supplier_refund', 'bill', 'vendor_bill', 'supplier_bill',
+  'journal', 'journal_entry', 'general_journal', 'general_journal_entry', 'manual_journal', 'purchase_order', 'estimate', 'quote', 'opening_balance',
+])
+/** Types that say money (or the claim to it) came back. A negative row of any other type proves nothing by its sign alone. */
+const REFUND_TYPES = new Set(['credit', 'credit_memo', 'credit_note', 'vendor_credit', 'supplier_credit', 'bill_credit', 'credit_card_credit', 'refund', 'vendor_refund', 'supplier_refund', 'chargeback'])
+const REVERSAL_TYPES = new Set(['void', 'voided', 'voided_payment', 'voided_check', 'void_payment', 'void_check', 'reversal', 'reversed', 'payment_reversal', 'returned_payment', 'ach_return'])
+
+const transactionKind = (r: APRecord) => r.transactionType?.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') ?? ''
+
+/**
+ * Credits, refunds, zero-dollar lines and rows whose type says they are not a
+ * payment are never themselves a leak. They stay in the ledger (and net against
+ * payments, see Returns) but no rule assesses them.
+ */
+function isPayment(r: APRecord): boolean {
+  return r.amountPaid > 0 && !NOT_A_PAYMENT.has(transactionKind(r))
 }
 
-/** A placeholder such as "Debit" or "N/A" in the reference column is no reference at all. */
-function hasReference(r: APRecord): boolean {
-  return referenceStrength(r.invoiceNumber) !== 'none'
+/** Zero or less is how exports say "not given"; it is not what the invoice was for. */
+function knownInvoiceAmount(r: APRecord): number | null {
+  return r.invoiceAmount !== null && r.invoiceAmount > 0 ? r.invoiceAmount : null
 }
 
-function buildRefundPool(records: APRecord[]): RefundPool {
-  const pool: RefundPool = new Map()
-  for (const r of records) {
-    if (!hasReference(r) || r.amountPaid >= 0) continue
-    // A negative CSV row can be a reversal, correction, discount or credit.
-    // Its sign alone is not evidence of a supplier refund.
-    const kind = r.transactionType?.trim().toLowerCase().replace(/[ -]/g, '_')
-    if (kind !== 'refund' && kind !== 'vendor_refund') continue
-    const key = invoiceKey(r)
-    pool.set(key, (pool.get(key) ?? 0) + toCents(-r.amountPaid))
-  }
-  return pool
+/** What the rules need to know about a row, worked out once per run. */
+interface RowFacts {
+  vendor: string
+  cents: number
+  day: number
+  /** The reference as written, bar case and spacing: two rows with one key name the same invoice. */
+  key: string
+  /** The reference normalized, as rows are compared across spellings. Null when the cell is blank. */
+  ref: string | null
+  /** 'none' also for a reference this vendor reuses so widely that it cannot be an invoice number. */
+  strength: 'none' | 'short' | 'strong'
+  /** '' when the file does not say. */
+  currency: string
+  company: string
+}
+type Facts = (r: APRecord) => RowFacts
+
+/** Known, different companies or currencies: the rows cannot be one economic event, and their amounts are never compared or added. */
+function incompatible(a: RowFacts, b: RowFacts): boolean {
+  return Boolean((a.company && b.company && a.company !== b.company) || (a.currency && b.currency && a.currency !== b.currency))
 }
 
-/** Take up to `wantedCents` of refund off the pool for this invoice and return how much was taken. */
-function drawRefund(pool: RefundPool, key: string, wantedCents: number): number {
-  const available = pool.get(key) ?? 0
-  const taken = Math.max(0, Math.min(available, wantedCents))
-  if (taken > 0) pool.set(key, available - taken)
-  return taken
+/** Splits rows by company and currency. Blanks go with the only value known; when there are several, blanks stand alone. */
+function splitCompatible(rows: APRecord[], facts: Facts): APRecord[][] {
+  const companies = new Set(rows.map((r) => facts(r).company).filter(Boolean))
+  const currencies = new Set(rows.map((r) => facts(r).currency).filter(Boolean))
+  if (companies.size <= 1 && currencies.size <= 1) return [rows]
+  return [...groupBy(rows, (r) => `${companies.size > 1 ? facts(r).company : ''}|${currencies.size > 1 ? facts(r).currency : ''}`).values()]
+}
+
+/** Money in the rows' own currency; a file without one is read as dollars. */
+function money(value: number, rows: APRecord[]): string {
+  return formatCurrency(value, rows.find((r) => r.currency?.trim())?.currency)
 }
 
 /**
- * Credits, refunds and zero-dollar lines are never themselves a leak. They stay
- * in the ledger (and net against duplicates in Rule 1) but no rule assesses them.
+ * Which vendor each row belongs to: the source system's own ID when the row
+ * has one, else the normalized name. A name that carries exactly one ID is that
+ * vendor even on rows where the ID was left blank; a name that carries several
+ * says nothing about which of them a blank row means.
  */
-function isPayment(r: APRecord): boolean {
-  return r.amountPaid > 0
+function vendorIdentities(records: APRecord[]): (r: APRecord) => string {
+  const names = new Map<string, string>()
+  const nameOf = (r: APRecord) => {
+    let name = names.get(r.vendor)
+    if (name === undefined) names.set(r.vendor, (name = `name:${normalizeVendor(r.vendor)}`))
+    return name
+  }
+  const idOf = (r: APRecord): { system: string; id: string } | null => {
+    const company = r.company?.trim().toLowerCase() ?? ''
+    const stable = r.stableSupplierId?.trim().toLowerCase()
+    if (stable) return { system: `supplier|${company}`, id: `supplier|${company}|${stable}` }
+    return r.quickbooks?.vendorId ? { system: `qbo|${company}`, id: `qbo|${company}|${r.quickbooks.vendorId}` } : null
+  }
+  const idsByName = new Map<string, Map<string, Set<string>>>()
+  for (const r of records) {
+    const id = idOf(r)
+    if (!id) continue
+    let systems = idsByName.get(nameOf(r))
+    if (!systems) idsByName.set(nameOf(r), (systems = new Map()))
+    const ids = systems.get(id.system)
+    if (ids) ids.add(id.id)
+    else systems.set(id.system, new Set([id.id]))
+  }
+  const parent = new Map<string, string>()
+  const find = (node: string): string => {
+    let at = node
+    while (parent.has(at)) at = parent.get(at)!
+    return at
+  }
+  for (const [name, systems] of idsByName) {
+    if ([...systems.values()].some((ids) => ids.size > 1)) continue
+    for (const ids of systems.values()) {
+      for (const id of ids) {
+        const [a, b] = [find(name), find(id)]
+        if (a !== b) parent.set(a, b)
+      }
+    }
+  }
+  return (r) => find(idOf(r)?.id ?? nameOf(r))
+}
+
+/**
+ * Whether a reference this vendor used on these payments names one invoice.
+ * Several payments of one invoice are instalments of an amount the rows agree
+ * on, share one invoice date, or come in one short burst. Anything else used on
+ * three or more dates (an account number, a lease, "Autopay 0425", a purchase
+ * order on progress payments) is a label, and rows sharing it are unrelated
+ * until the amount and date say otherwise.
+ */
+function namesOneInvoice(payments: APRecord[], facts: Facts): boolean {
+  const days = new Set(payments.map((r) => facts(r).day))
+  if (days.size < REUSED_REFERENCE_MIN_DATES) return true
+  const invoiceDates = new Set(payments.map((r) => (r.invoiceDate ? calendarDay(r.invoiceDate) : null)))
+  if (invoiceDates.size === 1 && !invoiceDates.has(null)) return true
+  invoiceDates.delete(null)
+  if (invoiceDates.size >= REUSED_REFERENCE_MIN_DATES) return false
+  const agreed = agreedInvoiceAmount(payments)
+  if (agreed !== null && payments.every((r) => facts(r).cents < toCents(agreed))) return true
+  const amounts = new Set(payments.map((r) => facts(r).cents))
+  if (agreed === null && amounts.size === payments.length) return false
+  const span = Math.max(...days) - Math.min(...days)
+  if (span > REUSED_REFERENCE_BURST_DAYS) return false
+  return !(days.size >= REUSED_REFERENCE_MANY_DATES && span >= REUSED_REFERENCE_MANY_DATES_MIN_DAYS)
+}
+
+function buildFacts(records: APRecord[]): Facts {
+  const identity = vendorIdentities(records)
+  const facts = new Map<APRecord, RowFacts>()
+  for (const r of records) {
+    facts.set(r, {
+      vendor: identity(r),
+      cents: toCents(r.amountPaid),
+      day: calendarDay(r.paymentDate),
+      key: r.invoiceNumber === null ? '' : normalizeInvoiceNumber(r.invoiceNumber),
+      ref: referenceKey(r.invoiceNumber),
+      strength: referenceStrength(r.invoiceNumber),
+      currency: r.currency?.trim().toUpperCase() ?? '',
+      company: r.company?.trim().toLowerCase() ?? '',
+    })
+  }
+  const of: Facts = (r) => facts.get(r)!
+  const referenced = records.filter((r) => of(r).strength !== 'none')
+  for (const shared of groupBy(referenced, (r) => `${of(r).vendor}|${of(r).ref}`).values()) {
+    if (shared.length < REUSED_REFERENCE_MIN_DATES) continue
+    for (const rows of splitCompatible(shared, of)) {
+      if (!namesOneInvoice(rows.filter(isPayment), of)) rows.forEach((r) => (of(r).strength = 'none'))
+    }
+  }
+  return of
+}
+
+interface ReturnEntry {
+  row: APRecord
+  typed: boolean
+  cents: number
+}
+
+/**
+ * Negative rows, and what each one gives back. A negative can be a reversal, a
+ * correction, a discount or a credit, and its sign alone is not evidence of a
+ * supplier refund, so it counts in only two ways:
+ *
+ * - A negative of exactly a payment's amount, on the same invoice (or, when
+ *   neither row has a reference, shortly after the payment), undoes that
+ *   payment. Whatever it was called, the pair moved no money, so no rule claims
+ *   anything from it. This is also what an honest void-and-reissue looks like.
+ * - What is left nets against the invoice when its type says so (refund,
+ *   credit, void), or when it gives back exactly the amount in question.
+ *
+ * Every entry is consumed as it is drawn, so it is never counted twice. A
+ * reversed payment makes no finding at all rather than one at $0: the evidence
+ * gate treats the flagged amount as a ceiling, and zero would lift it.
+ */
+class Returns {
+  /** Payments a negative row undid, by record id, and whether that row was a refund (money paid, then returned) or a void. */
+  readonly undone = new Map<string, 'refund' | 'reversal'>()
+  private readonly byInvoice = new Map<string, ReturnEntry[]>()
+  private readonly unreferenced = new Map<string, ReturnEntry[]>()
+  private readonly facts: Facts
+
+  constructor(records: APRecord[], facts: Facts) {
+    this.facts = facts
+    const negatives = records.filter((r) => facts(r).cents < 0).sort((a, b) => facts(a).day - facts(b).day)
+    if (negatives.length === 0) return
+    const place = (r: APRecord) => (facts(r).strength === 'none' ? `${facts(r).vendor}|` : `${facts(r).vendor}|${facts(r).ref}`)
+    const payments = groupBy(records.filter(isPayment), (r) => `${place(r)}|${facts(r).cents}`)
+    for (const row of negatives) {
+      const f = facts(row)
+      const kind = transactionKind(row)
+      const referenced = f.strength !== 'none'
+      let best: APRecord | null = null
+      let bestRank = -Infinity
+      for (const payment of payments.get(`${place(row)}|${-f.cents}`) ?? []) {
+        const p = facts(payment)
+        const gap = f.day - p.day
+        if (this.undone.has(payment.id) || incompatible(f, p)) continue
+        if (!referenced && (gap < 0 || gap > REVERSAL_WINDOW_DAYS)) continue
+        // The latest payment before the reversal, and the same spelling of the reference, first.
+        const rank = (p.key === f.key ? 2e6 : 0) + (gap >= 0 ? 1e6 - gap : gap)
+        if (rank > bestRank) [best, bestRank] = [payment, rank]
+      }
+      if (best) {
+        this.undone.set(best.id, REFUND_TYPES.has(kind) ? 'refund' : 'reversal')
+        continue
+      }
+      const entry: ReturnEntry = { row, typed: REFUND_TYPES.has(kind) || REVERSAL_TYPES.has(kind), cents: -f.cents }
+      const [pool, key] = referenced ? [this.byInvoice, place(row)] : [this.unreferenced, f.vendor]
+      const list = pool.get(key)
+      if (list) list.push(entry)
+      else pool.set(key, [entry])
+    }
+  }
+
+  stands(r: APRecord): boolean {
+    return !this.undone.has(r.id)
+  }
+
+  private open(payment: APRecord): ReturnEntry[] {
+    const p = this.facts(payment)
+    if (p.strength === 'none') return []
+    return (this.byInvoice.get(`${p.vendor}|${p.ref}`) ?? []).filter((e) => e.cents > 0 && !incompatible(p, this.facts(e.row)))
+  }
+
+  /** Take up to `wantedCents` off what was given back against this payment's invoice, and return how much was taken. */
+  draw(payment: APRecord, wantedCents: number): number {
+    if (wantedCents <= 0) return 0
+    const p = this.facts(payment)
+    if (p.strength === 'none') {
+      const match = (this.unreferenced.get(p.vendor) ?? []).find((e) => {
+        const gap = this.facts(e.row).day - p.day
+        return e.cents === wantedCents && gap >= 0 && gap <= REVERSAL_WINDOW_DAYS && !incompatible(p, this.facts(e.row))
+      })
+      if (!match) return 0
+      match.cents = 0
+      return wantedCents
+    }
+    const open = this.open(payment)
+    let taken = 0
+    for (const entry of open.filter((e) => e.typed)) {
+      const share = Math.min(entry.cents, wantedCents - taken)
+      entry.cents -= share
+      taken += share
+    }
+    const rest = wantedCents - taken
+    const untyped = open.filter((e) => !e.typed)
+    if (rest > 0) {
+      const exact = untyped.find((e) => e.cents === rest)
+      const giving = exact ? [exact] : untyped.reduce((sum, e) => sum + e.cents, 0) === rest ? untyped : []
+      for (const entry of giving) {
+        taken += entry.cents
+        entry.cents = 0
+      }
+    }
+    return taken
+  }
+
+  /** A sentence about negative rows on this invoice that were not counted, or nothing. */
+  note(payment: APRecord): string {
+    const open = this.open(payment)
+    if (open.length === 0) return ''
+    const total = open.reduce((sum, e) => sum + e.cents, 0)
+    return ` ${money(centsToDollars(total), [payment])} in negative rows is also recorded against this invoice and was not counted as money returned; check what ${open.length === 1 ? 'it was' : 'they were'}.`
+  }
 }
 
 /** The invoice amount the rows agree on, or null when the file didn't say (or the rows disagree). */
 function agreedInvoiceAmount(rows: APRecord[]): number | null {
-  const amounts = new Set(rows.map((r) => (r.invoiceAmount === null ? null : toCents(r.invoiceAmount))))
+  const amounts = new Set(rows.map((r) => (knownInvoiceAmount(r) === null ? null : toCents(r.invoiceAmount!))))
   if (amounts.size !== 1) return null
   const [only] = amounts
   return only === null ? null : only / 100
@@ -157,34 +401,41 @@ function groupBy<T>(items: T[], keyFn: (item: T) => string): Map<string, T[]> {
   return map
 }
 
+/** Payments a stronger duplicate rule has already put a figure on, so no other one claims them again. */
+interface Claimed {
+  exact: Set<string>
+  review: Set<string>
+}
+
+const byDate = (a: APRecord, b: APRecord) => a.paymentDate.getTime() - b.paymentDate.getTime()
+
 // Rule 1 — Exact duplicate payment (recoverable, high)
-function detectExactDuplicates(records: APRecord[], refundPool: RefundPool): {
-  findings: FindingWithImpactRows[]
-  allGroupedRecordIds: Set<string>
-} {
+function detectExactDuplicates(records: APRecord[], facts: Facts, returns: Returns): { findings: FindingWithImpactRows[]; claimed: Claimed } {
   const findings: FindingWithImpactRows[] = []
-  const allGroupedRecordIds = new Set<string>()
+  const claimed: Claimed = { exact: new Set(), review: new Set() }
 
-  const withInvoice = records.filter(hasReference)
-  const groups = groupBy(withInvoice, invoiceKey)
+  const referenced = records.filter((r) => isPayment(r) && facts(r).strength !== 'none')
+  const groups = [...groupBy(referenced, (r) => `${facts(r).vendor}|${facts(r).key}`).values()].flatMap((rows) => (rows.length < 2 ? [] : splitCompatible(rows, facts)))
 
-  for (const [key, allRows] of groups) {
-    const group = allRows.filter(isPayment)
-    if (group.length < 2) continue
-    const sorted = [...group].sort((a, b) => a.paymentDate.getTime() - b.paymentDate.getTime())
+  for (const group of groups) {
+    const sorted = [...group].sort(byDate)
+    const standing = sorted.filter((r) => returns.stands(r))
+    if (standing.length < 2) continue
     // A one- or two-character reference ("1", a check number) is shared by
     // unrelated payments all the time. It ties rows to one invoice only when the
     // amount repeats too; rows with other amounts stay free for Rule 2.
-    const shortReference = referenceStrength(sorted[0].invoiceNumber) === 'short'
-    const amountClusters = Array.from(groupBy(sorted, (r) => toCents(r.amountPaid).toString()).values())
-    for (const cluster of amountClusters) {
-      if (!shortReference || cluster.length > 1) cluster.forEach((r) => allGroupedRecordIds.add(r.id))
-    }
+    const shortReference = facts(sorted[0]).strength === 'short'
+    const amountClusters = Array.from(groupBy(sorted, (r) => facts(r).cents.toString()).values()).map((rows) => ({
+      cents: facts(rows[0]).cents,
+      standing: rows.filter((r) => returns.stands(r)),
+      // A voided payment never left the account. One that was refunded did, and stays in the evidence.
+      shown: rows.filter((r) => returns.undone.get(r.id) !== 'reversal'),
+    }))
 
     const invoiceNumber = sorted[0].invoiceNumber
     const vendor = sorted[0].vendor
-    const totalPaidCents = sorted.reduce((sum, r) => sum + toCents(r.amountPaid), 0)
-    const invoiceAmount = agreedInvoiceAmount(sorted)
+    const totalPaidCents = standing.reduce((sum, r) => sum + facts(r).cents, 0)
+    const invoiceAmount = agreedInvoiceAmount(standing)
 
     // Instalments: several payments that together come to no more than the
     // invoice are how the invoice was paid, not a duplicate of it.
@@ -196,22 +447,24 @@ function detectExactDuplicates(records: APRecord[], refundPool: RefundPool): {
     let budgetCents = invoiceAmount === null ? Infinity : totalPaidCents - toCents(invoiceAmount)
 
     const duplicateClusters = amountClusters
-      .filter((cluster) => cluster.length > 1)
-      .sort((a, b) => toCents(b[0].amountPaid) * (b.length - 1) - toCents(a[0].amountPaid) * (a.length - 1))
-    const singlePaymentRows = amountClusters.filter((cluster) => cluster.length === 1).flat()
+      .filter((cluster) => cluster.standing.length > 1)
+      .sort((a, b) => b.cents * (b.standing.length - 1) - a.cents * (a.standing.length - 1))
+    const singlePaymentRows = amountClusters.filter((cluster) => cluster.standing.length === 1).flatMap((cluster) => cluster.standing)
 
-    for (const cluster of duplicateClusters) {
+    for (const { cents, standing: cluster, shown } of duplicateClusters) {
       const duplicateRows = cluster.slice(1)
-      const extraCents = duplicateRows.reduce((sum, r) => sum + toCents(r.amountPaid), 0)
+      duplicateRows.forEach((r) => claimed.exact.add(r.id))
+      const extraCents = duplicateRows.length * cents
       const grossCents = Math.min(extraCents, budgetCents)
       budgetCents -= grossCents
-      const refundedCents = drawRefund(refundPool, key, grossCents)
-      const dollarImpact = centsToDollars(grossCents - refundedCents)
-      if (grossCents - refundedCents <= 0) continue
-      const refundNote = refundedCents > 0 ? ` ${formatCurrency(centsToDollars(refundedCents))} has already been credited back, leaving` : ''
+      const netCents = grossCents - returns.draw(cluster[0], grossCents)
+      if (netCents <= 0) continue
+      const dollarImpact = centsToDollars(netCents)
+      const refundedCents = grossCents - netCents + (shown.length - cluster.length) * cents
+      const refundNote = refundedCents > 0 ? ` ${money(centsToDollars(refundedCents), shown)} has already been credited back, leaving` : ''
       findings.push({
         finding: makeFinding({
-          id: `exact_duplicate-${cluster.map((r) => r.id).join('-')}`,
+          id: `exact_duplicate-${shown.map((r) => r.id).join('-')}`,
           ruleId: 'exact_repeated_payment_v1',
           type: 'exact_duplicate',
           class: 'recoverable',
@@ -219,27 +472,32 @@ function detectExactDuplicates(records: APRecord[], refundPool: RefundPool): {
           vendor,
           dollarImpact,
           title: `Duplicate payment of invoice ${invoiceNumber}`,
-          explanation: `Invoice ${invoiceNumber} from ${vendor} was paid ${cluster.length} times at ${formatCurrency(
-            cluster[0].amountPaid
-          )}.${refundNote} ${formatCurrency(dollarImpact)} across ${duplicateRows.length} extra ${plural(duplicateRows.length, 'payment')} is flagged for review. The ledger rows alone do not prove separate settled payments or money owed.`,
-          relatedRecords: cluster,
+          explanation: `Invoice ${invoiceNumber} from ${vendor} was paid ${shown.length} times at ${money(
+            cluster[0].amountPaid, shown
+          )}.${refundNote} ${money(dollarImpact, shown)} across ${duplicateRows.length} extra ${plural(duplicateRows.length, 'payment')} is flagged for review.${returns.note(cluster[0])} The ledger rows alone do not prove separate settled payments or money owed.`,
+          relatedRecords: shown,
         }),
         impactRecordIds: duplicateRows.map((r) => r.id),
       })
     }
 
     if (singlePaymentRows.length > 0 && !shortReference) {
-      const reviewRows = duplicateClusters.length > 0 ? singlePaymentRows : sorted.slice(1)
-      const reviewCents = reviewRows.reduce((sum, r) => sum + toCents(r.amountPaid), 0)
+      const firstDay = facts(standing[0]).day
+      // Several different amounts on the day the invoice was first paid are the lines of one
+      // payment split across accounts. Only an agreed invoice amount can show they came to too much.
+      const splitLines = invoiceAmount === null && standing.filter((r) => facts(r).day === firstDay).length > 1
+      const reviewRows = (duplicateClusters.length > 0 ? singlePaymentRows : standing.slice(1)).filter((r) => !splitLines || facts(r).day !== firstDay)
+      const reviewCents = reviewRows.reduce((sum, r) => sum + facts(r).cents, 0)
       const grossCents = Math.min(reviewCents, budgetCents)
       budgetCents -= grossCents
-      const netCents = grossCents - drawRefund(refundPool, key, grossCents)
+      const netCents = grossCents - returns.draw(standing[0], grossCents)
       if (netCents <= 0) continue
+      reviewRows.forEach((r) => claimed.review.add(r.id))
       const dollarImpact = centsToDollars(netCents)
-      const overInvoice = invoiceAmount === null ? '' : ` ${formatCurrency(centsToDollars(totalPaidCents))} was paid in total against a ${formatCurrency(invoiceAmount)} invoice.`
+      const overInvoice = invoiceAmount === null ? '' : ` ${money(centsToDollars(totalPaidCents), standing)} was paid in total against a ${money(invoiceAmount, standing)} invoice.`
       findings.push({
         finding: makeFinding({
-          id: `repeated_invoice_review-${sorted.map((r) => r.id).join('-')}`,
+          id: `repeated_invoice_review-${standing.map((r) => r.id).join('-')}`,
           ruleId: 'repeated_invoice_review_v1',
           type: 'exact_duplicate',
           class: 'review',
@@ -247,24 +505,25 @@ function detectExactDuplicates(records: APRecord[], refundPool: RefundPool): {
           vendor,
           dollarImpact,
           title: `Repeated payments for invoice ${invoiceNumber}`,
-          explanation: `Invoice ${invoiceNumber} from ${vendor} appears in payments with different amounts.${overInvoice} Review ${formatCurrency(
-            dollarImpact
-          )} of additional payment activity before treating it as a potential duplicate.`,
-          relatedRecords: sorted,
+          explanation: `Invoice ${invoiceNumber} from ${vendor} appears in payments with different amounts.${overInvoice} Review ${money(
+            dollarImpact, standing
+          )} of additional payment activity before treating it as a potential duplicate.${returns.note(standing[0])}`,
+          relatedRecords: standing,
         }),
         impactRecordIds: reviewRows.map((r) => r.id),
       })
     }
   }
 
-  return { findings, allGroupedRecordIds }
+  return { findings, claimed }
 }
 
 /**
  * The recurring series for this vendor, each as its on-cadence rows: three or more
  * payments of the same amount on a steady cadence, no two sharing an invoice
- * number. Rows without a reference count (card and check purchases rarely
- * carry one). One vendor can have several such series (two subscriptions).
+ * number (the second of two that do is off-series). Rows without a reference
+ * count (card and check purchases rarely carry one). One vendor can have several
+ * such series (two subscriptions).
  *
  * The cadence is the median gap. Walking the series in date order, a payment
  * that arrives well before the next one is due is off-series — that is what a
@@ -273,18 +532,23 @@ function detectExactDuplicates(records: APRecord[], refundPool: RefundPool): {
  * the series going. If too little of the series keeps to the cadence, none of
  * it is treated as recurring.
  */
-function recurringRuns(sortedByDate: APRecord[]): APRecord[][] {
+function recurringRuns(sortedByDate: APRecord[], facts: Facts): APRecord[][] {
   const runs: APRecord[][] = []
-  const byAmount = groupBy(sortedByDate, (r) => toCents(r.amountPaid).toString())
-  for (const series of byAmount.values()) {
+  const byAmount = groupBy(sortedByDate, (r) => facts(r).cents.toString())
+  for (const sameAmount of byAmount.values()) {
+    const references = new Set<string>()
+    const series = sameAmount.filter((r) => {
+      const { strength, ref } = facts(r)
+      if (strength === 'none') return true
+      if (references.has(ref!)) return false
+      references.add(ref!)
+      return true
+    })
     if (series.length < 3) continue
-    const referenced = series.filter(hasReference)
-    const invoiceNumbers = new Set(referenced.map((r) => normalizeInvoiceNumber(r.invoiceNumber!)))
-    if (invoiceNumbers.size !== referenced.length) continue
     const gaps: number[] = []
     for (let i = 1; i < series.length; i++) gaps.push(daysBetween(series[i - 1].paymentDate, series[i].paymentDate))
     const cadence = median(gaps)
-    const everyRowInvoiced = series.every((r) => referenceStrength(r.invoiceNumber) === 'strong')
+    const everyRowInvoiced = series.every((r) => facts(r).strength === 'strong')
     if (cadence < (everyRowInvoiced ? INVOICED_RECURRING_MIN_CADENCE_DAYS : RECURRING_MIN_CADENCE_DAYS)) continue
     const tolerance = Math.min(RECURRING_MAX_TOLERANCE_DAYS, Math.max(2, Math.floor(cadence * 0.35)))
 
@@ -349,125 +613,210 @@ function toRecurringSeries(rows: APRecord[]): RecurringSeries {
   }
 }
 
-/** Only deterministic reference normalization establishes a variant; typos remain general near-match review. */
-function referenceVariant(a: string, b: string): boolean {
-  const na = normalizeReference(a).value
-  return na !== null && na === normalizeReference(b).value
-}
-
-/** Rows that cannot be the same economic event: known, different companies or currencies. */
-function incompatible(a: APRecord, b: APRecord): boolean {
-  if (a.company && b.company && a.company.trim().toLowerCase() !== b.company.trim().toLowerCase()) return true
-  return Boolean(a.currency && b.currency && a.currency !== b.currency)
-}
-
-/** Amounts (in cents) this vendor is routinely paid with no reference and no steady cadence. */
-function routinePrices(sortedByDate: APRecord[], recurring: Set<string>): Set<number> {
-  const routine = new Set<number>()
-  const unreferenced = groupBy(sortedByDate.filter((r) => !hasReference(r)), (r) => toCents(r.amountPaid).toString())
-  for (const [cents, rows] of unreferenced) {
+/** Payments, by record id, of a price this vendor is routinely paid with no reference and no steady cadence. */
+function routinePayments(sortedByDate: APRecord[], recurring: Set<string>, facts: Facts): Set<string> {
+  const routine = new Set<string>()
+  const unreferenced = groupBy(sortedByDate.filter((r) => facts(r).strength === 'none'), (r) => facts(r).cents.toString())
+  for (const rows of unreferenced.values()) {
     if (rows.length < ROUTINE_PRICE_MIN_PAYMENTS) continue
     const onSchedule = rows.filter((r) => recurring.has(r.id)).length
     if (onSchedule >= rows.length * ROUTINE_RECURRING_SHARE) continue
-    routine.add(Number(cents))
+    rows.forEach((r) => routine.add(r.id))
   }
   return routine
-}
-
-function pairWindow(a: APRecord, b: APRecord, windowDays: number): number {
-  return hasReference(a) || hasReference(b) ? windowDays : Math.min(windowDays, NO_REFERENCE_WINDOW_DAYS)
 }
 
 // Rule 2 — invoice_reference_variant_v1 and same_vendor_amount_near_duplicate_v1 (review signals only)
 function detectNearDuplicates(
   records: APRecord[],
-  excludeRecordIds: Set<string>,
+  facts: Facts,
+  returns: Returns,
+  claimed: Claimed,
   windowDays = DEFAULT_REVIEW_WINDOW_DAYS
 ): { findings: FindingWithImpactRows[]; recurringSeries: RecurringSeries[] } {
   const findings: FindingWithImpactRows[] = []
   const recurringSeries: RecurringSeries[] = []
-  const eligible = records.filter((r) => isPayment(r) && !excludeRecordIds.has(r.id))
-  const groups = groupBy(eligible, vendorIdentity)
-  const usedAsLater = new Set<string>()
+  // A row Rule 1 called an extra copy explains nothing about its neighbours. Any other payment can
+  // be the earlier half of a pair; one that already has a figure on it is never the later half.
+  const eligible = records.filter((r) => isPayment(r) && returns.stands(r) && !claimed.exact.has(r.id))
 
-  for (const group of groups.values()) {
-    const sorted = [...group].sort((a, b) => a.paymentDate.getTime() - b.paymentDate.getTime())
-    const runs = recurringRuns(sorted)
-    recurringSeries.push(...runs.map(toRecurringSeries))
-    const recurring = new Set(runs.flatMap((rows) => rows.map((r) => r.id)))
-    const routine = routinePrices(sorted, recurring)
+  for (const group of groupBy(eligible, (r) => facts(r).vendor).values()) {
+    const sorted = [...group].sort(byDate)
+    const recurring = new Set<string>()
+    const routine = new Set<string>()
+    const scheduledPrices = new Set<number>()
+    for (const rows of splitCompatible(sorted.filter((r) => !claimed.review.has(r.id)), facts)) {
+      const runs = recurringRuns(rows, facts)
+      recurringSeries.push(...runs.map(toRecurringSeries))
+      const inRuns = new Set(runs.flatMap((run) => run.map((r) => r.id)))
+      inRuns.forEach((id) => recurring.add(id))
+      runs.forEach((run) => scheduledPrices.add(facts(run[0]).cents))
+      routinePayments(rows, inRuns, facts).forEach((id) => routine.add(id))
+    }
 
-    for (let i = 1; i < sorted.length; i++) {
-      const later = sorted[i]
+    const pairWindow = (a: RowFacts, b: RowFacts) => {
+      if (a.strength !== 'none' || b.strength !== 'none') return windowDays
+      // An extra payment beside a schedule, carrying the schedule's own label ("Rent", the account number).
+      if (a.ref !== null && a.ref === b.ref && scheduledPrices.has(b.cents)) return windowDays
+      return Math.min(windowDays, NO_REFERENCE_WINDOW_DAYS)
+    }
+
+    const earlierByAmount = new Map<number, APRecord[]>()
+    // Two payments of a routine price are never a pair, so a routine payment looks only at the others.
+    const earlierNotRoutine = new Map<number, APRecord[]>()
+    const earlierByReference = new Map<string, APRecord[]>()
+    for (const later of sorted) {
+      const l = facts(later)
+      const sameAmount = (routine.has(later.id) ? earlierNotRoutine : earlierByAmount).get(l.cents) ?? []
+      const sameReference = l.strength === 'strong' ? (earlierByReference.get(`${l.cents}|${l.ref}`) ?? []) : []
+
       // A payment that keeps to a recurring cadence is the series, never the suspect. An
       // off-series payment always has an earlier row to be matched against, so it is
       // flagged once rather than again by every later payment in the series.
-      if (usedAsLater.has(later.id) || recurring.has(later.id)) continue
-
-      // A reference variant is the stronger signal; otherwise the nearest same-amount payment in the window.
-      let variant: APRecord | null = null
-      let nearest: APRecord | null = null
-      let variantGap = Infinity
-      let nearestGap = Infinity
-
-      for (let j = 0; j < i; j++) {
-        const earlier = sorted[j]
-        if (toCents(earlier.amountPaid) !== toCents(later.amountPaid) || incompatible(earlier, later)) continue
-        if (hasReference(earlier) && earlier.invoiceNumber === later.invoiceNumber) continue
-        if (!hasReference(earlier) && !hasReference(later) && routine.has(toCents(later.amountPaid))) continue
-        const gap = Math.abs(daysBetween(earlier.paymentDate, later.paymentDate))
-        if (gap > pairWindow(earlier, later, windowDays)) continue
-        const isVariant =
-          referenceStrength(earlier.invoiceNumber) === 'strong' &&
-          referenceStrength(later.invoiceNumber) === 'strong' &&
-          referenceVariant(earlier.invoiceNumber!, later.invoiceNumber!)
-        if (isVariant && gap < variantGap) {
-          variantGap = gap
-          variant = earlier
-        } else if (!isVariant && gap < nearestGap) {
-          nearestGap = gap
-          nearest = earlier
+      if (!recurring.has(later.id) && !claimed.review.has(later.id)) {
+        // A reference variant is the stronger signal, however far apart the payments are;
+        // otherwise the nearest same-amount payment in the window.
+        const nearestOf = (candidates: APRecord[], accepts: (e: RowFacts, gap: number) => boolean, maxGap: number): APRecord | null => {
+          let found: APRecord | null = null
+          let foundGap = Infinity
+          for (let j = candidates.length - 1; j >= 0; j--) {
+            const e = facts(candidates[j])
+            const gap = l.day - e.day
+            if (gap > maxGap || gap > foundGap) break
+            if (incompatible(e, l) || !accepts(e, gap)) continue
+            found = candidates[j]
+            foundGap = gap
+          }
+          return found
+        }
+        const variant = nearestOf(sameReference, (e) => e.key !== l.key, Infinity)
+        const match =
+          variant ??
+          nearestOf(
+            sameAmount,
+            (e, gap) => {
+              if (e.strength !== 'none' && e.key === l.key) return false
+              if (l.strength === 'strong' && e.strength === 'strong' && e.ref === l.ref) return false
+              return gap <= pairWindow(e, l)
+            },
+            windowDays
+          )
+        const refunded = match ? returns.draw(later, l.cents) : 0
+        const netCents = match ? l.cents - refunded - returns.draw(match, l.cents - refunded) : 0
+        if (match && netCents > 0) {
+          const gap = l.day - facts(match).day
+          const pair = [match, later]
+          const refs = (r: APRecord) => r.invoiceNumber ?? 'no invoice reference'
+          const refundNote = netCents < l.cents ? ` ${money(centsToDollars(l.cents - netCents), pair)} has already been credited back, leaving ${money(centsToDollars(netCents), pair)}.` : ''
+          findings.push({
+            finding: makeFinding({
+              id: `${variant ? 'near_duplicate' : 'same_amount'}-${match.id}-${later.id}`,
+              ruleId: variant ? 'invoice_reference_variant_v1' : 'same_vendor_amount_near_duplicate_v1',
+              type: 'near_duplicate',
+              class: 'review',
+              severity: variant ? 'medium' : 'low',
+              vendor: later.vendor,
+              dollarImpact: centsToDollars(netCents),
+              title: variant ? `Invoice reference variant: ${later.vendor}` : `Same vendor and amount: ${later.vendor}`,
+              explanation: variant
+                ? `${later.vendor} was paid ${money(later.amountPaid, pair)} for invoice ${match.invoiceNumber} and again for invoice ${later.invoiceNumber}, ${gap} ${plural(gap, 'day')} apart.${refundNote} The references are the same once spacing, punctuation, an invoice prefix and leading zeros are set aside. A similar reference is not proof of a duplicate payment.`
+                : `${later.vendor} was paid ${money(later.amountPaid, pair)} twice within ${pairWindow(facts(match), l)} days (${refs(match)} and ${refs(later)}, ${formatDate(later.paymentDate)}), ${gap} ${plural(gap, 'day')} apart.${refundNote} The date window only selects these rows for review; it does not establish that anything is owed.`,
+              relatedRecords: pair,
+            }),
+            impactRecordIds: [later.id],
+          })
         }
       }
 
-      const match = variant ?? nearest
-      if (!match) continue
-      const gap = variant ? variantGap : nearestGap
-      usedAsLater.add(later.id)
-      const refs = (r: APRecord) => r.invoiceNumber ?? 'no invoice reference'
-      findings.push({
-        finding: makeFinding({
-          id: `${variant ? 'near_duplicate' : 'same_amount'}-${match.id}-${later.id}`,
-          ruleId: variant ? 'invoice_reference_variant_v1' : 'same_vendor_amount_near_duplicate_v1',
-          type: 'near_duplicate',
-          class: 'review',
-          severity: variant ? 'medium' : 'low',
-          vendor: later.vendor,
-          dollarImpact: later.amountPaid,
-          title: variant ? `Invoice reference variant: ${later.vendor}` : `Same vendor and amount: ${later.vendor}`,
-          explanation: variant
-            ? `${later.vendor} was paid ${formatCurrency(later.amountPaid)} for invoice ${match.invoiceNumber} and again for invoice ${later.invoiceNumber}, ${gap} ${plural(gap, 'day')} apart. The references match after normalization or differ by a character or two. A similar reference is not proof of a duplicate payment.`
-            : `${later.vendor} was paid ${formatCurrency(later.amountPaid)} twice within ${pairWindow(match, later, windowDays)} days (${refs(match)} and ${refs(later)}, ${formatDate(later.paymentDate)}), ${gap} ${plural(gap, 'day')} apart. The date window only selects these rows for review; it does not establish that anything is owed.`,
-          relatedRecords: [match, later],
-        }),
-        impactRecordIds: [later.id],
-      })
+      const remember = <K>(index: Map<K, APRecord[]>, key: K) => {
+        const list = index.get(key)
+        if (list) list.push(later)
+        else index.set(key, [later])
+      }
+      remember(earlierByAmount, l.cents)
+      if (!routine.has(later.id)) remember(earlierNotRoutine, l.cents)
+      if (l.strength === 'strong') remember(earlierByReference, `${l.cents}|${l.ref}`)
     }
   }
 
   return { findings, recurringSeries }
 }
 
+/**
+ * Rule 2, across vendor records — cross_vendor_duplicate_v1. The classic way a
+ * duplicate gets past an accounting system's own check: one supplier set up
+ * twice, under a misspelt name or two supplier IDs, and one invoice paid from
+ * each. The same amount on the same reference under near-identical names is
+ * reported at what was paid beyond one payment. `sameVendor` tells Rule 8 which
+ * vendors on a reference this has already accounted for.
+ */
+function detectCrossVendorDuplicates(records: APRecord[], facts: Facts, returns: Returns, claimed: Claimed): { findings: FindingWithImpactRows[]; sameVendor: (r: APRecord) => string } {
+  const findings: FindingWithImpactRows[] = []
+  const aliases = new Map<string, string>()
+  const strong = records.filter((r) => isPayment(r) && returns.stands(r) && facts(r).strength === 'strong')
+
+  for (const sharing of groupBy(strong, (r) => `${facts(r).ref}|${facts(r).cents}`).values()) {
+    if (sharing.length < 2) continue
+    for (const rows of splitCompatible(sharing, facts)) {
+      // One payment per vendor record: repeats inside one record are Rule 1's.
+      const firstPerVendor = [...groupBy([...rows].sort(byDate), (r) => facts(r).vendor).values()].map((own) => own[0])
+      if (firstPerVendor.length < 2) continue
+      const clusters: APRecord[][] = []
+      for (const r of firstPerVendor) {
+        const home = clusters.find((cluster) => cluster.some((other) => nearIdenticalVendorNames(other.vendor, r.vendor)))
+        if (home) home.push(r)
+        else clusters.push([r])
+      }
+      for (const cluster of clusters) {
+        if (cluster.length < 2) continue
+        const { ref, vendor } = facts(cluster[0])
+        cluster.slice(1).forEach((r) => aliases.set(`${ref}|${facts(r).vendor}`, vendor))
+        // A payment Rule 1 already has a figure on is the one kept here, and is not counted again.
+        const alreadyClaimed = (r: APRecord) => claimed.exact.has(r.id) || claimed.review.has(r.id)
+        const kept = cluster.find(alreadyClaimed) ?? cluster[0]
+        const extra = cluster.filter((r) => r !== kept && !alreadyClaimed(r))
+        let netCents = extra.reduce((sum, r) => sum + facts(r).cents, 0)
+        for (const r of cluster) netCents -= returns.draw(r, netCents)
+        if (netCents <= 0) continue
+        extra.forEach((r) => claimed.review.add(r.id))
+        const last = cluster[cluster.length - 1]
+        const names = [...new Set(cluster.map((r) => r.vendor))]
+        const under = names.length > 1 ? `under ${cluster.length} vendor names (${names.join(', ')})` : `under ${cluster.length} vendor records named ${names[0]}`
+        findings.push({
+          finding: makeFinding({
+            id: `cross_vendor_duplicate-${cluster.map((r) => r.id).join('-')}`,
+            ruleId: 'cross_vendor_duplicate_v1',
+            type: 'near_duplicate',
+            class: 'review',
+            severity: 'medium',
+            vendor: last.vendor,
+            dollarImpact: centsToDollars(netCents),
+            title: `Invoice ${last.invoiceNumber} paid under two vendor records`,
+            explanation: `Invoice ${last.invoiceNumber} was paid at ${money(last.amountPaid, cluster)} ${under}. If they are one supplier entered twice, ${money(
+              centsToDollars(netCents), cluster
+            )} went out beyond one payment. Near-identical names are not proof of one supplier; check the vendor records first.`,
+            relatedRecords: cluster,
+          }),
+          impactRecordIds: extra.map((r) => r.id),
+        })
+      }
+    }
+  }
+
+  return { findings, sameVendor: (r) => aliases.get(`${facts(r).ref}|${facts(r).vendor}`) ?? facts(r).vendor }
+}
+
 // Rule 3 — Overpayment vs invoice (recoverable, high)
-function detectOverpayments(records: APRecord[], refundPool: RefundPool): FindingWithImpactRows[] {
+function detectOverpayments(payments: APRecord[], returns: Returns): FindingWithImpactRows[] {
   const findings: FindingWithImpactRows[] = []
 
-  for (const r of records) {
-    if (!isPayment(r) || r.invoiceAmount === null) continue
-    const overCents = toCents(r.amountPaid) - toCents(r.invoiceAmount)
+  for (const r of payments) {
+    const invoiceAmount = knownInvoiceAmount(r)
+    if (invoiceAmount === null) continue
+    const overCents = toCents(r.amountPaid) - toCents(invoiceAmount)
     if (overCents >= OVERPAYMENT_MIN_CENTS) {
       // A refund already booked against this invoice has given some (or all) of it back.
-      const refundedCents = hasReference(r) ? drawRefund(refundPool, invoiceKey(r), overCents) : 0
+      const refundedCents = returns.draw(r, overCents)
       if (overCents - refundedCents < OVERPAYMENT_MIN_CENTS) continue
       const dollarImpact = centsToDollars(overCents - refundedCents)
       findings.push({
@@ -479,11 +828,11 @@ function detectOverpayments(records: APRecord[], refundPool: RefundPool): Findin
           vendor: r.vendor,
           dollarImpact,
           title: `Overpayment on invoice ${r.invoiceNumber ?? 'unknown'}`,
-          explanation: `Invoice ${r.invoiceNumber ?? 'unknown'} from ${r.vendor} was for ${formatCurrency(
-            r.invoiceAmount
-          )}, but ${formatCurrency(r.amountPaid)} was paid — an overpayment of ${formatCurrency(centsToDollars(overCents))}.${
-            refundedCents > 0 ? ` ${formatCurrency(centsToDollars(refundedCents))} has already been credited back, leaving ${formatCurrency(dollarImpact)}.` : ''
-          }`,
+          explanation: `Invoice ${r.invoiceNumber ?? 'unknown'} from ${r.vendor} was for ${money(
+            invoiceAmount, [r]
+          )}, but ${money(r.amountPaid, [r])} was paid — an overpayment of ${money(centsToDollars(overCents), [r])}.${
+            refundedCents > 0 ? ` ${money(centsToDollars(refundedCents), [r])} has already been credited back, leaving ${money(dollarImpact, [r])}.` : ''
+          }${returns.note(r)}`,
           relatedRecords: [r],
         }),
         impactRecordIds: [r.id],
@@ -499,23 +848,29 @@ function discountValue(invoiceAmount: number, discountPct: number): number {
   return centsToDollars(Math.round((toCents(invoiceAmount) * discountPct) / 100))
 }
 
+/** The last day the discount can still have been open. "EOM" may start the window at the end of the invoice's month, so it is only surely over after that. */
+function discountDeadline(invoiceDate: Date, terms: ParsedTerms): Date {
+  return terms.endOfMonth
+    ? new Date(invoiceDate.getFullYear(), invoiceDate.getMonth() + 1, terms.discountDays)
+    : new Date(invoiceDate.getFullYear(), invoiceDate.getMonth(), invoiceDate.getDate() + terms.discountDays)
+}
+
 // Rule 4 — Unclaimed early-payment discount (recoverable, medium)
-function detectUnclaimedDiscounts(records: APRecord[]): FindingWithImpactRows[] {
+function detectUnclaimedDiscounts(payments: APRecord[]): FindingWithImpactRows[] {
   const findings: FindingWithImpactRows[] = []
 
-  for (const r of records) {
-    if (!isPayment(r)) continue
+  for (const r of payments) {
     const terms = parseTerms(r.terms)
-    if (!terms) continue
-    if (r.invoiceDate === null || r.invoiceAmount === null) continue
+    const invoiceAmount = knownInvoiceAmount(r)
+    if (!terms || r.invoiceDate === null || invoiceAmount === null) continue
 
     const daysToPay = daysBetween(r.invoiceDate, r.paymentDate)
     // Paid before the invoice was even dated: the dates are wrong, and a claim built on them would be too.
     const paidInWindow = daysToPay >= 0 && daysToPay <= terms.discountDays
-    const paidFull = r.amountPaid >= r.invoiceAmount - EPSILON
+    const paidFull = r.amountPaid >= invoiceAmount - EPSILON
 
     if (paidInWindow && paidFull) {
-      const dollarImpact = discountValue(r.invoiceAmount, terms.discountPct)
+      const dollarImpact = discountValue(invoiceAmount, terms.discountPct)
       findings.push({
         finding: makeFinding({
           id: `unclaimed_discount-${r.id}`,
@@ -527,8 +882,8 @@ function detectUnclaimedDiscounts(records: APRecord[]): FindingWithImpactRows[] 
           title: `Unclaimed early-payment discount on invoice ${r.invoiceNumber ?? 'unknown'}`,
           explanation: `Terms of ${r.terms} entitled ${r.vendor} invoice ${
             r.invoiceNumber ?? 'unknown'
-          } to a ${terms.discountPct}% discount for paying within ${terms.discountDays} days. Payment was made ${daysToPay} ${plural(daysToPay, 'day')} after the invoice date but at full price, leaving ${formatCurrency(
-            dollarImpact
+          } to a ${terms.discountPct}% discount for paying within ${terms.discountDays} days. Payment was made ${daysToPay} ${plural(daysToPay, 'day')} after the invoice date but at full price, leaving ${money(
+            dollarImpact, [r]
           )} of eligible discount unclaimed.`,
           relatedRecords: [r],
         }),
@@ -541,21 +896,20 @@ function detectUnclaimedDiscounts(records: APRecord[]): FindingWithImpactRows[] 
 }
 
 // Rule 5 — Missed early-payment discount (opportunity, low)
-function detectMissedDiscounts(records: APRecord[]): Finding[] {
+function detectMissedDiscounts(payments: APRecord[]): Finding[] {
   const findings: Finding[] = []
 
-  for (const r of records) {
-    if (!isPayment(r)) continue
+  for (const r of payments) {
     const terms = parseTerms(r.terms)
-    if (!terms) continue
-    if (r.invoiceDate === null || r.invoiceAmount === null) continue
+    const invoiceAmount = knownInvoiceAmount(r)
+    if (!terms || r.invoiceDate === null || invoiceAmount === null) continue
 
     const daysToPay = daysBetween(r.invoiceDate, r.paymentDate)
     // Paying the discounted amount late means the vendor honoured the discount
     // anyway — nothing was lost, so there is nothing to change next time.
-    const paidFull = r.amountPaid >= r.invoiceAmount - EPSILON
-    if (daysToPay > terms.discountDays && paidFull) {
-      const dollarImpact = discountValue(r.invoiceAmount, terms.discountPct)
+    const paidFull = r.amountPaid >= invoiceAmount - EPSILON
+    if (daysBetween(discountDeadline(r.invoiceDate, terms), r.paymentDate) > 0 && paidFull) {
+      const dollarImpact = discountValue(invoiceAmount, terms.discountPct)
       findings.push(
         makeFinding({
           id: `missed_discount-${r.id}`,
@@ -567,8 +921,8 @@ function detectMissedDiscounts(records: APRecord[]): Finding[] {
           title: `Missed early-payment discount on invoice ${r.invoiceNumber ?? 'unknown'}`,
           explanation: `Terms of ${r.terms} offered a ${terms.discountPct}% discount for paying within ${
             terms.discountDays
-          } days, but invoice ${r.invoiceNumber ?? 'unknown'} from ${r.vendor} was paid ${daysToPay} ${plural(daysToPay, 'day')} after the invoice date. Paying earlier next time would save ${formatCurrency(
-            dollarImpact
+          } days${terms.endOfMonth ? ' (counted from the end of the invoice month)' : ''}, but invoice ${r.invoiceNumber ?? 'unknown'} from ${r.vendor} was paid ${daysToPay} ${plural(daysToPay, 'day')} after the invoice date. Paying earlier next time would save ${money(
+            dollarImpact, [r]
           )}.`,
           relatedRecords: [r],
         })
@@ -580,11 +934,11 @@ function detectMissedDiscounts(records: APRecord[]): Finding[] {
 }
 
 // Rule 6 — Vendor bank-account change (review, high)
-function detectBankAccountChanges(records: APRecord[]): Finding[] {
+function detectBankAccountChanges(records: APRecord[], facts: Facts): Finding[] {
   const findings: Finding[] = []
   const groups = groupBy(
     records.filter((r) => isPayment(r) && normalizeAccountLast4(r.bankAccountLast4) !== null),
-    vendorIdentity
+    (r) => facts(r).vendor
   )
 
   for (const group of groups.values()) {
@@ -613,8 +967,8 @@ function detectBankAccountChanges(records: APRecord[]): Finding[] {
               previous.bankAccountLast4
             )} to account ending ${account}, an account not paid before, on ${formatDate(
               current.paymentDate
-            )}, when ${formatCurrency(
-              current.amountPaid
+            )}, when ${money(
+              current.amountPaid, [current]
             )} was paid. Bank-account changes are a common payment-fraud vector — verify the new account with the vendor by phone before further payments.`,
             relatedRecords: [previous, current],
           })
@@ -628,11 +982,11 @@ function detectBankAccountChanges(records: APRecord[]): Finding[] {
 }
 
 // Rule 7 — Payment amount outlier (review, medium)
-function detectAmountOutliers(records: APRecord[]): Finding[] {
+function detectAmountOutliers(payments: APRecord[], facts: Facts): Finding[] {
   const findings: Finding[] = []
-  const groups = groupBy(records.filter(isPayment), vendorIdentity)
+  const groups = [...groupBy(payments, (r) => facts(r).vendor).values()].flatMap((rows) => splitCompatible(rows, facts))
 
-  for (const group of groups.values()) {
+  for (const group of groups) {
     if (group.length < OUTLIER_MIN_PAYMENTS) continue
 
     const amounts = group.map((r) => r.amountPaid)
@@ -655,10 +1009,10 @@ function detectAmountOutliers(records: APRecord[]): Finding[] {
             vendor: r.vendor,
             dollarImpact,
             title: `Unusually large payment to ${r.vendor}`,
-            explanation: `${r.vendor} was paid ${formatCurrency(
-              r.amountPaid
-            )} on ${formatDate(r.paymentDate)}, well above this vendor's typical payment of ${formatCurrency(
-              typical
+            explanation: `${r.vendor} was paid ${money(
+              r.amountPaid, [r]
+            )} on ${formatDate(r.paymentDate)}, well above this vendor's typical payment of ${money(
+              typical, [r]
             )} (the median of ${group.length} payments). This may be a pricing or keying error — pull the contract or PO to confirm.`,
             relatedRecords: [r],
           })
@@ -671,25 +1025,26 @@ function detectAmountOutliers(records: APRecord[]): Finding[] {
 }
 
 // Rule 8 — Invoice number reused across different vendors (review, high)
-function detectSharedInvoiceNumbers(records: APRecord[]): Finding[] {
+function detectSharedInvoiceNumbers(payments: APRecord[], facts: Facts, vendorOf: (r: APRecord) => string): Finding[] {
   const findings: Finding[] = []
   // Two vendors both using "1" or "12" is coincidence, not a vendor-identity question.
-  const withInvoice = records.filter((r) => isPayment(r) && referenceStrength(r.invoiceNumber) === 'strong')
-  const groups = groupBy(withInvoice, (r) => normalizeInvoiceNumber(r.invoiceNumber!))
+  const withInvoice = payments.filter((r) => facts(r).strength === 'strong')
+  const groups = [...groupBy(withInvoice, (r) => facts(r).key).values()].flatMap((rows) => (rows.length < 2 ? [] : splitCompatible(rows, facts)))
 
-  for (const group of groups.values()) {
-    const vendorsInGroup = groupBy(group, vendorIdentity)
+  for (const group of groups) {
+    const vendorsInGroup = groupBy(group, vendorOf)
     if (vendorsInGroup.size < 2) continue
     const distinctive = (normalizeReference(group[0].invoiceNumber).value ?? '').length >= DISTINCTIVE_REFERENCE_MIN_LENGTH
     if (!distinctive) {
-      const vendorsByAmount = groupBy(group, (r) => toCents(r.amountPaid).toString())
-      const sharedAmount = [...vendorsByAmount.values()].some((rows) => new Set(rows.map(vendorIdentity)).size > 1)
+      const vendorsByAmount = groupBy(group, (r) => facts(r).cents.toString())
+      const sharedAmount = [...vendorsByAmount.values()].some((rows) => new Set(rows.map(vendorOf)).size > 1)
       if (!sharedAmount) continue
     }
 
     const sorted = [...group].sort((a, b) => a.paymentDate.getTime() - b.paymentDate.getTime())
-    const vendorNames = Array.from(new Set(sorted.map((r) => r.vendor))).join(', ')
-    const dollarImpact = sorted.reduce((sum, r) => sum + r.amountPaid, 0)
+    const names = new Set(sorted.map((r) => r.vendor))
+    const vendorNames = [...names].join(', ')
+    const dollarImpact = centsToDollars(sorted.reduce((sum, r) => sum + facts(r).cents, 0))
 
     findings.push(
       makeFinding({
@@ -700,8 +1055,8 @@ function detectSharedInvoiceNumbers(records: APRecord[]): Finding[] {
         vendor: vendorNames,
         dollarImpact,
         title: `Invoice ${sorted[0].invoiceNumber} used by more than one vendor`,
-        explanation: `Invoice number ${sorted[0].invoiceNumber} appears on payments to ${vendorsInGroup.size} different vendors (${vendorNames}), totaling ${formatCurrency(
-          dollarImpact
+        explanation: `Invoice number ${sorted[0].invoiceNumber} appears on payments to ${vendorsInGroup.size} ${names.size < vendorsInGroup.size ? 'separate vendor records' : 'different vendors'} (${vendorNames}), totaling ${money(
+          dollarImpact, sorted
         )}. That's either a coincidental numbering overlap or a data-entry/vendor-identity issue worth confirming before treating either payment as routine.`,
         relatedRecords: sorted,
       })
@@ -730,22 +1085,29 @@ function dedupeRecoverable(candidates: FindingWithImpactRows[]): Finding[] {
 const SEVERITY_RANK: Record<Finding['severity'], number> = { high: 0, medium: 1, low: 2 }
 
 export function detectFindings(records: APRecord[]): DetectionResultWithRecurring {
-  const refundPool = buildRefundPool(records)
-  const { findings: exactDuplicates, allGroupedRecordIds } = detectExactDuplicates(records, refundPool)
-  const { findings: nearDuplicates, recurringSeries } = detectNearDuplicates(records, allGroupedRecordIds)
-  const overpayments = detectOverpayments(records, refundPool)
-  const unclaimedDiscounts = detectUnclaimedDiscounts(records)
+  const facts = buildFacts(records)
+  const returns = new Returns(records, facts)
+  /** Money that went out and, as far as the ledger shows, stayed out. */
+  const payments = records.filter((r) => isPayment(r) && returns.stands(r))
+
+  // In this order, because each draws on what is left of the same returns.
+  const { findings: exactDuplicates, claimed } = detectExactDuplicates(records, facts, returns)
+  const overpayments = detectOverpayments(payments, returns)
+  const { findings: crossVendorDuplicates, sameVendor } = detectCrossVendorDuplicates(records, facts, returns, claimed)
+  const { findings: nearDuplicates, recurringSeries } = detectNearDuplicates(records, facts, returns, claimed)
+  const unclaimedDiscounts = detectUnclaimedDiscounts(payments)
 
   const recoveryCandidates = [...exactDuplicates, ...overpayments, ...unclaimedDiscounts].filter(
     (candidate) => candidate.finding.class === 'recoverable'
   )
-  const reviewCandidates = [...exactDuplicates, ...nearDuplicates].filter((candidate) => candidate.finding.class === 'review')
+  const reviewCandidates = [...exactDuplicates, ...nearDuplicates, ...crossVendorDuplicates].filter((candidate) => candidate.finding.class === 'review')
   const recoverableFindings = dedupeRecoverable(recoveryCandidates)
 
-  const missedDiscounts = detectMissedDiscounts(records)
-  const bankAccountChanges = detectBankAccountChanges(records)
-  const amountOutliers = detectAmountOutliers(records)
-  const sharedInvoiceNumbers = detectSharedInvoiceNumbers(records)
+  const missedDiscounts = detectMissedDiscounts(payments)
+  // A voided payment to a new account is still a new account: someone entered it.
+  const bankAccountChanges = detectBankAccountChanges(records, facts)
+  const amountOutliers = detectAmountOutliers(payments, facts)
+  const sharedInvoiceNumbers = detectSharedInvoiceNumbers(payments, facts, sameVendor)
 
   const findings = [
     ...recoverableFindings,
@@ -766,8 +1128,12 @@ export function detectFindings(records: APRecord[]): DetectionResultWithRecurrin
     }
   )
 
+  // One figure can only be one currency: dollars, unless the whole ledger is in another one.
+  const currencyOf = (f: Finding) => f.relatedRecords.find((r) => r.currency?.trim())?.currency!.trim().toUpperCase() ?? 'USD'
+  const currencies = new Set(findings.map(currencyOf))
+  const totalled = currencies.size > 1 ? 'USD' : [...currencies][0]
   const sumBy = (cls: FindingClass) =>
-    centsToDollars(findings.filter((f) => f.class === cls).reduce((sum, f) => sum + toCents(f.dollarImpact), 0))
+    centsToDollars(findings.filter((f) => f.class === cls && currencyOf(f) === totalled).reduce((sum, f) => sum + toCents(f.dollarImpact), 0))
 
   return {
     recurringSeries,

@@ -1,5 +1,5 @@
-import type { APRecord } from '@/types'
-import { normalizeVendor } from './format'
+import type { APRecord, SourceProvenance } from '../types.ts'
+import { canonicalCurrency, isoDay, normalizeVendor, toCents } from './format.ts'
 
 /** SHA-256 over UTF-8. Synchronous because CSV parsing and ledger merges are synchronous. */
 export function checksum(value: string): string {
@@ -38,24 +38,55 @@ export function normalizeReference(raw: string | null): { value: string | null; 
   const step=(name:string,next:string)=>{if(next!==value) transformations.push(name);value=next}
   step('trim_whitespace',value.trim())
   step('lowercase',value.toLowerCase())
-  step('remove_invoice_prefix',value.replace(/^(?:invoice|inv)(?:[\s#:_-]+)(?=\w)/,''))
+  // "Inv. 1001", "INV#1001", "Invoice No. 1001" and "INV1001" all name invoice 1001.
+  step('remove_invoice_prefix',value.replace(/^(?:invoice|inv)(?:[\s.#:_/-]+(?=\w)|(?=\d))(?:(?:number|num|no)[\s.#:_-]*(?=\d))?/,''))
   step('remove_spacing_and_punctuation',value.replace(/[\s\-_.:#/]/g,''))
   return {value:value||null,transformations}
 }
-/** Words payment systems put in the reference field when there is no invoice number (QuickBooks writes "Debit" on card purchases). */
-const PLACEHOLDER_REFERENCES = new Set(['debit','credit','cash','check','cheque','card','creditcard','debitcard','visa','mastercard','amex','ach','eft','wire','transfer','payment','pmt','invoice','inv','bill','ref','reference','receipt','na','none','null','nil','tbd','unknown','misc','various'])
+/**
+ * The reference two rows are compared by: normalized, and without the padding
+ * ("0042", "PO-00042") some systems print in front of a number. The stored
+ * normalized value keeps its zeros.
+ */
+export function referenceKey(raw: string | null): string | null {
+  const { value } = normalizeReference(raw)
+  return value === null ? null : value.replace(/^([a-z]*)0+(?=\d)/,'$1')
+}
+/**
+ * Words that stand in the reference field when there is no invoice number: how
+ * it was paid ("Debit", which QuickBooks writes on card purchases), what it was
+ * for ("Rent"), how often, or which month. A reference made up only of these
+ * words identifies no invoice; one with a number or a name in it still does.
+ */
+const PLACEHOLDER_REFERENCES = new Set((
+  'debit credit cash check cheque chk card creditcard debitcard visa mastercard amex discover ach eft wire transfer zelle venmo paypal ' +
+  'payment pmt pymt pay paid billpay autopay auto autopayment autodebit autodraft autowithdrawal draft withdrawal direct directdebit directdeposit ' +
+  'online web internet phone electronic epay bank ' +
+  'recurring standing standingorder daily weekly biweekly monthly quarterly annual annually yearly month week quarter year ' +
+  'rent rental lease subscription membership dues retainer payroll salary wages deposit loan insurance premium utilities utility tax taxes fee fees service services ' +
+  'statement stmt invoice inv bill ref reference receipt memo number no account acct onaccount ' +
+  'instalment installment partial balance final advance prepayment prepaid ' +
+  'na none null nil tbd unknown misc miscellaneous various other general ' +
+  'january february march april may june july august september october november december jan feb mar apr jun jul aug sep sept oct nov dec'
+).split(' '))
 /** Up to this many characters, a reference ("1", "12", a check number) is too common to identify an invoice on its own. */
 const SHORT_REFERENCE_MAX_LENGTH = 2
 
+function isPlaceholder(raw: string): boolean {
+  const words = raw.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)
+  // "N/A" and "A.C.H." are one word written with separators.
+  return words.every((word) => PLACEHOLDER_REFERENCES.has(word)) || PLACEHOLDER_REFERENCES.has(words.join(''))
+}
+
 /**
  * How far an invoice reference can be trusted to identify one invoice.
- * - none: missing, blank, all zeros or a placeholder word; treated as no reference.
+ * - none: missing, blank, all zeros or only placeholder words; treated as no reference.
  * - short: one or two characters; the same invoice only when the amount matches too.
- * - strong: everything else.
+ * - strong: everything else. Leading zeros count: "001" is a three-character reference.
  */
 export function referenceStrength(raw: string | null): 'none' | 'short' | 'strong' {
-  const value = normalizeReference(raw).value
-  if (value === null || /^0+$/.test(value) || PLACEHOLDER_REFERENCES.has(value)) return 'none'
+  const { value } = normalizeReference(raw)
+  if (raw === null || value === null || /^0+$/.test(value) || isPlaceholder(raw)) return 'none'
   return value.length <= SHORT_REFERENCE_MAX_LENGTH ? 'short' : 'strong'
 }
 export function vendorTransformations(raw:string):string[] {
@@ -71,13 +102,45 @@ export function vendorTransformations(raw:string):string[] {
   if(normalizeVendor(raw)!==value) steps.push('remove_legal_suffix')
   return steps
 }
+/** The untouched cell a field came from, whichever heading the file put it under. */
+export function sourceCell(source: SourceProvenance | undefined, field: string): string | undefined {
+  if (!source?.raw) return undefined
+  const key = source.columns ? source.columns[field] : field
+  return key !== undefined && Object.hasOwn(source.raw, key) ? source.raw[key] : undefined
+}
 export function sourceSignature(record: APRecord): string {
   const raw=record.source?.raw
-  return JSON.stringify(raw ? Object.keys(raw).sort().map(k=>[k,raw[k]]) : [record.vendor,record.invoiceNumber,record.paymentDate.toISOString(),record.invoiceAmount,record.amountPaid,record.currency??null,record.terms,record.bankAccountLast4,record.category])
+  return JSON.stringify(raw ? Object.keys(raw).sort().map(k=>[k,raw[k]]) : [record.vendor,record.invoiceNumber,isoDay(record.paymentDate),record.invoiceAmount,record.amountPaid,record.currency??null,record.terms,record.bankAccountLast4,record.category])
 }
 export function recordIdentity(record:APRecord):string {
-  const raw=record.source?.raw
   return record.externalTransactionId
-    ? JSON.stringify(['external',record.company??null,record.sourceAccount??null,record.externalTransactionId])
-    : JSON.stringify(['raw', record.company??null,record.sourceAccount??null,raw?.vendor??record.vendor,raw?.invoice_number??record.invoiceNumber,record.paymentDate.toISOString(),record.amountPaid,record.currency??null,record.transactionType??null])
+    // One payment can settle several bills, so the payment's ID alone does not identify a row.
+    ? JSON.stringify(['external',record.company??null,record.sourceAccount??null,record.externalTransactionId,normalizeReference(record.invoiceNumber).value])
+    // A vendor taken from the line above its group has an empty cell of its own.
+    : JSON.stringify(['raw', record.company??null,record.sourceAccount??null,sourceCell(record.source,'vendor')||record.vendor,sourceCell(record.source,'invoice_number')??record.invoiceNumber,isoDay(record.paymentDate),record.amountPaid,record.currency??null,record.transactionType??null])
+}
+
+const clean = (value: string | null | undefined) => (value ?? '').trim().toLowerCase()
+const agree = (a: string | null | undefined, b: string | null | undefined) => !clean(a) || !clean(b) || clean(a) === clean(b)
+
+/** What makes two rows from different files look like one payment, however each file was mapped or spelled. */
+export function paymentKey(record: APRecord): string {
+  return JSON.stringify([normalizeVendor(record.vendor), normalizeReference(record.invoiceNumber).value, isoDay(record.paymentDate), toCents(record.amountPaid)])
+}
+/** The payment key without the invoice, for a file whose invoice column was not there or not matched. */
+export function paymentKeyWithoutInvoice(record: APRecord): string {
+  return JSON.stringify([normalizeVendor(record.vendor), isoDay(record.paymentDate), toCents(record.amountPaid)])
+}
+/** A column the file does not have says nothing; an empty cell in one it does have says there is no invoice. */
+export const knowsInvoice = (record: APRecord): boolean => record.invoiceNumber !== null || sourceCell(record.source, 'invoice_number') !== undefined
+/** The same cells, whatever was made of them: catches a file whose dates were read the other way round last time. */
+export function cellsKey(record: APRecord): string | null {
+  const date = sourceCell(record.source, 'payment_date')
+  const amount = sourceCell(record.source, 'amount_paid')
+  // The amount as written: a payment and its refund are never the same cells.
+  return date === undefined || amount === undefined ? null : JSON.stringify([normalizeVendor(record.vendor), normalizeReference(record.invoiceNumber).value, date.trim(), amount.trim()])
+}
+/** Whether what both rows say about company, account and currency allows them to be the same payment. */
+export function couldBeSamePayment(a: APRecord, b: APRecord): boolean {
+  return agree(a.company, b.company) && agree(a.sourceAccount, b.sourceAccount) && agree(canonicalCurrency(a.currency), canonicalCurrency(b.currency)) && agree(a.externalTransactionId, b.externalTransactionId)
 }

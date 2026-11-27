@@ -3,6 +3,8 @@ import { expect, it, vi } from 'vitest'
 import { confirmCase } from '@/ledger/caseState'
 import { approveRecovery, reconcileRecovery, recordVendorUpdate, startRecoveryRequest, verifyRecovery } from '@/recovery/model'
 import type { Finding } from '@/types'
+import { settlementKey } from '@/recovery/financials'
+import type { SettlementInput } from '@/recovery/model'
 import { RecoveryAccountingPanel, RecoveryProgressPanel } from './RecoveryJourney'
 import { InternalReviewPanel } from './RecoveryPanels'
 
@@ -97,4 +99,68 @@ it('lets a reconciled case correct its accounting note without reopening settlem
   fireEvent.change(screen.getByLabelText('Where it’s recorded in your books'), { target: { value: 'Corrected entry' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save reconciliation' }))
   expect(onReconcile).toHaveBeenCalledWith(finding.id, 'Corrected entry', 'Payment retry')
+})
+
+const open = () => startRecoveryRequest(approveRecovery(confirmCase(null), { knownBeforeReclaim: false }), 1000)
+const day = (time: number) => { const d = new Date(time); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
+function moneyTab(state = open()) {
+  const onVerify = vi.fn<(id: string, proof: SettlementInput) => void>()
+  const onVendorUpdate = vi.fn()
+  render(<RecoveryProgressPanel finding={finding} state={state} onVendorUpdate={onVendorUpdate} onFollowUp={vi.fn()} onVerify={onVerify} onClose={vi.fn()} />)
+  fireEvent.click(screen.getByRole('tab', { name: 'Record money back' }))
+  return { onVerify, onVendorUpdate, record: () => fireEvent.click(screen.getByRole('button', { name: 'Record settled value' })) }
+}
+
+it('records the day the money arrived, and refuses a day that has not happened', () => {
+  const { onVerify, record } = moneyTab()
+  const date = screen.getByLabelText('Date it arrived')
+  expect(date).toHaveValue(day(Date.now()))
+  fireEvent.change(screen.getByLabelText('Settlement reference'), { target: { value: 'ACH-1' } })
+  fireEvent.change(date, { target: { value: day(Date.now() + 3 * 86_400_000) } })
+  record()
+  expect(screen.getByRole('alert')).toHaveTextContent(/future/)
+  fireEvent.change(date, { target: { value: '2026-01-15' } })
+  record()
+  expect(day(onVerify.mock.calls[0][1].settledAt)).toBe('2026-01-15')
+})
+
+it('asks before recording more than was requested, and says what will not count', () => {
+  const { onVerify, record } = moneyTab()
+  fireEvent.change(screen.getByLabelText('Amount settled'), { target: { value: '1,050' } })
+  fireEvent.change(screen.getByLabelText('Settlement reference'), { target: { value: 'ACH-1' } })
+  record()
+  expect(screen.getByRole('alert')).toHaveTextContent('$50.00 more than the $1,000.00 still open')
+  expect(onVerify).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('checkbox', { name: /\$50\.00 more than the request arrived.*not counted/ }))
+  record()
+  expect(onVerify).toHaveBeenCalledWith(finding.id, expect.objectContaining({ amount: 1050, excessConfirmed: true }))
+  const settled = verifyRecovery(open(), onVerify.mock.calls[0][1])
+  expect(settled.recoveredAmount).toBe(1000)
+})
+
+it('corrects or removes one recorded return from the open case', () => {
+  const state = verifyRecovery(verifyRecovery(open(), { amount: 300, method: 'refund', source: 'bank', reference: 'ACH-1', settledAt: Date.now() }), { amount: 40, method: 'refund', source: 'bank', reference: 'ACH-2', settledAt: Date.now() })
+  const { onVerify } = moneyTab(state)
+  fireEvent.click(screen.getByRole('button', { name: /Correct the \$40\.00 return, ACH-2/ }))
+  expect(screen.getByLabelText('Amount settled')).toHaveValue('40.00')
+  expect(screen.getByLabelText('Settlement reference')).toHaveValue('ACH-2')
+  fireEvent.change(screen.getByLabelText('Amount settled'), { target: { value: '400' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save correction' }))
+  const key = settlementKey({ method: 'refund', reference: 'ACH-2' })
+  expect(onVerify).toHaveBeenLastCalledWith(finding.id, expect.objectContaining({ amount: 400, replaces: key }))
+  expect(verifyRecovery(state, onVerify.mock.calls[0][1]).recoveredAmount).toBe(700)
+  fireEvent.click(screen.getByRole('button', { name: /Correct the \$40\.00 return, ACH-2/ }))
+  fireEvent.click(screen.getByRole('button', { name: 'Remove this return' }))
+  expect(verifyRecovery(state, onVerify.mock.calls[1][1]).recoveredAmount).toBe(300)
+})
+
+it('refuses a $0 vendor figure before it reaches the server', () => {
+  const { onVendorUpdate } = moneyTab()
+  fireEvent.click(screen.getByRole('tab', { name: 'Log a reply' }))
+  fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'promised' } })
+  fireEvent.change(screen.getByLabelText('Amount mentioned (optional)'), { target: { value: '0' } })
+  fireEvent.change(screen.getByLabelText('Conversation note'), { target: { value: 'Refund coming' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Add update' }))
+  expect(screen.getByRole('alert')).toHaveTextContent('above $0')
+  expect(onVendorUpdate).not.toHaveBeenCalled()
 })

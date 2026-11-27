@@ -102,6 +102,16 @@ class Client {
   }
   get = (p: string) => this.call(p)
   post = (p: string, json: unknown = {}) => this.call(p, { method: 'POST', json })
+  put = (p: string, json: unknown) => this.call(p, { method: 'PUT', json })
+}
+
+/** A minimal audit saved on the server, so it can be linked. */
+const savedAudit = async (c: Client, id: string) => {
+  const res = await c.put(`/api/projects/${id}`, {
+    id, name: 'Linked audit', sourceLabel: 'quickbooks.csv', mode: 'upload', createdAt: 1, updatedAt: 2,
+    environment: { records: [{ id: `${id}-r1`, vendor: 'Acme Supply', invoiceNumber: 'INV-1', invoiceDate: '2026-08-01', paymentDate: '2026-08-02', invoiceAmount: 1250, amountPaid: 1250 }], imports: [], result: { findings: [] } },
+  })
+  expect(res.status).toBe(200)
 }
 
 const person = (first: string, email: string) => ({ firstName: first, lastName: 'Test', email, company: `${first} Co`, password: 'correct-horse-battery', confirmPassword: 'correct-horse-battery', acceptedTerms: true, termsVersion: '2026-01' })
@@ -219,6 +229,7 @@ describe('the audit a connection keeps up to date', () => {
     expect((await alice.post('/api/integrations/quickbooks/link', { auditId: 'project_1' })).status).toBe(409)
     await connect(alice)
     expect((await status(alice)).linkedAuditId).toBeNull()
+    await savedAudit(alice, 'project_1')
     expect((await alice.post('/api/integrations/quickbooks/link', { auditId: 'project_1' })).body).toEqual({ ok: true, linkedAuditId: 'project_1' })
     expect((await status(alice)).linkedAuditId).toBe('project_1')
 
@@ -227,7 +238,7 @@ describe('the audit a connection keeps up to date', () => {
     await connect(alice, 'good-code', '1234567890')
     expect((await status(alice)).linkedAuditId).toBeNull()
 
-    await alice.post('/api/integrations/quickbooks/link', { auditId: 'project_2' })
+    expect((await alice.post('/api/integrations/quickbooks/link', { auditId: 'project_1' })).status).toBe(200)
     await alice.post('/api/integrations/quickbooks/disconnect')
     await connect(alice, 'good-code', '1234567890')
     expect((await status(alice)).linkedAuditId).toBeNull()
@@ -242,6 +253,21 @@ describe('the audit a connection keeps up to date', () => {
     const bob = await signedIn('Bob', 'bob@example.com')
     expect((await bob.post('/api/integrations/quickbooks/link', { auditId: 'project_9' })).status).toBe(409)
     expect((await status(alice)).linkedAuditId).toBeNull()
+  })
+
+  it('refuses an audit the account has not saved, including another account’s audit (S8)', async () => {
+    const alice = await signedIn('Alice', 'alice@example.com')
+    const bob = await signedIn('Bob', 'bob@example.com')
+    await connect(alice)
+    await connect(bob)
+    await savedAudit(alice, 'alice_audit')
+    const missing = await alice.post('/api/integrations/quickbooks/link', { auditId: 'never_saved' })
+    expect(missing.status).toBe(404)
+    expect(missing.body.code).toBe('audit_not_found')
+    expect((await bob.post('/api/integrations/quickbooks/link', { auditId: 'alice_audit' })).status).toBe(404)
+    expect((await status(bob)).linkedAuditId).toBeNull()
+    expect((await alice.post('/api/integrations/quickbooks/link', { auditId: 'alice_audit' })).status).toBe(200)
+    expect((await status(alice)).linkedAuditId).toBe('alice_audit')
   })
 })
 
@@ -413,5 +439,25 @@ describe.each([
     const err = await failing.query(REALM, 'a', 'select * from Bill').catch((e: Error) => e)
     expect(err.message).toBe('QuickBooks read failed (500, intuit_tid 1-abc-123).')
     await expect(client.companyInfo('../../v3/company/1/bill', 'a')).rejects.toThrow(/company id/)
+  })
+})
+
+describe('the QuickBooks client surface (C4.3)', () => {
+  it('exposes only sign-in and read methods, so a write method cannot be added without failing this test', () => {
+    const client = createQuickBooksClient('id', 'secret', (async () => new Response('{}')) as typeof fetch)
+    const methods = Object.keys(client).filter((k) => typeof (client as unknown as Record<string, unknown>)[k] === 'function').sort()
+    expect(methods).toEqual(['authorizationUrl', 'changes', 'companyInfo', 'exchangeCode', 'query', 'refresh', 'revoke'])
+  })
+
+  it('refuses a SELECT that smuggles a second statement or reads outside the ledger entities', async () => {
+    const seen: string[] = []
+    const client = createQuickBooksClient('id', 'secret', (async (_input: string | URL | Request, init?: RequestInit) => {
+      seen.push(init?.method ?? 'GET')
+      return Response.json({ QueryResponse: {} })
+    }) as typeof fetch)
+    await expect(client.query(REALM, 'a', 'update Bill set TotalAmt = 0')).rejects.toThrow(/Only SELECT/)
+    await expect(client.query(REALM, 'a', ' select * from Bill')).rejects.toThrow(/Only SELECT/)
+    await expect(client.query(REALM, 'a', 'select * from Payment')).rejects.toThrow(/ledger entities/)
+    expect(seen).toEqual([])
   })
 })

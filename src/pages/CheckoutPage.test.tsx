@@ -43,6 +43,13 @@ describe('checkout', () => {
     expect(screen.queryByRole('button', { name: /Subscribe/ })).not.toBeInTheDocument()
   })
 
+  it('the card-update page asks for a login and comes back to itself', async () => {
+    mountAt('?card=update')
+    expect(await screen.findByRole('heading', { name: 'Update your card' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', `/login?next=${encodeURIComponent('/checkout?card=update')}`)
+    expect(screen.queryByRole('complementary', { name: 'Order summary' })).not.toBeInTheDocument()
+  })
+
   it('a link without a paid plan goes back to Plans', async () => {
     const replace = vi.fn()
     vi.stubGlobal('location', { ...window.location, search: '?plan=free', replace })

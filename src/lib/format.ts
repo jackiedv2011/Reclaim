@@ -1,19 +1,38 @@
-const VENDOR_SUFFIXES = new Set(['inc', 'llc', 'ltd', 'co', 'corp'])
+/** Words that say what kind of company a vendor is, not which one. Dotted forms ("L.L.C.") are joined before this is read. */
+const VENDOR_SUFFIXES = new Set(['inc', 'incorporated', 'llc', 'llp', 'lp', 'pllc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'plc', 'gmbh', 'pty', 'sarl', 'srl', 'bv', 'nv', 'ag'])
 
-/** Lowercase, trim, collapse whitespace, strip trailing punctuation and common
- * legal suffixes so the same vendor matches across minor spelling variants. */
+/**
+ * One spelling for a vendor name, so the same vendor matches across the ways
+ * people key it: case, punctuation, accents, apostrophes, "&" for "and", dots
+ * and spaces in initials, a leading "The" and trailing legal words. Digits are
+ * never dropped or merged: "Station 1042" and "Station 1043" stay different.
+ */
 export function normalizeVendor(vendor: string): string {
-  const cleaned = vendor
+  const tokens = vendor
     .toLowerCase()
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .replace(/['’‘`´]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
-    .replace(/\s+/g, ' ')
-    .replace(/[.,]+$/g, '')
+    .split(' ')
+    .filter(Boolean)
 
-  const words = cleaned.split(' ')
-  while (words.length > 1 && VENDOR_SUFFIXES.has(words[words.length - 1].replace(/[.,]/g, ''))) {
-    words.pop()
+  // "a b c supply" and "j p morgan" are initials: join runs of single letters.
+  let words: string[] = []
+  let initials = false
+  for (const token of tokens) {
+    const single = /^\p{L}$/u.test(token)
+    if (single && initials) words[words.length - 1] += token
+    else words.push(token)
+    initials = single
   }
-  return words.join(' ').trim()
+
+  if (words.length > 1 && words[0] === 'the') words = words.slice(1)
+  while (words.length > 1 && (VENDOR_SUFFIXES.has(words[words.length - 1]) || words[words.length - 1] === 'and')) words.pop()
+  // A name made only of symbols keeps its own spelling rather than matching every other one.
+  return words.join(' ') || vendor.toLowerCase().trim().replace(/\s+/g, ' ')
 }
 
 /**
@@ -35,6 +54,91 @@ export function parseCurrency(raw: string | null | undefined): number | null {
   return Number.isFinite(value) ? value : null
 }
 
+/**
+ * How a file writes decimals: "1,234.56", "1.234,56", or the first with
+ * three-decimal amounts ("1.500") refused because the file holds both.
+ */
+export type AmountStyle = 'point' | 'comma' | 'point-strict'
+
+const CURRENCY_MARKS: Record<string, string | null> = { $: null, 'us$': 'USD', 'ca$': 'CAD', 'c$': 'CAD', 'a$': 'AUD', 'au$': 'AUD', 'nz$': 'NZD', '€': 'EUR', '£': 'GBP' }
+export const CURRENCY_CODES = 'usd eur gbp cad aud nzd chf sek nok dkk isk inr sgd hkd zar mxn brl jpy cny pln aed sar czk huf ron bgn try ils thb idr myr php krw twd vnd clp cop pen ars egp ngn kes ghs pkr bdt lkr uah qar kwd bhd omr jod mad'.split(' ')
+const CURRENCY_CODE = CURRENCY_CODES.join('|')
+const MARK = `(?:us\\$|ca\\$|c\\$|au\\$|a\\$|nz\\$|\\$|€|£|${CURRENCY_CODE})`
+const MARK_FIRST = new RegExp(`^(${MARK})(?![a-z])`, 'i')
+const MARK_LAST = new RegExp(`(?<![a-z])(${MARK})$`, 'i')
+
+/**
+ * An amount with the currency written beside it, when there is one. A currency
+ * is never dropped: "€100" is 100 and EUR, so it can't pass for dollars.
+ * Accepts what exports write for a negative: -5, 5-, (5), and a typographic
+ * minus. CR and DR are refused, because which of them is money out depends on
+ * whose books they are.
+ */
+export function parseMoney(raw: string | null | undefined, style: AmountStyle = 'point'): { amount: number; currency: string | null } | null {
+  if (raw === null || raw === undefined) return null
+  let text = raw.replace(/[\u2212\u2012\u2013]/g, '-').replace(/[\s\u00a0\u202f]/g, '')
+  if (text === '' || /^n\/?a$/i.test(text)) return null
+  let negative = false
+  const sign = (pattern: RegExp) => {
+    const match = text.match(pattern)
+    if (!match || negative) return
+    negative = true
+    text = match[1]
+  }
+  sign(/^\((.*)\)$/)
+  sign(/^-(.*)$/)
+  sign(/^(.*)-$/)
+  const mark = text.match(MARK_FIRST) ?? text.match(MARK_LAST)
+  let currency: string | null = null
+  if (mark) {
+    const found = mark[1].toLowerCase()
+    currency = Object.hasOwn(CURRENCY_MARKS, found) ? CURRENCY_MARKS[found] : found.toUpperCase()
+    text = text.match(MARK_FIRST) ? text.slice(mark[0].length) : text.slice(0, -mark[0].length)
+    sign(/^\((.*)\)$/)
+    sign(/^-(.*)$/)
+    sign(/^(.*)-$/)
+  }
+  if (style === 'comma') {
+    if (!/^(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?$|^,\d+$/.test(text)) return null
+    text = text.replace(/\./g, '').replace(',', '.')
+  } else {
+    if (!/^(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)$/.test(text)) return null
+    if (style === 'point-strict' && /^\d{1,3}\.\d{3}$/.test(text)) return null
+    text = text.replace(/,/g, '')
+  }
+  const value = Number(text)
+  return Number.isFinite(value) ? { amount: negative && value !== 0 ? -value : value, currency } : null
+}
+
+const CURRENCY_NAMES: Record<string, string> = { $: 'USD', us$: 'USD', 'us dollar': 'USD', 'us dollars': 'USD', 'u.s. dollar': 'USD', 'u.s. dollars': 'USD', dollar: 'USD', dollars: 'USD', 'united states dollar': 'USD', '€': 'EUR', euro: 'EUR', euros: 'EUR', '£': 'GBP', 'pound sterling': 'GBP', 'british pound': 'GBP', c$: 'CAD', ca$: 'CAD', 'canadian dollar': 'CAD', a$: 'AUD', au$: 'AUD', 'australian dollar': 'AUD' }
+
+/** The three-letter code for what people type in a currency column, so "$", "US Dollar" and "usd" are one currency. */
+export function canonicalCurrency(raw: string | null | undefined): string | null {
+  const text = raw?.trim()
+  return text ? CURRENCY_NAMES[text.toLowerCase()] ?? text.toUpperCase() : null
+}
+
+/** A calendar day as YYYY-MM-DD. Days have no time zone, so they are never stored as an instant. */
+export function isoDay(date: Date): string {
+  return `${String(date.getFullYear()).padStart(4, '0')}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+/**
+ * The calendar day a stored date stands for. Older audits stored local midnight
+ * as an instant ("2026-01-05T05:00:00.000Z" from New York, "2026-01-04T23:00…"
+ * from Paris); the hour says which side of UTC it was written on, so the day
+ * comes back as it was typed wherever it is opened.
+ */
+export function storedDay(value: string | Date | null | undefined): Date | null {
+  if (value === null || value === undefined) return null
+  if (value instanceof Date) return value
+  const day = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (day) return new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]))
+  const instant = new Date(value)
+  if (Number.isNaN(instant.getTime())) return null
+  return new Date(instant.getUTCFullYear(), instant.getUTCMonth(), instant.getUTCDate() + (instant.getUTCHours() >= 11 ? 1 : 0))
+}
+
 /** Whole cents, so two amounts compare the way a bookkeeper reads them rather than as floats. */
 export function toCents(value: number): number {
   return Math.round(value * 100)
@@ -46,14 +150,60 @@ function buildLocalDate(y: number, m: number, d: number): Date | null {
   return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d ? date : null
 }
 
+export type DateOrder = 'month-first' | 'day-first'
+
+const MONTHS: Record<string, number> = {}
+;['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'].forEach((name, index) => {
+  MONTHS[name] = index + 1
+  MONTHS[name.slice(0, 3)] = index + 1
+})
+MONTHS.sept = 9
+
+/** Two-digit years are how Excel writes m/d/yy; 00–69 are 2000s, 70–99 are 1900s. */
+function fullYear(raw: string): number {
+  return raw.length === 2 ? (Number(raw) < 70 ? 2000 : 1900) + Number(raw) : Number(raw)
+}
+
+/** A time after a date says nothing about the day. */
+const withoutTime = (value: string) => value.replace(/(?:[T ]|,\s*)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:[ap]\.?m\.?)?$/i, '')
+
+/** The parts of a date written only in numbers whose day and month could be either way round, as they stand in the cell. */
+export function numericDateParts(raw: string | null | undefined): { first: number; second: number; year: string } | null {
+  const match = raw === null || raw === undefined ? null : withoutTime(raw.trim()).match(/^(\d{1,2})([/.-])(\d{1,2})\2(\d{4}|\d{2})$/)
+  return match ? { first: Number(match[1]), second: Number(match[3]), year: match[4] } : null
+}
+
+const GAP = '(?:\\s*[-/,]\\s*|\\.?,?\\s+)'
+const DAY = '(\\d{1,2})(?:st|nd|rd|th)?'
+const YEAR = "'?(\\d{4}|\\d{2})"
+const WEEKDAY = /^(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)(?:day|nesday|rsday|sday|urday)?[.,]?\s+/
+const DAY_MONTH_YEAR = new RegExp(`^${DAY}${GAP}([a-z]+)${GAP}${YEAR}$`)
+const MONTH_DAY_YEAR = new RegExp(`^([a-z]+)${GAP}${DAY}${GAP}${YEAR}$`)
+const YEAR_MONTH_DAY = new RegExp(`^(\\d{4})${GAP}([a-z]+)${GAP}${DAY}$`)
+
+/** "4 Mar 2026", "04-Mar-26", "March 4, 2026", "Wed, 4th March 2026", "2026-Mar-04". The month is spelled out, so there is no order to ask about. */
+function parseMonthNameDate(value: string): Date | null {
+  const text = value.toLowerCase().replace(WEEKDAY, '')
+  const build = (year: string, month: string, day: string) => (Object.hasOwn(MONTHS, month) ? buildLocalDate(fullYear(year), MONTHS[month], Number(day)) : null)
+  const dayFirst = text.match(DAY_MONTH_YEAR)
+  if (dayFirst) return build(dayFirst[3], dayFirst[2], dayFirst[1])
+  const monthFirst = text.match(MONTH_DAY_YEAR)
+  if (monthFirst) return build(monthFirst[3], monthFirst[1], monthFirst[2])
+  const yearFirst = text.match(YEAR_MONTH_DAY)
+  if (yearFirst) return build(yearFirst[1], yearFirst[2], yearFirst[3])
+  return null
+}
+
 /**
  * Parse a date cell as a local date (avoids UTC off-by-one). Accepts the
  * formats accounting exports actually use: ISO `YYYY-MM-DD` (with or without a
- * time suffix), `YYYY/MM/DD`, and US `MM/DD/YYYY` / `M/D/YYYY` / `M/D/YY`. A
- * slash date is always read month-first; anything else is null so the row is
- * reported as skipped rather than guessed at.
+ * time suffix), `YYYY/MM/DD`, `YYYYMMDD`, a month written as a word, and an
+ * all-number `04/03/2026` (or with dots or dashes), which is read in `order`. The caller decides the order for the
+ * whole file (see dateOrderEvidence in csvMapping.ts); a date that does not
+ * exist in that order is null, so the row is reported as skipped rather than
+ * quietly read the other way round.
  */
-export function parseDate(raw: string | null | undefined): Date | null {
+export function parseDate(raw: string | null | undefined, order: DateOrder = 'month-first'): Date | null {
   if (raw === null || raw === undefined) return null
   const trimmed = raw.trim()
   if (trimmed === '' || trimmed.toLowerCase() === 'na' || trimmed.toLowerCase() === 'n/a') return null
@@ -61,14 +211,19 @@ export function parseDate(raw: string | null | undefined): Date | null {
   const iso = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/)
   if (iso) return buildLocalDate(Number(iso[1]), Number(iso[2]), Number(iso[3]))
 
-  const us = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4}|\d{2})$/)
-  if (us) {
-    // Two-digit years are how Excel writes m/d/yy; 00–69 are 2000s, 70–99 are 1900s.
-    const year = us[3].length === 2 ? (Number(us[3]) < 70 ? 2000 : 1900) + Number(us[3]) : Number(us[3])
-    return buildLocalDate(year, Number(us[1]), Number(us[2]))
+  const yearFirst = withoutTime(trimmed).match(/^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})$/)
+  if (yearFirst) return buildLocalDate(Number(yearFirst[1]), Number(yearFirst[3]), Number(yearFirst[4]))
+
+  const compact = trimmed.match(/^((?:19|20)\d{2})(\d{2})(\d{2})$/)
+  if (compact) return buildLocalDate(Number(compact[1]), Number(compact[2]), Number(compact[3]))
+
+  const numeric = numericDateParts(trimmed)
+  if (numeric) {
+    const [month, day] = order === 'month-first' ? [numeric.first, numeric.second] : [numeric.second, numeric.first]
+    return buildLocalDate(fullYear(numeric.year), month, day)
   }
 
-  return null
+  return parseMonthNameDate(withoutTime(trimmed))
 }
 
 export function daysBetween(a: Date, b: Date): number {
@@ -76,13 +231,27 @@ export function daysBetween(a: Date, b: Date): number {
   return Math.round((b.getTime() - a.getTime()) / msPerDay)
 }
 
-export function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value)
+const currencyFormatters = new Map<string, Intl.NumberFormat | null>()
+
+function currencyFormatter(code: string): Intl.NumberFormat | null {
+  let formatter = currencyFormatters.get(code)
+  if (formatter === undefined) {
+    try {
+      formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: code, minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    } catch {
+      formatter = null
+    }
+    currencyFormatters.set(code, formatter)
+  }
+  return formatter
+}
+
+/** Dollars unless the rows say otherwise. A code no one recognises is printed as written in the file, never as dollars. */
+export function formatCurrency(value: number, currency?: string | null): string {
+  const code = currency?.trim().toUpperCase() || 'USD'
+  const formatter = currencyFormatter(code)
+  if (formatter) return formatter.format(value)
+  return `${code} ${new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`
 }
 
 export function formatDate(date: Date | null): string {
@@ -98,28 +267,50 @@ export interface ParsedTerms {
   discountPct: number
   discountDays: number
   netDays: number
+  /** The terms say EOM. See parseTerms for how the discount window is read. */
+  endOfMonth?: true
 }
 
 /** Above this an "early-payment discount" is almost certainly a keying error, and claiming it would ask a vendor for most of an invoice back. */
 const MAX_DISCOUNT_PCT = 10
 
+const TERMS_DISCOUNT = '(\\d+(?:\\.\\d+)?)\\s*(?:%\\s*/?|/|\\s)\\s*(\\d+)\\s*(?:days?)?'
+const TERMS_NET = '(?:net|n)\\s*[/-]?\\s*(\\d+)\\s*(?:days?)?'
+const TERMS_EOM = '(?:[\\s,]*(e\\.?o\\.?m\\.?|end of month))?'
+const DISCOUNT_FIRST = new RegExp(`^${TERMS_DISCOUNT}${TERMS_EOM}\\s*[,;/-]?\\s*${TERMS_NET}${TERMS_EOM}\\.?$`, 'i')
+const NET_FIRST = new RegExp(`^${TERMS_NET}${TERMS_EOM}(?:\\s*[,;/-]\\s*|\\s+)${TERMS_DISCOUNT}${TERMS_EOM}\\.?$`, 'i')
+
 /**
  * Parse early-payment terms into discount %, discount window, and net days.
  * Accepts the spellings exports actually use — "2/10 net 30", "2/10, n/30",
- * "2% 10 net 30", "2/10 N30" — and rejects terms that cannot be real
- * (0% or implausibly large discounts, a window no shorter than the net period).
+ * "2% 10 Days Net 30 Days", "2/10-N30", "Net 30, 2/10" — and rejects terms that
+ * cannot be real (0% or implausibly large discounts, a window no shorter than
+ * the net period).
+ *
+ * "EOM" is read both ways people use it: the window may run from the invoice
+ * date, or from the end of the invoice's month. The terms are accepted and
+ * marked, and the discount checks only report what holds under both readings:
+ * a discount was earned within `discountDays` of the invoice date, and was
+ * missed only after `discountDays` past the end of that month.
  */
 export function parseTerms(raw: string | null): ParsedTerms | null {
   if (!raw) return null
-  const match = raw
-    .trim()
-    .match(/^(\d+(?:\.\d+)?)\s*%?\s*(?:\/\s*|\s+)(\d+)\s*(?:days?)?\s*[,/]?\s*(?:net|n)\s*\/?\s*(\d+)$/i)
-  if (!match) return null
-  const [, pct, discountDays, netDays] = match
-  const terms = {
+  const text = raw.trim()
+  let pct: string, discountDays: string, netDays: string, eom: boolean
+  const discountFirst = text.match(DISCOUNT_FIRST)
+  const netFirst = discountFirst ? null : text.match(NET_FIRST)
+  if (discountFirst) {
+    ;[, pct, discountDays, , netDays] = discountFirst
+    eom = Boolean(discountFirst[3] || discountFirst[5])
+  } else if (netFirst) {
+    ;[, netDays, , pct, discountDays] = netFirst
+    eom = Boolean(netFirst[2] || netFirst[5])
+  } else return null
+  const terms: ParsedTerms = {
     discountPct: parseFloat(pct),
     discountDays: parseInt(discountDays, 10),
     netDays: parseInt(netDays, 10),
+    ...(eom ? { endOfMonth: true as const } : {}),
   }
   if (!(terms.discountPct > 0 && terms.discountPct <= MAX_DISCOUNT_PCT)) return null
   if (!(terms.discountDays > 0 && terms.discountDays < terms.netDays)) return null

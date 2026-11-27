@@ -71,9 +71,10 @@ export function PlanBilling({ recovered }: { recovered: number }) {
                   : `Next subscription bill: ${day(billing.currentPeriodEnd!)}. Automated success-fee billing is disabled.`}
               </p>
             ) : null}
-            {billing?.status === 'past_due' ? (
+            {billing?.status === 'past_due' || billing?.status === 'unpaid' ? (
               <p className="wk-alert" role="alert" style={{ marginTop: 10, fontSize: 13.5 }} data-testid="plan-past-due">
-                Your last payment didn’t go through. Stripe will try the card again over the next few days, and {PLAN_LABEL[plan]} stays on meanwhile.
+                Your last payment didn’t go through. Stripe will try the card again over the next few days, and {PLAN_LABEL[plan]} stays on meanwhile.{' '}
+                <a className="wk-linklike" href="/checkout?card=update">Update your card</a>
               </p>
             ) : null}
 

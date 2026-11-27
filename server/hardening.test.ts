@@ -12,7 +12,7 @@ import { DevMailer } from './mailer.ts'
 const devConfig = (extra: Record<string, string> = {}) =>
   loadConfig({ NODE_ENV: 'test', DATABASE_PATH: ':memory:', APP_ORIGIN: 'http://localhost:0', REQUIRE_EMAIL_VERIFICATION: 'false', ...extra })
 const prodConfig = () =>
-  loadConfig({ NODE_ENV: 'production', DATABASE_PATH: ':memory:', APP_ORIGIN: 'https://app.reclaim.example', RESEND_API_KEY: 're_test', EMAIL_FROM: 'no-reply@reclaim.example', DATA_KEY: randomBytes(32).toString('base64') })
+  loadConfig({ NODE_ENV: 'production', DATABASE_PATH: ':memory:', APP_ORIGIN: 'https://app.reclaim.example', RESEND_API_KEY: 're_test', EMAIL_FROM: 'no-reply@reclaim.example', TRUST_PROXY: '1', DATA_KEY: randomBytes(32).toString('base64') })
 
 let googleIdentity: GoogleIdentity | null = null
 const fakeGoogle: GoogleClient = {
@@ -199,8 +199,12 @@ describe('password reset', () => {
     await new Client().post('/api/auth/signup', person('pat@example.com'))
     await new Client().post('/api/auth/forgot-password', { email: 'pat@example.com' })
     await new Client().post('/api/auth/forgot-password', { email: 'pat@example.com' })
-    const links = (app!.db.prepare("SELECT link FROM mailbox WHERE subject LIKE 'Reset%' ORDER BY id").all() as Array<{ link: string }>).map((m) => new URL(m.link).searchParams.get('token'))
-    expect(links).toHaveLength(2)
+    // Reset emails go out after the answer, so the two can arrive a moment later.
+    const links = await vi.waitFor(() => {
+      const sent = (app!.db.prepare("SELECT link FROM mailbox WHERE subject LIKE 'Reset%' ORDER BY id").all() as Array<{ link: string }>).map((m) => new URL(m.link).searchParams.get('token'))
+      expect(sent).toHaveLength(2)
+      return sent
+    })
     expect((await new Client().post('/api/auth/reset-password', { token: links[1], password: 'brand-new-password', confirmPassword: 'brand-new-password' })).status).toBe(200)
     const older = await new Client().post('/api/auth/reset-password', { token: links[0], password: 'another-password', confirmPassword: 'another-password' })
     expect(older.status).toBe(400)

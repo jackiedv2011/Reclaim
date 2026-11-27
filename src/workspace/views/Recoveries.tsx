@@ -1,10 +1,10 @@
 import { ArrowRight, CalendarClock } from 'lucide-react'
-import { formatCurrency, plural } from '@/lib/format'
+import { plural } from '@/lib/format'
 import type { RecoveryStage } from '@/ledger/caseState'
 import type { LedgerEnvironment } from '@/ledger/store'
 import { recoveryNextAction, recoveryStatusLabel, requiresCustomerAction } from '@/recovery/model'
-import { activeReturned, verifiedReturned } from '@/recovery/financials'
-import { ladder, recoveries, vendorCommitments, type Opportunity } from '../selectors'
+import { caseAmount, figuresOf, ladder, recoveries, requestsNote, vendorCommitments } from '../selectors'
+import { exposureCurrencyOf, findingMoney, otherCurrencies, totalsByCurrency } from '../money'
 import { useHeadlineMoney } from '../preferences'
 import { CountUp } from './CountUp'
 import { MiniPie } from './MiniPie'
@@ -16,15 +16,6 @@ const LANES: Array<{ stage: RecoveryStage; title: string; hint: string }> = [
   { stage: 'not_recovered', title: 'Closed', hint: 'Closed without money back.' },
 ]
 const short = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
-
-/** What a case is worth right now: the open balance while it is out, what came back once it is done. */
-function caseValue(o: Opportunity): { amount: number; label: string } {
-  const { state, finding } = o
-  if (state.recoveryStage === 'recovered') return { amount: verifiedReturned(state), label: verifiedReturned(state) > 0 ? 'returned' : 'amount missing' }
-  if (state.recoveryStage === 'requested') return { amount: Math.max(0, (state.requestedAmount ?? 0) - activeReturned(state)), label: state.requestedAmount == null ? 'amount missing' : 'outstanding' }
-  if (state.recoveryStage === 'not_recovered') return { amount: state.requestedAmount ?? 0, label: state.requestedAmount == null ? 'amount missing' : 'unreturned' }
-  return { amount: finding.dollarImpact, label: 'to request' }
-}
 
 function dueText(dueAt: number | null | undefined, now: number): string | null {
   if (!dueAt) return null
@@ -41,6 +32,7 @@ export function Recoveries({ env, onOpenCase, onOpenFindings }: { env: LedgerEnv
   const commitments = vendorCommitments(env)
   const money = useHeadlineMoney()
   const now = Date.now()
+  const returnedElsewhere = otherCurrencies(l.recoveredByCurrency)
   // Every pie is a share of the same whole: what is still out plus what came back.
   const pursued = l.inRecovery + l.recovered
   const pie = (value: number, color: string, label: string) => (
@@ -75,7 +67,7 @@ export function Recoveries({ env, onOpenCase, onOpenFindings }: { env: LedgerEnv
         <div className="wk-total" data-total="inRecovery" data-amount={l.inRecovery} data-empty={l.inRecovery === 0 || undefined}>
           <span className="wk-label">In recovery</span>
           <strong className="wk-total-value"><CountUp value={l.inRecovery} format={money} /></strong>
-          <span className="wk-total-note">{l.counts.inRecovery} {plural(l.counts.inRecovery, 'request')} out with vendors</span>
+          <span className="wk-total-note">{requestsNote(l)}</span>
           {pie(l.inRecovery, 'var(--st-waiting-dot)', 'In recovery')}
         </div>
         <div className="wk-total" data-total="agreed" data-amount={commitments.confirmed} data-empty={commitments.confirmed === 0 || undefined}>
@@ -93,7 +85,7 @@ export function Recoveries({ env, onOpenCase, onOpenFindings }: { env: LedgerEnv
         <div className="wk-total" data-total="recovered" data-amount={l.recovered} data-empty={l.recovered === 0 || undefined} data-accent={l.recovered > 0 || undefined}>
           <span className="wk-label">Recovered</span>
           <strong className="wk-total-value" style={l.recovered > 0 ? { color: 'var(--accent-ink)' } : undefined}><CountUp value={l.recovered} format={money} /></strong>
-          <span className="wk-total-note">Only money you recorded as settled</span>
+          <span className="wk-total-note">Only money you recorded as settled{returnedElsewhere ? ` · plus ${returnedElsewhere}` : ''}</span>
           {pie(l.recovered, 'var(--st-back-dot)', 'Recovered')}
         </div>
       </section>
@@ -109,7 +101,7 @@ export function Recoveries({ env, onOpenCase, onOpenFindings }: { env: LedgerEnv
           <div className="wk-queue">
             {needsAction.map((row) => {
               const action = recoveryNextAction(row.state, now)
-              const value = caseValue(row)
+              const value = caseAmount(row, env.result.findings)
               const due = dueText(action.dueAt, now)
               return (
                 <button type="button" key={row.finding.id} className="wk-queue-row" onClick={() => onOpenCase(row.finding.id)} aria-label={`Open ${row.finding.vendor} recovery case`}>
@@ -120,7 +112,7 @@ export function Recoveries({ env, onOpenCase, onOpenFindings }: { env: LedgerEnv
                       <em>{recoveryStatusLabel(row.state)} · {row.typeLabel}</em>
                     </span>
                   </span>
-                  <span className="wk-queue-amount">{formatCurrency(value.amount)}</span>
+                  <span className="wk-queue-amount">{findingMoney(row.finding, value.amount)}</span>
                   <span className="wk-queue-go">Open<ArrowRight aria-hidden="true" /></span>
                 </button>
               )
@@ -132,25 +124,28 @@ export function Recoveries({ env, onOpenCase, onOpenFindings }: { env: LedgerEnv
       <div className="wk-board" aria-label="Every recovery case">
         {LANES.map(({ stage, title, hint }) => {
           const inStage = rows.filter((o) => o.state.recoveryStage === stage)
-          const total = inStage.reduce((sum, o) => sum + caseValue(o).amount, 0)
+          // One figure per currency: a lane never adds dollars to euros.
+          const totals = totalsByCurrency(inStage.map((o) => ({ amount: caseAmount(o, env.result.findings).amount, currency: exposureCurrencyOf(o.finding) })))
+          const total = totals.find((t) => t.currency === 'USD')?.amount ?? 0
           return (
-            <section className="wk-lane" key={stage} data-stage={stage} data-has-money={total > 0 || undefined} data-empty={inStage.length === 0 || undefined} aria-labelledby={`lane-${stage}`}>
+            <section className="wk-lane" key={stage} data-stage={stage} data-has-money={totals.some((t) => t.amount > 0) || undefined} data-empty={inStage.length === 0 || undefined} aria-labelledby={`lane-${stage}`}>
               <div className="wk-lane-head">
                 <h2 id={`lane-${stage}`} style={{ font: '600 13px var(--f-text)' }}>{title}</h2>
                 <span>{inStage.length}</span>
               </div>
-              <div className="wk-lane-total" data-amount={total}>{money(total)}</div>
+              <div className="wk-lane-total" data-amount={total}>{totals.length ? totals.map((t) => money(t.amount, t.currency)).join(' · ') : money(0)}</div>
               {inStage.length ? inStage.map((o) => {
-                const value = caseValue(o)
+                const value = caseAmount(o, env.result.findings)
                 const action = recoveryNextAction(o.state, now)
+                const rest = stage === 'recovered' ? figuresOf(o, env.result.findings).potential : null
                 const due = stage === 'requested' ? dueText(action.dueAt, now) : null
                 return (
                   <button type="button" className="wk-ticket" key={o.finding.id} onClick={() => onOpenCase(o.finding.id)} aria-label={`Open ${o.finding.vendor} recovery case`}>
                     <strong>{o.finding.vendor}</strong>
-                    <span className="wk-ticket-status">{recoveryStatusLabel(o.state)}</span>
+                    <span className="wk-ticket-status">{recoveryStatusLabel(o.state)}{rest ? ` · ${findingMoney(o.finding, rest)} can still be requested` : ''}</span>
                     <span>
                       <em style={{ fontStyle: 'normal' }}>{due ?? value.label}</em>
-                      <b className="wk-ticket-money" data-label={value.label}>{formatCurrency(value.amount)}</b>
+                      <b className="wk-ticket-money" data-label={value.label}>{findingMoney(o.finding, value.amount)}</b>
                     </span>
                   </button>
                 )

@@ -154,3 +154,42 @@ describe('numbered vendor names', () => {
     expect(r.resolveVendorName('Sysco Fodos #214')).toBe(r.resolveVendorName('Sysco Foods #214'))
   })
 })
+
+describe('large vendor lists', () => {
+  it('resolves 50,000 rows and 5,000 vendors in well under two seconds', () => {
+    const first = ['Acme', 'Bright', 'Cedar', 'Delta', 'Evergreen', 'Falcon', 'Granite', 'Harbor', 'Iron', 'Juniper', 'Keystone', 'Lakeside', 'Metro', 'North', 'Orchid', 'Pacific', 'Quarry', 'River', 'Summit', 'Timber']
+    const last = ['Supply', 'Services', 'Foods', 'Electric', 'Plumbing', 'Logistics', 'Partners', 'Printing', 'Roofing', 'Design']
+    const names = Array.from({ length: 5000 }, (_, i) => `${first[i % 20]} ${last[Math.floor(i / 20) % 10]} ${1000 + i} LLC`)
+    const records = Array.from({ length: 50000 }, (_, i) => ({ vendor: names[i % 5000], bankAccountLast4: String(i % 5000).padStart(4, '0') }))
+    records.push({ vendor: 'Evergren Foods 2044', bankAccountLast4: '1044' })
+    const started = performance.now()
+    const result = resolveVendors(records)
+    expect(result.resolveVendorName('Evergren Foods 2044')).toBe('Evergreen Foods 2044 LLC')
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+
+  it('finds exactly what comparing every pair finds', () => {
+    const words = ['acme', 'acne', 'supply', 'suply', 'river', 'rivers', 'stone', 'steel', 'foods', 'co', 'blue', 'bleu', 'bag', '12', '13']
+    let seed = 7
+    const rand = (n: number) => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n
+    const records = Array.from({ length: 160 }, () => ({
+      vendor: Array.from({ length: 1 + rand(5) }, () => words[rand(words.length)]).join(' '),
+      bankAccountLast4: rand(3) ? null : String(1000 + rand(6)),
+    }))
+    const result = resolveVendors(records)
+    // Every pair on its own gives that pair's tier; the groups are their closure, and the review list is the rest.
+    const names = [...new Set(records.map((r) => r.vendor))]
+    const accounts = new Map(names.map((n) => [n, [...new Set(records.filter((r) => r.vendor === n).map((r) => r.bankAccountLast4).filter(Boolean))]]))
+    const pairOf = (a: string, b: string) => resolveVendors([...[a, b].map((vendor) => ({ vendor })), ...[a, b].flatMap((vendor) => accounts.get(vendor)!.map((bankAccountLast4) => ({ vendor, bankAccountLast4 })))])
+    const root = new Map(names.map((n) => [n, n]))
+    const find = (n: string): string => (root.get(n) === n ? n : find(root.get(n)!))
+    const review: Array<[string, string]> = []
+    names.forEach((a, i) => names.slice(i + 1).forEach((b) => {
+      const pair = pairOf(a, b)
+      if (pair.groups.length) root.set(find(a), find(b))
+      else if (pair.needsReview.length) review.push([a, b])
+    }))
+    for (const a of names) for (const b of names) expect(result.resolveVendorName(a) === result.resolveVendorName(b), `${a} / ${b}`).toBe(find(a) === find(b))
+    expect(result.needsReview.map((m) => [m.vendorA, m.vendorB])).toEqual(review.filter(([a, b]) => find(a) !== find(b)))
+  })
+})

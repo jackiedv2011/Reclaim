@@ -1,5 +1,10 @@
-import type { APRecord, ParseResult } from '@/types'
+import type { APRecord, FindingType, ParseResult } from '@/types'
 import { formatDate, parseTerms } from '@/lib/format'
+import { FINDING_TYPE_ORDER } from '@/lib/labels'
+import { referenceStrength } from '@/lib/sourceIdentity'
+
+/** Every check Reclaim has. A file can run some or all of them, see runnableChecks. */
+export const TOTAL_CHECK_COUNT = 8
 
 const REQUIRED_COLUMNS = ['vendor', 'payment_date', 'amount_paid']
 
@@ -14,7 +19,7 @@ export interface DataReadiness {
   skippedCount: number
   missingInvoiceRefCount: number
   availableCheckCount: number
-  totalCheckCount: 7
+  totalCheckCount: typeof TOTAL_CHECK_COUNT
   weakerChecks: WeakerCheck[]
 }
 
@@ -30,6 +35,37 @@ function dateRangeLabel(records: APRecord[]): string | null {
   return `${formatDate(min)} – ${formatDate(max)}`
 }
 
+const hasUsableReference = (r: APRecord) => referenceStrength(r.invoiceNumber) !== 'none'
+const hasInvoiceAmount = (r: APRecord) => r.invoiceAmount !== null && r.invoiceAmount > 0
+
+/**
+ * The checks these records give something to work on, in the product's order.
+ * A blank, all-zero or placeholder reference ("Autopay") is not a reference,
+ * and an invoice amount of zero is not an amount. Near-duplicate and outlier
+ * detection need only a vendor, an amount and a date, so any record runs them.
+ */
+export function runnableChecks(records: APRecord[]): FindingType[] {
+  if (records.length === 0) return []
+  const references = records.some(hasUsableReference)
+  const discounts = records.some((r) => parseTerms(r.terms) !== null && r.invoiceDate !== null && hasInvoiceAmount(r))
+  const can: Record<FindingType, boolean> = {
+    exact_duplicate: references,
+    near_duplicate: true,
+    overpayment: records.some(hasInvoiceAmount),
+    unclaimed_discount: discounts,
+    missed_discount: discounts,
+    bank_account_change: records.some((r) => r.bankAccountLast4 !== null),
+    amount_outlier: true,
+    shared_invoice_number: references,
+  }
+  return FINDING_TYPE_ORDER.filter((type) => can[type])
+}
+
+/** How many of the eight checks these records can run. */
+export function runnableCheckCount(records: APRecord[]): number {
+  return runnableChecks(records).length
+}
+
 /**
  * A truthful summary of the records a single import contributed and the
  * coverage those records can support. Column metadata is optional so older
@@ -41,35 +77,26 @@ export function assessRecordReadiness(
   detectedColumns?: string[]
 ): DataReadiness {
   const vendorCount = new Set(records.map((r) => r.vendor)).size
-  const missingInvoiceRefCount = records.filter((r) => r.invoiceNumber === null).length
-  const hasInvoiceReferences = records.some((r) => r.invoiceNumber !== null)
-  const hasInvoiceAmounts = records.some((r) => r.invoiceAmount !== null)
-  const hasBankAccounts = records.some((r) => r.bankAccountLast4 !== null)
-  const hasDiscountReadyRecord = records.some(
-    (r) => parseTerms(r.terms) !== null && r.invoiceDate !== null && r.invoiceAmount !== null
-  )
+  const missingInvoiceRefCount = records.filter((r) => !hasUsableReference(r)).length
+  const runnable = new Set(runnableChecks(records))
   const provided = new Set(detectedColumns)
   const knowsColumns = detectedColumns !== undefined
   const weakerChecks: WeakerCheck[] = []
-  let availableCheckCount = 7
 
-  if (!hasInvoiceReferences) {
-    availableCheckCount -= 2
+  if (!runnable.has('exact_duplicate')) {
+    const because = knowsColumns && !provided.has('invoice_number') ? 'no invoice-reference column was provided' : 'no usable invoice references were found'
     weakerChecks.push({
-      label: knowsColumns && !provided.has('invoice_number')
-        ? 'Exact and near-duplicate detection are unavailable because no invoice-reference column was provided.'
-        : 'Exact and near-duplicate detection are unavailable because no usable invoice references were found.',
+      label: `Exact-duplicate and shared-invoice-number detection are unavailable because ${because}. Near-duplicate detection still runs, on vendor, amount and date alone, so it is weaker.`,
     })
   } else if (missingInvoiceRefCount > 0) {
     weakerChecks.push({
       label: `Duplicate-invoice detection will be less precise for ${missingInvoiceRefCount} record${
         missingInvoiceRefCount === 1 ? '' : 's'
-      } missing an invoice reference.`,
+      } missing a usable invoice reference.`,
     })
   }
 
-  if (!hasInvoiceAmounts) {
-    availableCheckCount -= 1
+  if (!runnable.has('overpayment')) {
     weakerChecks.push({
       label: knowsColumns && !provided.has('invoice_amount')
         ? 'Overpayment detection is unavailable because no invoice-amount column was provided.'
@@ -77,8 +104,7 @@ export function assessRecordReadiness(
     })
   }
 
-  if (!hasBankAccounts) {
-    availableCheckCount -= 1
+  if (!runnable.has('bank_account_change')) {
     weakerChecks.push({
       label: knowsColumns && !provided.has('bank_account_last4')
         ? 'Bank-account-change detection is unavailable because no bank-account column was provided.'
@@ -86,8 +112,7 @@ export function assessRecordReadiness(
     })
   }
 
-  if (!hasDiscountReadyRecord) {
-    availableCheckCount -= 2
+  if (!runnable.has('unclaimed_discount')) {
     const missingColumns = [
       knowsColumns && !provided.has('terms') ? 'payment terms' : null,
       knowsColumns && !provided.has('invoice_date') ? 'invoice dates' : null,
@@ -106,8 +131,8 @@ export function assessRecordReadiness(
     dateRangeLabel: dateRangeLabel(records),
     skippedCount,
     missingInvoiceRefCount,
-    availableCheckCount,
-    totalCheckCount: 7,
+    availableCheckCount: runnable.size,
+    totalCheckCount: TOTAL_CHECK_COUNT,
     weakerChecks,
   }
 }

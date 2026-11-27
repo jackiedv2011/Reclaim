@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isClaim } from '@/lib/claims'
-import { checkRepeatUpload, rememberUpload } from '@/ledger/uploadRegistry'
-import { repeatMessage } from '../server/uploads.ts'
+import { checkRepeatUpload, forgetUpload, rememberUpload } from '@/ledger/uploadRegistry'
+import { AUDIT_TOO_LARGE, MAX_AUDIT_BYTES, MAX_AUDIT_ROWS, repeatMessage } from '../server/uploads.ts'
+import { SyncNotice } from '@/components/audit/SyncNotice'
 import { useTheme } from '@/workspace/theme'
 import { ArrowLeft, CheckCircle2, Plus } from 'lucide-react'
 import { ImportDialog, type ImportIntent } from '@/components/audit/ImportDialog'
@@ -24,19 +25,23 @@ import { useAuditRoute, loadPersistedContext, type RouteMode } from '@/audit/use
 import {
   loadEnvironment,
   mergeImport,
+  removeImport,
   inspectImport,
   setCaseState,
   getCaseState,
   recordEvidence,
   acknowledgeNewFindings,
+  serializeEnvironment,
   type LedgerEnvironment,
   type MergeImportInput,
 } from '@/ledger/store'
 import {
   createProject,
   deleteProject,
+  findingBefore,
   getActiveProjectId,
   hasMemoryOnlyProjects,
+  latestProject,
   listProjects,
   loadProject,
   migrateLegacyLedger,
@@ -135,7 +140,7 @@ export function AuditApp() {
   const [importNotice, setImportNotice] = useState<string | null>(null)
   const [sampleSession, setSampleSession] = useState(false)
   const [legacy, setLegacy] = useState<LegacySummary | null>(() => legacyProjectsPresent())
-  const [syncState, setSyncState] = useState(() => ({ pending: projectSync.pending, issue: projectSync.syncIssue }))
+  const [syncState, setSyncState] = useState(() => ({ pending: projectSync.pending, issues: projectSync.issues }))
 
   const environmentRef = useRef(environment)
   const projectRef = useRef(project)
@@ -148,11 +153,26 @@ export function AuditApp() {
 
   const refreshProjects = useCallback(() => setProjects(listProjects()), [])
 
+  /** Another tab may have saved this audit since it was read here; build on that copy, so neither tab's decision is lost. */
+  const catchUp = useCallback(() => {
+    const current = projectRef.current
+    if (!current) return
+    const latest = latestProject(current)
+    if (latest === current) return
+    projectRef.current = latest
+    environmentRef.current = latest.environment
+    setProject(latest)
+    setEnvironment(latest.environment)
+  }, [])
+
   useEffect(() => {
-    const refreshSyncState = () => setSyncState({ pending: projectSync.pending, issue: projectSync.syncIssue })
+    const refreshSyncState = () => setSyncState({ pending: projectSync.pending, issues: projectSync.issues })
     const stop = projectSync.onPending(refreshSyncState)
+    refreshSyncState()
     const synced = (event: Event) => {
       const id = (event as CustomEvent<{ id: string }>).detail.id
+      refreshProjects()
+      refreshSyncState()
       if (id !== projectRef.current?.id) return
       const saved = loadProject(id)
       if (!saved) return
@@ -160,15 +180,13 @@ export function AuditApp() {
       environmentRef.current = saved.environment
       setProject(saved)
       setEnvironment(saved.environment)
-      refreshProjects()
-      refreshSyncState()
     }
     window.addEventListener('reclaim:project-synced', synced)
     return () => { stop(); window.removeEventListener('reclaim:project-synced', synced) }
   }, [refreshProjects])
 
-  const downloadLocalCopy = () => {
-    const current = projectRef.current
+  const downloadLocalCopy = (projectId: string) => {
+    const current = (projectId && loadProject(projectId)) || projectRef.current
     if (!current) return
     const url = URL.createObjectURL(new Blob([JSON.stringify(toStorable(current), null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
@@ -212,6 +230,7 @@ export function AuditApp() {
             environmentRef.current = target.environment
           }
         }
+        if (!options.replaceEnvironment) catchUp()
         const base = options.replaceEnvironment ? null : environmentRef.current
         let next: LedgerEnvironment
         if (input.quickbooks) {
@@ -231,12 +250,20 @@ export function AuditApp() {
         } else {
           const inspection = inspectImport(base, input)
           if (inspection.duplicateFile) {
-            setEntryError('This exact file is already in this audit. No records were added.')
+            setEntryError('This exact file is already in this audit, so no records were added. To read it differently, remove it first under Audits, then upload it again.')
             setImportDialogOpen(true)
             return
           }
           next = mergeImport(base, input)
-          setImportNotice(null)
+          // Said where it is seen: a payment left out as a repeat should never be left out quietly.
+          const repeats = inspection.rowResults.filter((row) => row.status === 'exact_duplicate' || row.status === 'possible_overlap').length
+          setImportNotice(repeats > 0 ? `${repeats} ${repeats === 1 ? 'row was' : 'rows were'} already in this audit and not added again. Each is listed under Audits.` : null)
+        }
+        // Said before anything is saved: an audit the account would refuse would otherwise sit in this browser only.
+        if (options.persist !== false && next.records.length > 5_000 && serializeEnvironment(next).length > MAX_AUDIT_BYTES - 64 * 1024) {
+          setEntryError(AUDIT_TOO_LARGE)
+          setImportDialogOpen(true)
+          return
         }
         if (options.persist !== false) {
           const current = projectRef.current
@@ -253,7 +280,8 @@ export function AuditApp() {
           setProject(saved)
           if (input.mode === 'upload') rememberUpload(input.parsed.records, saved.id)
           // This audit is now the one signing in keeps current with that QuickBooks company.
-          if (input.quickbooks && account) void linkQuickBooksAudit(saved.id).then(() => quickBooksRecheck.current?.())
+          // The server links only audits it already holds, so the save goes first.
+          if (input.quickbooks && account) void projectSync.flush().then(() => linkQuickBooksAudit(saved.id)).then(() => quickBooksRecheck.current?.())
           refreshProjects()
           // A new audit counts against the plan once the server has it.
           if (!current || options.replaceEnvironment) void projectSync.flush().then(() => auth?.refreshEntitlements())
@@ -274,7 +302,26 @@ export function AuditApp() {
         setRunning(false)
       }
     },
-    [navigate, refreshProjects, auth, account]
+    [navigate, refreshProjects, auth, account, catchUp]
+  )
+
+  const handleRemoveImport = useCallback(
+    (batchId: string) => {
+      catchUp()
+      const env = environmentRef.current
+      const current = projectRef.current
+      const batch = env?.imports.find((b) => b.id === batchId)
+      if (!env || !current || !batch) return
+      const next = removeImport(env, batchId)
+      const saved = saveProject({ ...current, environment: next, sourceLabel: next.imports.at(-1)?.sourceLabel ?? current.sourceLabel })
+      projectRef.current = saved
+      environmentRef.current = next
+      setProject(saved)
+      setEnvironment(next)
+      refreshProjects()
+      setImportNotice(`Removed “${batch.sourceLabel}”: ${env.records.length - next.records.length} of its payments are out of this audit.`)
+    },
+    [catchUp, refreshProjects]
   )
 
   const runSampleAudit = useCallback(() => {
@@ -340,10 +387,12 @@ export function AuditApp() {
       const next = acknowledgeNewFindings(environment)
       const currentProject = projectRef.current
       if (currentProject) {
-        const saved = saveProject({ ...currentProject, environment: next })
+        // This browser's own note, never sent: a save here would overtake a decision still on its way.
+        const saved = saveProject({ ...currentProject, environment: next }, { localOnly: true })
         projectRef.current = saved
         setProject(saved)
       }
+      environmentRef.current = next
       setEnvironment(next)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -377,6 +426,7 @@ export function AuditApp() {
 
   const persistCaseState = useCallback(
     (findingId: string, update: (current: ReturnType<typeof getCaseState>) => ReturnType<typeof getCaseState>, command?: { type: string; input: unknown }) => {
+      catchUp()
       const env = environmentRef.current
       if (!env) return
       const current = getCaseState(env, findingId)
@@ -388,11 +438,12 @@ export function AuditApp() {
         projectRef.current = saved
         setProject(saved)
         refreshProjects()
-        if (account && command) projectSync.command(saved.id, findingId, command.type, command.input)
+        if (account && command) projectSync.command(saved.id, findingId, command.type, command.input, findingBefore(env, findingId))
       }
+      environmentRef.current = next
       setEnvironment(next)
     },
-    [refreshProjects, actor, account]
+    [refreshProjects, actor, account, catchUp]
   )
 
   const handleOpenCase = useCallback(
@@ -420,7 +471,7 @@ export function AuditApp() {
           ? { ...decided, activeRequestGeneration: current.activeRequestGeneration, archivedRequests: current.archivedRequests, recoverySettlements: current.recoverySettlements, recoveredAmount: verifiedReturned(current), legacyRecoveredAmount: current.legacyRecoveredAmount, requiresRevalidation: current.requiresRevalidation, history: current.history }
           : decided
       },
-        { type: 'decision', input: { decision: value, reason } }
+        { type: 'decision', input: { decision: value, reason, dismissalTag } }
       )
     },
     [persistCaseState]
@@ -460,6 +511,7 @@ export function AuditApp() {
   }, [persistCaseState])
 
   const handleSaveEvidence = useCallback((findingId: string, evidence: RecoveryEvidence) => {
+    catchUp()
     const env = environmentRef.current
     if (!env) return
     const next = recordEvidence(env, findingId, evidence)
@@ -469,10 +521,11 @@ export function AuditApp() {
       projectRef.current = saved
       setProject(saved)
       refreshProjects()
-      if (account) projectSync.command(saved.id, findingId, 'evidence', evidence)
+      if (account) projectSync.command(saved.id, findingId, 'evidence', evidence, findingBefore(env, findingId))
     }
+    environmentRef.current = next
     setEnvironment(next)
-  }, [refreshProjects, account])
+  }, [refreshProjects, account, catchUp])
 
   const handleMarkRequested = useCallback(
     (findingId: string, pkg: RequestPackage) => {
@@ -619,6 +672,18 @@ export function AuditApp() {
     (input: ImportInput) => {
       const target = input.quickbooks ? quickBooksTarget(input.quickbooks.companyName) : null
       const replaceEnvironment = !target && (sampleSession || importIntent === 'new' || route.entry === 'upload')
+      const already = target?.environment.records.length ?? (replaceEnvironment ? 0 : (environmentRef.current?.records.length ?? 0))
+      const adding = input.parsed.records.length
+      // Re-importing a QuickBooks company updates the payments it already has, so its rows don't add up this way.
+      if (adding > MAX_AUDIT_ROWS || (!input.quickbooks && already + adding > MAX_AUDIT_ROWS)) {
+        const rows = (n: number) => n.toLocaleString('en-US')
+        setEntryError(
+          adding > MAX_AUDIT_ROWS
+            ? `This file has ${rows(adding)} payments. One audit can hold up to ${rows(MAX_AUDIT_ROWS)}. Split the file by date and start an audit for each part.`
+            : `This audit already has ${rows(already)} payments, and one audit can hold up to ${rows(MAX_AUDIT_ROWS)}. Start a new audit with this file instead.`
+        )
+        return
+      }
       // Free: each ledger is audited once. A repeat — the same file, a renamed
       // copy, or a trimmed piece of it — is flagged here, before anything runs.
       // Re-importing a QuickBooks company into its own audit is a sync, never a repeat.
@@ -663,7 +728,11 @@ export function AuditApp() {
 
   const handleClearLedger = useCallback(() => {
     const currentProject = projectRef.current
-    if (!sampleSession && currentProject) deleteProject(currentProject.id)
+    if (!sampleSession && currentProject) {
+      // Never saved to the account: its ledger was not audited there, so it can be uploaded again.
+      if (account && projectSync.revisionOf(currentProject.id) === undefined) forgetUpload(currentProject.id)
+      deleteProject(currentProject.id)
+    }
     const nextProjectId = getActiveProjectId()
     const nextProject = nextProjectId ? loadProject(nextProjectId) : null
     projectRef.current = nextProject
@@ -684,7 +753,58 @@ export function AuditApp() {
       },
       { replace: true }
     )
-  }, [navigate, refreshProjects, sampleSession])
+  }, [navigate, refreshProjects, sampleSession, account])
+
+  // Another tab saved or deleted an audit, or the account's audits arrived after a failed first try.
+  useEffect(() => {
+    const changed = (event: Event) => {
+      const id = (event as CustomEvent<{ id: string | null }>).detail.id
+      refreshProjects()
+      if (runActiveRef.current || sampleSession) return
+      const current = projectRef.current
+      if (!current) {
+        if (!environmentRef.current && route.entry === null && getActiveProjectId()) reloadFromCache()
+        return
+      }
+      const saved = loadProject(current.id)
+      if (saved) {
+        if (id !== null && id !== current.id) return
+        if (saved.updatedAt === current.updatedAt && saved.environment.newFindingIds.length === current.environment.newFindingIds.length) return
+        projectRef.current = saved
+        environmentRef.current = saved.environment
+        setProject(saved)
+        setEnvironment(saved.environment)
+      } else if (!listProjects().some((item) => item.id === current.id)) reloadFromCache()
+    }
+    window.addEventListener('reclaim:projects-changed', changed)
+    return () => window.removeEventListener('reclaim:projects-changed', changed)
+  }, [refreshProjects, reloadFromCache, sampleSession, route.entry])
+
+  // Closing the tab now would lose the only copy: it fits nowhere in this browser and has not been saved.
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (account && projectSync.unsent > 0 && hasMemoryOnlyProjects()) event.preventDefault()
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [account])
+
+  const auditsProblem = account ? (auth?.auditsProblem ?? null) : null
+  /** The account couldn't be read and this browser holds none of it: nothing on screen may read as "no audits". */
+  const auditsUnknown = Boolean(auditsProblem?.unreachable) && projects.length === 0
+  const accountNotices = account ? (
+    <>
+      {auditsProblem ? (
+        <div className="wk-alert" role="alert" data-testid="audits-problem" style={{ marginBottom: 20 }}>
+          <p>{auditsProblem.message}{auditsProblem.unreachable && projects.length > 0 ? ' Showing what is saved in this browser.' : ''}</p>
+          <div className="wk-alert-actions">
+            <button type="button" className="wk-linklike" onClick={() => void auth?.reloadAudits()}>Try again</button>
+          </div>
+        </div>
+      ) : null}
+      <SyncNotice issues={syncState.issues} pending={syncState.pending} onDownload={downloadLocalCopy} />
+    </>
+  ) : null
 
   // The entry sequence and the running state share one screen, so arriving from
   // the marketing site never flashes through a differently-styled interstitial.
@@ -761,6 +881,7 @@ export function AuditApp() {
           onOpenWorkspace={handleOpenProject}
           tourReady={false}
         >
+          {running ? null : accountNotices}
           {route.mode === 'settings' && !running && route.entry === null ? (
             <SettingsView
               onEditOnboarding={() => setOnboardingRequested(true)}
@@ -770,7 +891,7 @@ export function AuditApp() {
               resolvedTheme={resolvedTheme}
               onThemeChange={chooseTheme}
             />
-          ) : (
+          ) : auditsUnknown && !running && route.entry === null ? null : (
             <Launch onRunSample={runSampleAudit} onUseOwn={() => openImport('new')} running={running} note={entryError ?? undefined} showHeading={route.mode === 'dashboard'} />
           )}
         </WorkspaceShell>
@@ -834,13 +955,7 @@ export function AuditApp() {
         }
       >
         {route.mode === 'dashboard' && !activeFinding ? <QuickBooksSyncStatus state={quickBooksAutoSync.state} onSyncNow={quickBooksAutoSync.syncNow} /> : null}
-        {account && (syncState.issue || syncState.pending > 0) ? (
-          <div className="wk-alert" role="status" data-testid="sync-notice" style={{ marginBottom: 20 }}>
-            <p>{syncState.issue?.message ?? 'Saving this project to your account…'}</p>
-            {syncState.issue?.status === null ? <button type="button" className="wk-linklike" onClick={() => projectSync.retry()}>Retry save</button> : null}
-            {syncState.issue ? <button type="button" className="wk-linklike" onClick={downloadLocalCopy}>Download local copy</button> : null}
-          </div>
-        ) : null}
+        {accountNotices}
         {importNotice ? (
           <div className="wk-callout" data-tone="done" role="status" data-testid="import-notice" style={{ marginBottom: 20 }}>
             <CheckCircle2 aria-hidden="true" />
@@ -858,7 +973,7 @@ export function AuditApp() {
           <div className="wk-alert" role="status" data-testid="storage-notice" style={{ marginBottom: 20 }}>
             <p>
               {account
-                ? syncState.pending ? 'This audit is too large for browser storage and is still saving to your account. Keep this tab open until the save finishes.' : 'This audit is too large to keep in this browser’s storage. It is saved to your account and will load from there next time.'
+                ? projectSync.unsent > 0 ? 'This audit is too large for browser storage and is still saving to your account. Keep this tab open until the save finishes.' : 'This audit is too large to keep in this browser’s storage. It is saved to your account and will load from there next time.'
                 : 'This audit is too large to keep in this browser’s storage. It works in this tab, but it will be gone when the tab closes — create an account to keep it.'}
             </p>
           </div>
@@ -930,6 +1045,7 @@ export function AuditApp() {
             onStartAudit={() => openImport('new')}
             onAddRecords={() => openImport('add')}
             onRunSample={runSampleAudit}
+            onRemoveImport={handleRemoveImport}
           />
         ) : route.mode === 'findings' ? (
           <Findings env={environment} visible={visible} onOpenCase={handleOpenCase} />

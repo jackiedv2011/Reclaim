@@ -201,6 +201,75 @@ describe('accounts, data isolation and persistence', () => {
   })
 })
 
+describe('what the screen saves, the account keeps', () => {
+  const CSV = [
+    'vendor,invoice_number,payment_date,invoice_amount,amount_paid,bank_account_last4',
+    'Acme,A-100,2025-01-10,500,500,1111', 'Acme,A-100,2025-01-20,500,500,1111',
+    'Bank Co,B-100,2025-01-10,60,60,2222', 'Bank Co,B-101,2025-02-10,61,61,3333',
+    'Twice Co,T-100,2025-01-10,70,70,4444', 'Twice Co,T-100,2025-01-20,70,70,4444',
+  ].join('\n')
+  async function openFinding(vendor: string) {
+    fireEvent.click(within(screen.getByRole('navigation', { name: /workspace/i })).getByRole('button', { name: /^Findings/ }))
+    const row = await waitFor(() => {
+      const found = [...document.querySelectorAll('.wk-finding-row')].find((node) => node.textContent?.includes(vendor))
+      expect(found).toBeTruthy()
+      return found!
+    })
+    fireEvent.click(row)
+    await screen.findByRole('heading', { level: 1, name: vendor })
+  }
+  const saved = () => waitFor(() => { expect(projectSync.syncIssue).toBeNull(); expect(projectSync.pending).toBe(0) })
+  const serverCase = async (vendor: string) => {
+    const { environment } = (await live.api('/api/projects')).body.projects[0]
+    const finding = environment.result.findings.find((f: { vendor: string }) => f.vendor === vendor)
+    return { finding, state: environment.caseStates[finding.id] }
+  }
+
+  it('an internal filing, part of the evidence, and a dismissal reason all reach the server', async () => {
+    mountWorkspace()
+    await screen.findByText('ready:nobody')
+    await logIn(alice)
+    fireEvent.click(await screen.findByRole('button', { name: /upload a ledger/i }))
+    fireEvent.change(await screen.findByLabelText(/upload a csv ledger/i), { target: { files: [new File([CSV], 'small.csv', { type: 'text/csv' })] } })
+    await screen.findByText('small.csv')
+    fireEvent.click(screen.getByRole('button', { name: /run the audit/i }))
+    await screen.findByRole('heading', { name: 'Up next' })
+    await saved()
+
+    // A bank-account change is filed and closed inside the business: no supplier, no amount.
+    await openFinding('Bank Co')
+    fireEvent.click(await screen.findByRole('button', { name: /^I reviewed this check/ }))
+    const review = await screen.findByTestId('decision-dialog')
+    fireEvent.click(within(review).getByLabelText(/^Open internal review/))
+    fireEvent.click(within(review).getByRole('button', { name: 'Save decision' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark as filed' }))
+    await saved()
+    expect((await serverCase('Bank Co')).state).toMatchObject({ recoveryStage: 'requested', requestedAmount: null })
+    fireEvent.change(await screen.findByLabelText('Investigation outcome'), { target: { value: 'Confirmed by phone' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Close internal review' }))
+    await saved()
+    expect((await serverCase('Bank Co')).state).toMatchObject({ recoveryStage: 'not_recovered', recoveryOutcomeNote: 'Confirmed by phone' })
+
+    // Part of the evidence, saved to come back to.
+    await openFinding('Acme')
+    fireEvent.change(screen.getByRole('textbox', { name: /^Company or legal entity/ }), { target: { value: 'Ng Co' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save evidence' }))
+    await saved()
+    expect((await serverCase('Acme')).finding).toMatchObject({ classification: 'review_needed', evidence: { entity: { entityId: 'Ng Co' } } })
+
+    // The reason a finding was dismissed.
+    await openFinding('Twice Co')
+    fireEvent.click(await screen.findByRole('button', { name: /^Not an issue/ }))
+    const dismissal = await screen.findByTestId('decision-dialog')
+    fireEvent.click(within(dismissal).getByLabelText(/^Not an issue/))
+    fireEvent.change(within(dismissal).getByLabelText('Why is it expected?'), { target: { value: 'known_vendor_exception' } })
+    fireEvent.change(within(dismissal).getByLabelText('Note (optional)'), { target: { value: 'Agreed split' } })
+    fireEvent.click(within(dismissal).getByRole('button', { name: 'Save decision' }))
+    await saved()
+    expect((await serverCase('Twice Co')).state).toMatchObject({ decision: 'expected', dismissalTag: 'known_vendor_exception', reason: 'Agreed split' })
+  }, 20_000)
+})
+
 describe('legacy (pre-account) audits', () => {
   function seedLegacy(name: string) {
     setStorageScope(null)

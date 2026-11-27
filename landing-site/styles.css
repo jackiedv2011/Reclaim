@@ -271,6 +271,11 @@ img, video, canvas, svg { display: block; max-width: 100%; }
   background-color: color-mix(in srgb, var(--cl-black) 80%, transparent);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / .06), 0 12px 32px -16px rgb(0 0 0 / .5);
 }
+/* over the pinned laptop it goes near solid: its blur would be redrawn every frame the dashboard moves under it */
+.the-nav[theme="black"].is-floating.is-held .the-container {
+  background-color: color-mix(in srgb, var(--cl-black) 95%, transparent);
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
 /* scrolling down it steps back to 90%, from its top edge; it comes back on a pause or a scroll up (main.js) */
 .the-nav.is-floating.is-compact .the-container { transform: scale(.9); }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -440,13 +445,13 @@ img, video, canvas, svg { display: block; max-width: 100%; }
 .content-column .heading { white-space: pre-line; }
 .content-column .desc { margin-top: 1.6rem; }
 
-/* ---------- walkthrough: the laptop opens, then one case runs across its screen ----------
+/* ---------- walkthrough: one case runs across the screen of an open laptop ----------
    Static by default: a still of the open laptop with the five steps listed under it (no JS, or
    reduced motion). walkthrough.js adds .is-live: the section grows tall and .wt-pin sticks to
-   the viewport while the scroll drives the frames, the view and the captions. Sticky rather than
-   a ScrollTrigger pin, because the rounded section around it is transformed (a fixed pin would
-   attach to that box, not the viewport). Captions and the step bar are the only chrome: dark
-   glass, 2.8rem cards and pills, no shadows. */
+   the viewport while the scroll picks a step. Sticky rather than a ScrollTrigger pin, because the
+   rounded section around it is transformed (a fixed pin would attach to that box, not the viewport).
+   Every move below is a CSS transition of transform or opacity, so it runs on the compositor: the
+   script only swaps classes and sets the stage's transform when the step changes. */
 .walkthrough { padding-block: var(--section-margin); }
 .wt-pin { position: relative; display: flex; flex-direction: column; align-items: center; }
 .wt-head { position: relative; z-index: 1; width: 100%; text-align: center; }
@@ -455,38 +460,33 @@ img, video, canvas, svg { display: block; max-width: 100%; }
 .wt-head .desc { grid-column: 1 / -1; max-width: 52rem; margin: 2.4rem auto 0; color: var(--cl-grey-500); }
 
 .wt-cam { position: relative; width: 100%; margin-top: 4.8rem; }
-.wt-stage { position: relative; width: min(100%, 144rem); aspect-ratio: 16 / 9; margin-inline: auto; }
-.wt-frames { display: none; }
-/* the pictures are baked onto the ink: soft edges, so they never show as a box. The frames crop the open
-   deck, so it fades out rather than stopping at a line; the still is taller (walkthrough.js places it by its
-   screen corners) and holds the whole deck, so only its margins fade */
-.wt-still, .wt-frames {
+.wt-stage { position: relative; width: min(100%, 120rem); aspect-ratio: 3840 / 3379; margin-inline: auto; }
+/* the still is baked onto the ink; its margins fade so it never shows as a box */
+.wt-still {
   position: absolute; inset: 0; width: 100%; height: 100%;
-  -webkit-mask-image: linear-gradient(90deg, transparent, #000 3%, #000 97%, transparent), linear-gradient(transparent, #000 3%, #000 88%, transparent);
-  mask-image: linear-gradient(90deg, transparent, #000 3%, #000 97%, transparent), linear-gradient(transparent, #000 3%, #000 88%, transparent);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 1.5%, #000 98.5%, transparent), linear-gradient(transparent, #000 3%, #000 90%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 1.5%, #000 98.5%, transparent), linear-gradient(transparent, #000 3%, #000 90%, transparent);
   -webkit-mask-composite: source-in;
   mask-composite: intersect;
 }
-.wt-still {
-  -webkit-mask-image: linear-gradient(90deg, transparent, #000 1.5%, #000 98.5%, transparent), linear-gradient(transparent, #000 3%, #000 96%, transparent);
-  mask-image: linear-gradient(90deg, transparent, #000 1.5%, #000 98.5%, transparent), linear-gradient(transparent, #000 3%, #000 96%, transparent);
-}
 .wt-still:not([src]) { visibility: hidden; }
-/* the dashboard, laid out at a fixed size and mapped onto the rendered screen (matrix3d). It fills the black
-   glass to a bezel as thin as the sides (the model's panel stops short of it: macbook.py). The top corners are
-   the panel's own: radius 1.78% of its width (2.69% of this height), measured from the model; the bottom ones
-   are square, as the panel's are where it meets the chin. */
-.wt-screen { position: absolute; left: 0; top: 0; width: 144rem; height: 95.66rem; overflow: hidden; border-radius: 1.784% 1.784% 0 0 / 2.689% 2.689% 0 0; transform-origin: 0 0; visibility: hidden; }
-.wt-screen::after { content: ""; position: absolute; inset: 0; z-index: 1; border-radius: inherit; box-shadow: inset 0 0 0 1.5px rgb(0 0 0 / .55); pointer-events: none; }   /* where the panel meets the bezel */
+/* the dashboard, laid out at a fixed size and scaled onto the rendered glass by walkthrough.js. The top corners
+   are the panel's own: radius 1.78% of its width (2.69% of this height), measured from the model; the bottom
+   ones are square, as the panel's are where it meets the chin. */
+.wt-screen { position: absolute; left: 0; top: 0; width: 144rem; height: 95.66rem; overflow: hidden; border-radius: 1.784% 1.784% 0 0 / 2.689% 2.689% 0 0; background: #f4f4f3; transform-origin: 0 0; visibility: hidden; }
+.wt-screen::after { content: ""; position: absolute; inset: 0; z-index: 9999; border-radius: inherit; box-shadow: inset 0 0 0 1.5px rgb(0 0 0 / .55); pointer-events: none; }   /* where the panel meets the bezel */
 .wt-screen.is-mapped { visibility: visible; }
-.wt-shot { position: absolute; inset: 0; opacity: 0; visibility: hidden; }   /* live: walkthrough.js fades them with the scroll */
+.wt-shot { position: absolute; inset: 0; opacity: 0; visibility: hidden; }
 .wt-shot.is-on { opacity: 1; visibility: visible; }
 .wt-shot .app { border-radius: 0; }
 .wt-shot:not(.is-settled) [data-state="after"], .wt-shot.is-settled [data-state="before"] { display: none !important; }
 .wt-shot.is-settled .app-tr.is-new { animation: wt-new 1.6s var(--e-p2-o) both; }
 @keyframes wt-new { from { background: #c8fbdc; } to { background: #effdf4; } }
-/* the spotlight: a hole in a light veil over the rest of the screen */
-.wt-spot { position: absolute; inset: 0; background: rgb(8 16 12 / .3); opacity: 0; pointer-events: none; will-change: opacity; }   /* the hole is a clip-path, set by walkthrough.js */
+/* the spotlight: a veil the size of the screen with a rounded hole in it (walkthrough.js draws the path). It fades,
+   so it is a layer of its own: no bigger than the screen (a box with a huge shadow made one many times the size) */
+.wt-spot { position: absolute; inset: 0; z-index: 9998; width: 100%; height: 100%; opacity: 0; pointer-events: none; transition: opacity .2s; }
+.wt-spot path { fill: rgb(8 16 12 / .3); }
+.wt-spot.is-on { opacity: 1; }
 
 .wt-caps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3.2rem; width: var(--grid-width); margin-top: 6.4rem; }
 .wt-step { display: inline-flex; align-items: center; gap: .8rem; color: var(--cl-grey-500); font-size: 1.3rem; }
@@ -494,18 +494,32 @@ img, video, canvas, svg { display: block; max-width: 100%; }
 .wt-cap p { margin-top: 1.2rem; color: var(--cl-grey-500); font-size: 1.7rem; line-height: 1.45; letter-spacing: -.01em; }
 .wt-cap strong { color: var(--cl-color1); font-weight: 500; }
 .wt-pill { display: none; }
-.wt-outro { display: none; }   /* live only: the line over the whole laptop at the close */
-.is-live .wt-outro { display: grid; opacity: 0; visibility: hidden; }
+.wt-outro { display: none; }   /* live only: the line over the laptop at the close */
 .wt-end { display: flex; flex-wrap: wrap; justify-content: center; gap: 1.2rem; margin-top: 6.4rem; }
 
-.walkthrough.is-live { height: calc((var(--wt-len, 7) + 1) * 100vh); height: calc((var(--wt-len, 7) + 1) * 100svh); padding: 0; }
+/* live: what shows at each step is a class on the section (at-intro, at-steps, at-close); hidden things fade
+   out at once, shown things fade in as the view lands */
+.walkthrough.is-live { --wt-move: .55s; --wt-ease: cubic-bezier(.22, 1, .36, 1); height: calc((var(--wt-len, 5) + 1) * 100vh); height: calc((var(--wt-len, 5) + 1) * 100svh); padding: 0; }
 .is-live .wt-pin { position: sticky; top: 0; display: block; height: 100vh; height: 100svh; overflow: hidden; }
-.is-live .wt-head { position: absolute; left: 0; right: 0; top: calc(var(--nav-height) + 4.8rem); z-index: 3; }   /* over the frames, which are opaque */
-.is-live .wt-cam { position: absolute; inset: 0; z-index: 2; margin: 0; pointer-events: none; }
-.is-live .wt-stage { position: absolute; left: 0; top: 0; width: var(--wt-sw); aspect-ratio: auto; height: var(--wt-sh); margin: 0; transform-origin: 0 0; }
-.is-live .wt-frames { display: block; }
-.is-live .wt-still { opacity: 0; will-change: opacity; }   /* kept drawn while invisible; walkthrough.js fades it up over the last frames */
-.is-live.is-open .wt-frames.has-still { visibility: hidden; }
+.is-live .wt-head { position: absolute; left: 0; right: 0; top: calc(var(--nav-height) + 4.8rem); z-index: 3; }
+.is-live .wt-head, .is-live .wt-cap, .is-live .wt-end { opacity: 0; visibility: hidden; transition: opacity .2s, transform .2s, visibility 0s .2s; }
+.is-live .wt-head { transform: translateY(-2.4rem); }
+.is-live .wt-outro { display: grid; transform: translateY(3.2rem); }
+.is-live .wt-end { transform: translateY(2.4rem); }
+.is-live.at-intro .wt-head:not(.wt-outro), .is-live.at-close .wt-outro, .is-live.at-close .wt-end, .is-live .wt-cap.is-on {
+  opacity: 1; visibility: visible; transform: none;
+  transition: opacity .25s calc(var(--wt-move) * .3), transform .35s calc(var(--wt-move) * .3) var(--e-out), visibility 0s calc(var(--wt-move) * .3);
+}
+.is-live.at-close .wt-end { transition-delay: calc(var(--wt-move) * .5); }
+/* the laptop rises in once, when the still is decoded and the section is on screen */
+.is-live .wt-cam { position: absolute; inset: 0; z-index: 2; margin: 0; pointer-events: none; opacity: 0; transform: translateY(8rem); transition: opacity .8s, transform 1.1s var(--e-out); }
+.is-live.is-in .wt-cam { opacity: 1; transform: none; }
+.is-live .wt-stage { position: absolute; left: 0; top: 0; aspect-ratio: auto; height: auto; margin: 0; transform-origin: 0 0; }
+.is-live .wt-stage::before { content: ""; display: block; padding-top: 87.995%; }   /* 3379 / 3840: the still's height */
+.is-live.is-ready .wt-stage { transition: transform var(--wt-move) var(--wt-ease); }
+/* the screen swaps as the move starts: the new one fades in over the last, which goes only once it is covered (walkthrough.js) */
+.is-live .wt-shot.is-on { transition: opacity .16s; }
+.is-live .wt-shot.is-out { transition: opacity .16s, visibility 0s .16s; }
 .is-live .wt-caps { position: absolute; inset: 0; z-index: 3; display: block; width: auto; margin: 0; pointer-events: none; }
 .is-live .wt-cap {
   position: absolute;
@@ -516,8 +530,6 @@ img, video, canvas, svg { display: block; max-width: 100%; }
   padding: 2.8rem 3.2rem 3.2rem;
   border-radius: 2.8rem;
   background: rgb(18 26 22 / .95);   /* near solid: a blur behind it would be redrawn every frame the dashboard moves */
-  opacity: 0;
-  visibility: hidden;
 }
 .is-live .wt-cap[data-side="left"] { left: var(--grid-side-margin); }
 .is-live .wt-cap[data-side="right"] { right: var(--grid-side-margin); }
@@ -532,13 +544,13 @@ img, video, canvas, svg { display: block; max-width: 100%; }
   gap: .2rem;
   padding: .5rem;
   border-radius: 99rem;
-  background: rgb(36 44 40 / .72);
-  -webkit-backdrop-filter: blur(20px) saturate(1.6);
-  backdrop-filter: blur(20px) saturate(1.6);
+  background: rgb(30 37 33 / .95);   /* near solid, like the captions: no blur over the moving dashboard */
   opacity: 0;
   visibility: hidden;
-  transform: translateX(-50%);
+  transform: translate(var(--pill-x, -50%), .8rem);
+  transition: opacity .2s, transform .3s, visibility 0s .3s;
 }
+.is-live.at-steps .wt-pill { opacity: 1; visibility: visible; transform: translate(var(--pill-x, -50%), 0); transition: opacity .25s calc(var(--wt-move) * .3), transform .35s calc(var(--wt-move) * .3) var(--e-out), visibility 0s calc(var(--wt-move) * .3); }
 .wt-pill button { height: 3.6rem; padding: 0 1.6rem; border-radius: 99rem; color: rgb(255 255 255 / .56); font: 500 1.4rem/1 var(--f-sans); letter-spacing: -.01em; white-space: nowrap; transition: color .2s, background-color .2s, scale .16s var(--e-out); }
 @media (hover: hover) and (pointer: fine) { .wt-pill button:hover { color: #fff; } }
 .wt-pill button.is-current { background: rgb(255 255 255 / .12); color: #fff; }
@@ -576,7 +588,7 @@ img, video, canvas, svg { display: block; max-width: 100%; }
 .wt-skipper:focus-visible { outline: 2px solid #00fd74; outline-offset: 3px; }
 .wt-skipper svg { width: 1.4rem; height: 1.4rem; }
 .wt-skipper[data-way="down"] svg { transform: rotate(180deg); }
-.is-live .wt-end { position: absolute; left: 0; right: 0; bottom: 4rem; z-index: 3; margin: 0; opacity: 0; visibility: hidden; }
+.is-live .wt-end { position: absolute; left: 0; right: 0; bottom: 4rem; z-index: 3; margin: 0; }
 
 /* ---------- what Reclaim finds ----------
    One passage on a card of the black, then the four mistakes on the paper under it (each a still of its own with a
@@ -646,6 +658,9 @@ img, video, canvas, svg { display: block; max-width: 100%; }
 .ex-sum-sub { display: block; margin-top: .4rem; overflow: hidden; color: var(--cl-grey-500); font-size: 1.4rem; line-height: 1.3; white-space: nowrap; text-overflow: ellipsis; }
 .ex-sum-amt { font: 500 1.9rem/1 var(--f-sans); letter-spacing: -.02em; font-variant-numeric: tabular-nums; text-align: right; }
 .ex-sum-state { justify-self: end; background: var(--tint); color: var(--ink); }
+/* not recovered, so not in the total */
+.ex-sum-row.is-open .ex-sum-amt { color: var(--cl-grey-500); }
+.ex-sum-row.is-open .ex-sum-state { background: var(--cl-grey-100); color: var(--cl-grey-600); }
 .ex-sum-total { display: flex; align-items: center; justify-content: space-between; gap: 1.6rem; margin-top: .4rem; padding: 2rem 2.4rem; border-radius: 1.8rem; background: var(--cl-grey-100); }
 .ex-sum-total span { font: 500 1.8rem/1 var(--f-sans); letter-spacing: -.02em; }
 .ex-sum-total small { display: block; margin-top: .6rem; color: var(--cl-grey-500); font: 400 1.2rem/1.3 var(--f-mono); }
@@ -676,7 +691,7 @@ img, video, canvas, svg { display: block; max-width: 100%; }
   .ex-sum-kind { font-size: 1.6rem; }
   .ex-sum-sub { font-size: 1.3rem; }
   .ex-sum-amt { font-size: 1.7rem; }
-  .ex-sum-state { display: none; }   /* no room: the icon carries the colour */
+  .ex-sum-state { grid-column: 2 / -1; justify-self: start; height: 2.6rem; margin-top: -.4rem; }   /* under the line it belongs to */
   .ex-sum-total { padding: 1.6rem; }
   .ex-sum-total strong { font-size: 3.6rem; }
 }
@@ -1002,12 +1017,12 @@ video.closing-object { aspect-ratio: 1116 / 622; object-fit: contain; }
   .is-live .wt-pill { bottom: 2.4rem; }
   .wt-pill button { height: 3.2rem; padding: 0 1.2rem; font-size: 1.3rem; }
   .wt-pill button:not(.is-current) { width: 3.2rem; padding: 0; font-size: 0; }   /* phones: a dot per step, the current one named */
-  .is-live .wt-pill { left: var(--grid-side-margin); }   /* phones: the step dots to the left, Skip to the right of them */
+  .is-live .wt-pill { --pill-x: 0; left: var(--grid-side-margin); }   /* phones: the step dots to the left, Skip to the right of them */
   .wt-skipper { bottom: 2.4rem; height: 4.2rem; padding: 0 1.4rem 0 1.6rem; font-size: 1.4rem; }
   .wt-skipper-long { display: none; }
   .wt-pill button:not(.is-current)::before { content: ""; display: block; width: .6rem; height: .6rem; margin: auto; border-radius: 50%; background: currentColor; }
   .wt-end { padding-inline: var(--grid-side-margin); }
-  .is-live .wt-end { bottom: 4rem; }
+  .is-live .wt-end { bottom: 8.8rem; }   /* clear of the step dots and Skip */
   .grid1 .content { grid-template-columns: repeat(2, 1fr); gap: .8rem; grid-column: 1 / -1; }
   .grid-item-brand .wrap { border-radius: 2rem; }
   .closing { padding-block: 7.2rem 12rem; }

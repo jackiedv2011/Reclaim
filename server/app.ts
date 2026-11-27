@@ -1,6 +1,5 @@
+import { canonicalCurrency, isoDay, storedDay } from '../src/lib/format.ts'
 import { createServer, type Server } from 'node:http'
-import { readFileSync, existsSync, statSync } from 'node:fs'
-import { extname, join, normalize, resolve, sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { openDatabase } from './db.ts'
 import { ProjectStore } from './projectStore.ts'
@@ -9,20 +8,35 @@ import { accountRoutes } from './account.ts'
 import { AuthService, normalizeEmail } from './auth.ts'
 import { DevMailer, GmailMailer, ResendMailer, type Mailer } from './mailer.ts'
 import { createGoogleClient, type GoogleClient } from './google.ts'
-import { createDraftService, DraftError, DraftRequestSchema, unsupportedAmounts, type DraftService } from './ai.ts'
+import { DraftRequestSchema, type DraftService } from './ai.ts'
 import { answerCaseQuestion } from './assistant.ts'
 import type { ServerConfig } from './config.ts'
-import { HttpError, RateLimiter, empty, isCrossSiteWrite, json, redirect, serializeCookie, toRequest, writeResponse, type Request, type Response } from './http.ts'
+import { HttpError, RateLimiter, compressed, isCrossSiteWrite, json, redirect, serializeCookie, toRequest, writeResponse, type Request, type Response } from './http.ts'
 import { newToken, openSecret, sealSecret } from './crypto.ts'
 import { createQuickBooksClient, migrateQuickBooksLink, syncLedger, QuickBooksReconnectError, QuickBooksUnauthorizedError, type QuickBooksClient, type QuickBooksTokens } from './quickbooks.ts'
 import { entitlementsFor, isPlan, monthStart, planOf, PLAN_LIMITS, type Plan } from './plans.ts'
-import { checkRepeat, repeatMessage, rowFingerprint } from './uploads.ts'
-import { authorizedDraftFacts } from './caseFacts.ts'
+import { AUDIT_TOO_LARGE, MAX_AUDIT_BYTES, checkRepeat, repeatMessage, rowFingerprint } from './uploads.ts'
 import { createBilling } from './billing.ts'
 import { createStripeClient, type StripeApi } from './stripe.ts'
 import { createGmailClient, createGmailRoutes, type GmailClient } from './gmail.ts'
 import { createIntelligenceRoutes } from './intelligence.ts'
+import { createLedgerRoutes } from './ledgerRoutes.ts'
+import { resealLedger } from './ledger.ts'
 import { OnboardingProfileSchema } from './onboarding.ts'
+import { serveStatic } from './staticFiles.ts'
+// Recovery automation and secure AI workstream (docs/workstream-recovery-ai).
+import { tenantForUser } from './tenant.ts'
+import { createSealer } from './sealedJson.ts'
+import { AiExecutionService } from './aiGateway/service.ts'
+import { createAnthropicProvider, type AiProvider } from './aiGateway/providers.ts'
+import { draftServiceProvider } from './aiGateway/legacyDraft.ts'
+import { registerAiTasks } from './aiGateway/tasks/index.ts'
+import { ApprovalService } from './approvals.ts'
+import { createRecoveryRoutes } from './recoveryRoutes.ts'
+import { createJobRoutes } from './jobs/routes.ts'
+import { createInboundRoutes } from './inbound/routes.ts'
+import { createDocumentRoutes } from './documents/routes.ts'
+import { DEFAULT_WORKSTREAM_SETTINGS, type WorkstreamDeps, type WorkstreamSettings } from './workstream.ts'
 
 const SESSION_COOKIE = 'reclaim_session'
 const OAUTH_STATE_COOKIE = 'reclaim_oauth_state'
@@ -34,7 +48,12 @@ export interface AppDependencies {
   db?: DatabaseSync
   mailer?: Mailer
   google?: GoogleClient | null
+  /** The original draft service; now a provider for the draft task only, fed the minimised packet. */
   drafts?: DraftService | null
+  /** The provider for every AI task (tests pass a mock). Defaults to Anthropic when ANTHROPIC_API_KEY is set. */
+  aiProvider?: AiProvider | null
+  /** Inbound webhook and reply-domain switches; all off unless a test or a founder-approved setup passes them. */
+  workstream?: Partial<WorkstreamSettings>
   quickbooks?: QuickBooksClient | null
   /** Stripe (tests pass FakeStripe). Defaults to the REST client when STRIPE_SECRET_KEY is set. */
   stripe?: StripeApi | null
@@ -56,40 +75,20 @@ export interface App {
   close(): Promise<void>
 }
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.txt': 'text/plain; charset=utf-8',
-  '.csv': 'text/csv; charset=utf-8',
-  '.woff2': 'font/woff2',
-  '.woff': 'font/woff',
-  '.ttf': 'font/ttf',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.mp4': 'video/mp4',
-  '.webm': 'video/webm',
-  '.xml': 'application/xml',
-  '.webmanifest': 'application/manifest+json',
-}
-
 export function createApp(deps: AppDependencies): App {
   const { config } = deps
   const db = deps.db ?? openDatabase(config.databasePath)
   const projects = new ProjectStore(db, config.dataKeys)
   const sealedNow = projects.migrate()
   if (sealedNow) console.log(`  encrypted ${sealedNow} stored audits at rest`)
+  const sealedLedger = resealLedger(db, config.dataKeys)
+  if (sealedLedger) console.log(`  sealed ${sealedLedger} server ledger rows at rest`)
   const caseCommands = new CaseCommands(db, projects)
   caseCommands.migrateLegacy()
   const mailer = deps.mailer ?? (config.resend ? new ResendMailer(config.resend.apiKey, config.resend.from) : config.gmail ? new GmailMailer(config.gmail.user, config.gmail.appPassword) : new DevMailer(db))
   const google = deps.google !== undefined ? deps.google : config.google ? createGoogleClient(config.google.clientId, config.google.clientSecret) : null
-  const drafts = deps.drafts !== undefined ? deps.drafts : config.anthropicApiKey ? createDraftService(config.anthropicApiKey, config.anthropicModel) : null
+  const aiProvider = deps.aiProvider !== undefined ? deps.aiProvider : config.anthropicApiKey ? createAnthropicProvider(config.anthropicApiKey, config.anthropicModel) : null
+  const ai = registerAiTasks(new AiExecutionService({ db, providers: [deps.drafts ? draftServiceProvider(deps.drafts) : null, aiProvider], getProject: (tenantId, projectId) => projects.get(tenantId, projectId), now: deps.now }))
   const quickbooks = deps.quickbooks !== undefined ? deps.quickbooks : config.quickbooks ? createQuickBooksClient(config.quickbooks.clientId, config.quickbooks.clientSecret, fetch, config.quickbooks.environment) : null
   const auth = new AuthService(db, mailer, {
     appOrigin: config.appOrigin,
@@ -107,7 +106,7 @@ export function createApp(deps: AppDependencies): App {
   const quickbooksSyncLimiter = new RateLimiter(20, 60 * 60 * 1000)
   const gmailSendLimiter = new RateLimiter(30, 60 * 60 * 1000)
   const gmailClient = deps.gmail !== undefined ? deps.gmail : config.gmailSend ? createGmailClient(config.gmailSend.clientId, config.gmailSend.clientSecret) : null
-  const gmailRoutes = createGmailRoutes({ db, appOrigin: config.appOrigin, production: config.production, gmail: gmailClient && config.gmailSend ? { client: gmailClient, tokenKey: config.gmailSend.tokenKey } : null, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), getProject: (userId, projectId) => projects.get(userId, projectId), allowSend: (id) => gmailSendLimiter.check(`gmail:${id}`), now: deps.now })
+  const gmailRoutes = createGmailRoutes({ db, appOrigin: config.appOrigin, production: config.production, gmail: gmailClient && config.gmailSend ? { client: gmailClient, tokenKey: config.gmailSend.tokenKey } : null, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), getProject: (userId, projectId) => projects.get(userId, projectId), listProjects: (userId) => projects.list(userId), allowSend: (id) => gmailSendLimiter.check(`gmail:${id}`), now: deps.now })
 
   const intelligenceReadLimiter = new RateLimiter(300, 60 * 60 * 1000)
   const intelligenceRoutes = config.intelligenceApi ? createIntelligenceRoutes({ projects, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), allowRead: (id) => intelligenceReadLimiter.check(`intelligence:${id}`), now: deps.now }) : null
@@ -151,12 +150,37 @@ export function createApp(deps: AppDependencies): App {
   }
   const recordAuditStart = (userId: string, projectId: string) =>
     db.prepare('INSERT INTO audit_starts (user_id, project_id, started_at) VALUES (?, ?, ?)').run(userId, projectId, Date.now())
+  /** An audit on the wire may be gzipped, up to the size the browser promises to stay under. */
+  const auditBody = { maxDecompressed: MAX_AUDIT_BYTES, tooLarge: AUDIT_TOO_LARGE }
+  /** The client already holds what it sent, and an audit can be 100 MB: it may ask not to have it echoed. */
+  const wantsMinimal = (req: Request) => /\breturn=minimal\b/.test(String(req.headers.prefer ?? ''))
+  /** The audit, its place in the plan's count and its row fingerprints, together or not at all. */
+  const storeUpload = (userId: string, projectId: string, fingerprints: string[], project: Record<string, unknown>, isNew: boolean): number => {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      if (isNew) recordAuditStart(userId, projectId)
+      const revision = projects.upsert(userId, project)
+      rememberUpload(userId, projectId, fingerprints)
+      db.exec('COMMIT')
+      return revision
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
+  }
   const requireJson = (req: Request) => {
     if (!(req.headers['content-type'] ?? '').includes('application/json')) throw new HttpError(415, 'Send JSON.')
   }
+  // What a refused caller is told to wait: each limiter's own window, and nothing shorter.
+  const waits = new Map<RateLimiter, string>([
+    [credentialLimiter, 'a minute'],
+    [loginEmailLimiter, '15 minutes'],
+  ])
   const limit = (limiter: RateLimiter, key: string) => {
-    if (!limiter.check(key)) throw new HttpError(429, 'Too many attempts. Wait a minute and try again.', 'rate_limited')
+    if (!limiter.check(key)) throw new HttpError(429, `Too many attempts. Wait ${waits.get(limiter) ?? 'an hour'} and try again.`, 'rate_limited')
   }
+  const ledgerImportLimiter = new RateLimiter(60, 60 * 60 * 1000)
+  const ledgerRoutes = createLedgerRoutes({ db, keys: config.dataKeys, enabled: config.serverLedger === true, requireUser, requireJson, limitImport: (userId) => limit(ledgerImportLimiter, `ledger-import:${userId}`) })
 
   // QuickBooks Online (GET-only adapter, write-capable OAuth scope; sandbox or production per QBO_ENVIRONMENT). Tokens are sealed at rest under a
   // key from the environment; they are never logged and never sent to the browser.
@@ -209,7 +233,7 @@ export function createApp(deps: AppDependencies): App {
 
     // ---------- discovery ----------
     if (path === '/api/auth/providers' && method === 'GET') {
-      return json(200, { google: google !== null, ai: drafts !== null, emailDelivery: mailer.kind, requireEmailVerification: config.requireEmailVerification, devMailbox: config.devMailbox })
+      return json(200, { google: google !== null, ai: ai.providerFor('draft_recovery_request') !== null, emailDelivery: mailer.kind, requireEmailVerification: config.requireEmailVerification, devMailbox: config.devMailbox })
     }
 
     // ---------- landing-site contact form ----------
@@ -442,6 +466,8 @@ export function createApp(deps: AppDependencies): App {
       const { auditId } = await req.json<{ auditId?: unknown }>()
       if (typeof auditId !== 'string' || !/^[\w-]{1,100}$/.test(auditId)) throw new HttpError(400, 'Send the audit to link.')
       if (!qboConnection(user.id)) throw new HttpError(409, 'Connect QuickBooks first.', 'quickbooks_not_connected')
+      // Only an audit this account has saved on the server can be linked (audit S8).
+      if (!db.prepare('SELECT 1 FROM projects WHERE user_id = ? AND id = ?').get(user.id, auditId)) throw new HttpError(404, 'That audit was not found.', 'audit_not_found')
       db.prepare("UPDATE integration_connections SET linked_project_id = ? WHERE user_id = ? AND provider = 'quickbooks'").run(auditId, user.id)
       return json(200, { ok: true, linkedAuditId: auditId })
     }
@@ -509,8 +535,11 @@ export function createApp(deps: AppDependencies): App {
     // ---------- account data ----------
     if (path === '/api/projects' && method === 'GET') {
       const user = requireUser(req)
-      const saved = projects.list(user.id)
-      return json(200, { projects: saved, revisions: Object.fromEntries(saved.map((project) => [project.id, projects.revision(user.id, project.id as string)])) })
+      // The index: enough for a browser to tell which of its copies are current, then fetch the others one at a time.
+      if (req.url.searchParams.get('index') === '1') return json(200, { revisions: projects.revisions(user.id) })
+      const { projects: saved, unreadable } = projects.listAll(user.id)
+      const revisions = projects.revisions(user.id)
+      return json(200, { projects: saved, revisions: Object.fromEntries(saved.map((project) => [project.id, revisions[project.id as string]])), unreadable })
     }
 
     const commandMatch = path.match(/^\/api\/projects\/([\w-]+)\/case-commands$/)
@@ -519,24 +548,37 @@ export function createApp(deps: AppDependencies): App {
       requireJson(req)
       const result = caseCommands.execute(user.id, user.email, commandMatch[1], await req.json())
       billing.recordRecoveries(user.id, result.project)
+      if (wantsMinimal(req)) return json(200, { revision: result.revision, replayed: result.replayed, ...changedCase(result.project, await req.json()) })
       return json(200, result)
     }
 
     const projectMatch = path.match(/^\/api\/projects\/([\w-]+)$/)
+    if (projectMatch && method === 'GET') {
+      const user = requireUser(req)
+      const revision = projects.revision(user.id, projectMatch[1])
+      if (revision === null) throw new HttpError(404, 'That audit is not in this account.', 'project_not_found')
+      return json(200, { project: projects.get(user.id, projectMatch[1]), revision })
+    }
     if (projectMatch && method === 'PUT') {
       const user = requireUser(req)
       requireJson(req)
-      const project = await req.json<Record<string, unknown>>()
+      const project = await req.json<Record<string, unknown>>(auditBody)
       if (project.id !== projectMatch[1] || !isProjectShape(project)) throw new HttpError(400, 'Malformed project.')
       const existing = projects.get(user.id, project.id as string)
       const currentRevision = projects.revision(user.id, project.id as string)
       if (existing) {
+        const removed = new Set(((existing.environment as { removedImports?: string[] } | undefined)?.removedImports ?? []))
+        const incomingImports = ((project.environment as { imports?: Array<{ id?: unknown }> } | undefined)?.imports ?? []).map((batch) => String(batch?.id))
+        if (incomingImports.some((batch) => removed.has(batch))) throw new HttpError(409, 'A file in this version was removed from the audit on another device. Use the saved version, then add any new file again.', 'import_removed')
         if (req.headers['if-match'] === undefined && JSON.stringify(existing) === JSON.stringify(project)) {
           return json(200, { ok: true, revision: currentRevision, project: existing, replayed: true })
         }
         const expected = Number(req.headers['if-match'])
         if (!Number.isSafeInteger(expected) || expected !== currentRevision) throw new HttpError(409, 'This project changed on another device. Reload and review before saving.', 'revision_conflict', { revision: String(currentRevision) })
-        if (caseContentChanged(existing, project)) throw new HttpError(409, 'Case decisions and evidence must use case commands.', 'case_command_required')
+        if (caseContentChanged(existing, project)) throw new HttpError(409, 'This version would change a finding that already has a decision or evidence, so it was not saved over the audit in your account.', 'case_command_required')
+      } else if (req.headers['if-match'] !== undefined && db.prepare('SELECT 1 FROM audit_starts WHERE user_id = ? AND project_id = ?').get(user.id, project.id as string)) {
+        // The client last saw it on the server: a stale save must not bring back a deleted audit.
+        throw new HttpError(404, 'This audit was deleted on another device.', 'project_deleted')
       } else if (caseContentChanged(null, project)) {
         throw new HttpError(400, 'New projects cannot carry pre-approved cases or evidence. Import historical projects through the account import flow.', 'case_command_required')
       }
@@ -549,11 +591,9 @@ export function createApp(deps: AppDependencies): App {
       }
       const fingerprints = projectFingerprints(project)
       assertNotRepeat(user, project.id as string, fingerprints)
-      if (isNew) recordAuditStart(user.id, project.id as string)
-      const revision = projects.upsert(user.id, project)
-      rememberUpload(user.id, project.id as string, fingerprints)
+      const revision = storeUpload(user.id, project.id as string, fingerprints, project, isNew)
       billing.recordRecoveries(user.id, project)
-      return json(200, { ok: true, revision, project })
+      return json(200, wantsMinimal(req) ? { ok: true, revision } : { ok: true, revision, project })
     }
     if (projectMatch && method === 'DELETE') {
       const user = requireUser(req)
@@ -564,7 +604,7 @@ export function createApp(deps: AppDependencies): App {
     if (path === '/api/projects/import' && method === 'POST') {
       const user = requireUser(req)
       requireJson(req)
-      const { projects: incoming } = await req.json<{ projects?: Array<Record<string, unknown>> }>()
+      const { projects: incoming } = await req.json<{ projects?: Array<Record<string, unknown>> }>(auditBody)
       if (!Array.isArray(incoming)) throw new HttpError(400, 'Send projects to import.')
       const imported: string[] = []
       const skipped: string[] = []
@@ -592,9 +632,7 @@ export function createApp(deps: AppDependencies): App {
           blocked.push(id)
           continue
         }
-        recordAuditStart(user.id, id)
-        projects.upsert(user.id, quarantineLegacyProject(project))
-        rememberUpload(user.id, id, fingerprints)
+        storeUpload(user.id, id, fingerprints, quarantineLegacyProject(project), true)
         billing.recordRecoveries(user.id, project, { imported: true })
         imported.push(id)
       }
@@ -613,28 +651,14 @@ export function createApp(deps: AppDependencies): App {
     if (path === '/api/ai/draft' && method === 'POST') {
       const user = requireUser(req)
       if (!entitlements(user).limits.aiDrafts) throw new HttpError(402, 'AI recovery drafts are part of the Pro plan.', 'plan_limit', { feature: 'ai' })
-      if (!drafts) throw new HttpError(503, 'AI drafting is not configured on this server.', 'ai_unavailable')
+      if (!ai.providerFor('draft_recovery_request')) throw new HttpError(503, 'AI drafting is not configured on this server.', 'ai_unavailable')
       requireJson(req)
       limit(draftLimiter, `draft:${user.id}`)
       const parsed = DraftRequestSchema.safeParse(await req.json())
       if (!parsed.success) throw new HttpError(400, 'The case data is malformed.', 'validation')
-      const { projectId, findingId, ...clientFacts } = parsed.data
-      const facts = authorizedDraftFacts(projects.get(user.id, projectId), findingId, clientFacts.amountRequested)
-      if (!facts.ok) throw new HttpError(403, facts.reason, 'recovery_not_authorized')
-      // Only the reviewer's tone/context and sender may come from the browser.
-      const request = { ...facts.facts, userContext: clientFacts.userContext, sender: clientFacts.sender }
-      let draft
-      try {
-        draft = await drafts.draft(request)
-      } catch (err) {
-        const code = err instanceof DraftError ? err.code : 'ai_failed'
-        console.error('ai draft failed:', code)
-        throw new HttpError(502, err instanceof DraftError ? err.message : 'AI drafting failed. The generated letter is still there.', code)
-      }
-      if (unsupportedAmounts(draft, request).length > 0) {
-        throw new HttpError(502, 'The AI draft mentioned an amount that is not in the records, so it was discarded. Use the generated letter or try again.', 'ai_unsupported_amount')
-      }
-      return json(200, draft)
+      // Only the ids, the amount and method asked for, the tone note and the sender's names are used; every fact comes from the stored case.
+      const { projectId, findingId, amountRequested, method: resolution, userContext, sender } = parsed.data
+      return recovery.draft(req, user, { projectId, findingId, amountRequested, method: resolution, userContext, sender: { businessName: sender.businessName, senderName: sender.senderName } })
     }
 
     // ---------- dev mailbox ----------
@@ -651,19 +675,48 @@ export function createApp(deps: AppDependencies): App {
     const intelligenceResponse = intelligenceRoutes ? await intelligenceRoutes.route(req) : null
     if (intelligenceResponse) return intelligenceResponse
 
+    const ledgerResponse = await ledgerRoutes.route(req)
+    if (ledgerResponse) return ledgerResponse
+    for (const group of workstreamRoutes) {
+      const handled = await group(req)
+      if (handled) return handled
+    }
+
     if (path.startsWith('/api/')) throw new HttpError(404, 'Not found.')
 
     // ---------- static site (production) ----------
-    if (deps.staticDir && method === 'GET') return serveStatic(deps.staticDir, path)
+    if (deps.staticDir && (method === 'GET' || method === 'HEAD')) return serveStatic(deps.staticDir, req)
     throw new HttpError(404, 'Not found.')
   }
+
+  // ---------- recovery automation and secure AI (workstream J1–J5) ----------
+  const approvals = new ApprovalService({ db, sealer: createSealer(config.dataKeys), getProject: (tenantId, projectId) => projects.get(tenantId, projectId), revision: (tenantId, projectId) => projects.revision(tenantId, projectId), now: deps.now })
+  approvals.recoverInterrupted()
+  const workstream: WorkstreamDeps = {
+    db, projects, caseCommands, ai, approvals, sealer: createSealer(config.dataKeys),
+    requireUser, tenantFor: tenantForUser,
+    afterCaseCommand: (userId, project) => billing.recordRecoveries(userId, project),
+    // An internal call to this server's own routes, as the same signed-in person and with the same checks.
+    dispatch: (req, method, path, payload) => route({ ...req, method, url: new URL(path, req.url), headers: { ...req.headers, 'content-type': 'application/json' }, json: async <T>() => payload as T, text: async () => JSON.stringify(payload) }),
+    now: deps.now ?? Date.now,
+    settings: { ...DEFAULT_WORKSTREAM_SETTINGS, ...deps.workstream },
+  }
+  const recovery = createRecoveryRoutes(workstream)
+  const workstreamRoutes = [recovery.route, createJobRoutes(workstream), createInboundRoutes(workstream), createDocumentRoutes(workstream)]
 
   const server = createServer(async (rawReq, rawRes) => {
     const options = { noStore: (rawReq.url ?? '').startsWith('/api/'), hsts: config.production }
     try {
       const req = await toRequest(rawReq, { trustProxy: config.trustProxy })
+      // Every route reads its body as an object; `null`, a list or a bare value is the caller's mistake, not a crash.
+      const readJson = req.json
+      req.json = async <T>(...limits: Parameters<typeof readJson>) => {
+        const body: unknown = await readJson(...limits)
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Body must be a JSON object.', 'validation')
+        return body as T
+      }
       const response = await route(req)
-      writeResponse(rawRes, response, options)
+      writeResponse(rawRes, await compressed(response, rawReq.headers['accept-encoding']), options)
     } catch (err) {
       if (err instanceof HttpError) {
         writeResponse(rawRes, json(err.status, { message: err.message, code: err.code, fields: err.fields }), options)
@@ -704,30 +757,105 @@ function isProjectShape(project: Record<string, unknown>): boolean {
 }
 
 /** The legacy whole-project route is for ledger/source changes, never case facts. */
-function caseContentChanged(previous: Record<string, unknown> | null, incoming: Record<string, unknown>): boolean {
-  type CaseEnvironment = { caseStates?: Record<string, unknown>; records?: Array<{ id: string }>; result?: { findings?: Array<{ id: string; evidence?: unknown; classification?: string; potentialAmountMinor?: number | null; relatedRecords?: Array<{ id: string }> }> } }
+type Plain = Record<string, unknown>
+
+/**
+ * What a payment row says, however the version of the app that saved it wrote
+ * it down: dates as days (they were once instants), currency by its code. Its
+ * place in the files it came from is not part of what it says. A transaction ID
+ * may be learned later, but never changed.
+ */
+function samePayment(before: Plain, after: Plain | undefined): boolean {
+  if (!after) return false
+  const day = (value: unknown) => {
+    const date = typeof value === 'string' ? storedDay(value) : null
+    return date && !Number.isNaN(date.getTime()) ? isoDay(date) : value ?? null
+  }
+  const said = (record: Plain) => JSON.stringify([
+    record.vendor, record.invoiceNumber ?? null, day(record.paymentDate), day(record.invoiceDate), record.invoiceAmount ?? null, record.amountPaid,
+    typeof record.currency === 'string' ? canonicalCurrency(record.currency) : null, record.terms ?? null, record.bankAccountLast4 ?? null, record.transactionType ?? null,
+    record.quickbooks ?? null, (record.source as Plain | undefined)?.raw ?? null,
+  ])
+  const learned = (key: string) => before[key] == null || before[key] === after[key]
+  const identified = before.externalTransactionId == null && after.externalTransactionId != null
+  return said(identified ? { ...before, quickbooks: null } : before) === said(identified ? { ...after, quickbooks: null } : after) && ['externalTransactionId', 'company', 'sourceAccount', 'stableSupplierId'].every(learned)
+}
+
+const NEEDS_CHECKING = { requiresRevalidation: true, potentialAmountMinor: null, classification: 'review_needed', class: 'review' } as const
+
+/** The same finding, or the same finding marked to be checked again because its payments changed. That only ever takes away what was decided. */
+function sameOrToBeChecked(before: Plain, after: Plain | undefined, claimedElsewhere: boolean): boolean {
+  if (!after) return false
+  const rows = (finding: Plain) => ((finding.relatedRecords ?? []) as { id: string }[]).map((record) => record.id).sort()
+  const rest = ({ relatedRecords: _rows, ...finding }: Plain) => finding
+  if (JSON.stringify(rows(before)) !== JSON.stringify(rows(after))) return false
+  if (sameJson(rest(before), rest(after))) return true
+  const { suppressionReason: was, ...old } = rest(before)
+  const { suppressionReason: why, ...now } = rest(after)
+  // Marked to be checked: a reason is given, and one it already had stands.
+  if (typeof why === 'string' && why.trim() !== '' && (was == null || was === why)) return sameJson({ ...old, ...NEEDS_CHECKING }, now)
+  // Raised again from its own payments: no longer replaced, but still to be checked, and never while a newer finding holds its payments.
+  return typeof was === 'string' && why == null && !claimedElsewhere && sameJson({ ...old, ...NEEDS_CHECKING }, now)
+}
+
+/** Equal whatever order the keys were written in. */
+function sameJson(a: unknown, b: unknown): boolean {
+  const ordered = (_key: string, value: unknown) => (value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([x], [y]) => (x < y ? -1 : 1))) : value)
+  return JSON.stringify(a, ordered) === JSON.stringify(b, ordered)
+}
+
+function caseContentChanged(previous: Plain | null, incoming: Plain): boolean {
+  type Found = Plain & { id: string; relatedRecords?: Array<{ id: string }> }
+  type CaseEnvironment = { caseStates?: Record<string, Plain>; records?: Array<Plain & { id: string }>; retiredRecords?: Array<Plain & { id: string }>; result?: { findings?: Found[] } }
   const env = (incoming.environment ?? {}) as CaseEnvironment
   if (!previous) return Object.keys(env.caseStates ?? {}).length > 0 || (env.result?.findings ?? []).some((finding) => finding.evidence != null || finding.classification === 'recovery_candidate' || finding.potentialAmountMinor != null)
-  const old = (previous.environment ?? {}) as typeof env
-  if (JSON.stringify(env.caseStates ?? {}) !== JSON.stringify(old.caseStates ?? {})) return true
+  const old = (previous.environment ?? {}) as CaseEnvironment
+  const oldStates = old.caseStates ?? {}
+  const newStates = env.caseStates ?? {}
   const oldFindings = new Map((old.result?.findings ?? []).map((finding) => [finding.id, finding]))
   const newFindings = new Map((env.result?.findings ?? []).map((finding) => [finding.id, finding]))
+  for (const id of new Set([...Object.keys(oldStates), ...Object.keys(newStates)])) {
+    if (sameJson(oldStates[id], newStates[id])) continue
+    if (!oldStates[id] || !newStates[id]) return true
+    const checkAgain = { ...oldStates[id], requiresRevalidation: true }
+    const unapproved = { ...checkAgain, approvedAt: null }
+    if (!sameJson(checkAgain, newStates[id]) && !sameJson(unapproved, newStates[id])) return true
+  }
   const protectedIds = new Set([
-    ...Object.keys(old.caseStates ?? {}),
+    ...Object.keys(oldStates),
     ...(old.result?.findings ?? []).filter((finding) => finding.evidence != null).map((finding) => finding.id),
   ])
-  const oldRecords = new Map((old.records ?? []).map((record) => [record.id, record]))
-  const newRecords = new Map((env.records ?? []).map((record) => [record.id, record]))
+  const byId = (records: Array<Plain & { id: string }>) => new Map(records.map((record) => [record.id, record]))
+  const oldRecords = byId([...(old.retiredRecords ?? []), ...(old.records ?? [])])
+  // A payment taken out of the audit is kept aside, so what was decided on it can still be read.
+  const newRecords = byId([...(env.retiredRecords ?? []), ...(env.records ?? [])])
   for (const id of protectedIds) {
     const before = oldFindings.get(id)
     const after = newFindings.get(id)
-    if (!before || !after || JSON.stringify(before) !== JSON.stringify(after)) return true
+    const rows = new Set((before?.relatedRecords ?? []).map((record) => record.id))
+    const claimedElsewhere = (env.result?.findings ?? []).some((other) => other.id !== id && (other.relatedRecords ?? []).filter((record) => rows.has(record.id)).length >= 2)
+    if (!before || !sameOrToBeChecked(before, after, claimedElsewhere)) return true
+    // Its payments may change only on the way to being checked again.
+    if (newStates[id]?.requiresRevalidation === true && after?.requiresRevalidation === true) continue
     for (const record of before.relatedRecords ?? []) {
       const original = oldRecords.get(record.id)
-      if (!original || JSON.stringify(original) !== JSON.stringify(newRecords.get(record.id))) return true
+      if (!original || !samePayment(original, newRecords.get(record.id))) return true
     }
   }
-  return (env.result?.findings ?? []).some((finding) => JSON.stringify(finding.evidence ?? null) !== JSON.stringify(oldFindings.get(finding.id)?.evidence ?? null))
+  // Two findings standing at once on the same payments, one of them decided, would be two claims on the same money.
+  const live = (env.result?.findings ?? []).filter((finding) => !finding.suppressionReason)
+  for (const decided of live.filter((finding) => newStates[finding.id]?.decision || finding.evidence != null)) {
+    const rows = new Set((decided.relatedRecords ?? []).map((record) => record.id))
+    if (live.some((other) => other.id !== decided.id && (other.relatedRecords ?? []).filter((record) => rows.has(record.id)).length >= 2)) return true
+  }
+  return (env.result?.findings ?? []).some((finding) => !sameJson(finding.evidence ?? null, oldFindings.get(finding.id)?.evidence ?? null))
+}
+
+/** Just the case a command changed, for a client that already holds the rest of the audit. */
+function changedCase(project: Record<string, unknown>, command: unknown) {
+  const findingId = (command as { findingId: string }).findingId
+  const env = project.environment as { caseStates?: Record<string, unknown>; result?: { findings?: Array<{ id: string }> } }
+  return { updatedAt: project.updatedAt, case: { findingId, state: env.caseStates?.[findingId] ?? null, finding: env.result?.findings?.find((f) => f.id === findingId) ?? null } }
 }
 
 /** Historical browser data remains visible, but its approvals are assertions. */
@@ -741,23 +869,4 @@ function quarantineLegacyProject(project: Record<string, unknown>): Record<strin
     approvedAt: null,
     requiresRevalidation: true,
   }])) } }
-}
-
-function serveStatic(root: string, urlPath: string): Response {
-  let decoded: string
-  try {
-    decoded = decodeURIComponent(urlPath)
-  } catch {
-    throw new HttpError(400, 'Bad request.')
-  }
-  const base = resolve(root)
-  const safe = normalize(decoded).replace(/^(\.\.[/\\])+/, '')
-  const candidates = [join(base, safe), join(base, safe, 'index.html'), join(base, 'index.html')]
-  for (const file of candidates) {
-    if (file !== base && !file.startsWith(base + sep)) continue
-    if (existsSync(file) && statSync(file).isFile()) {
-      return { status: 200, headers: { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream' }, body: readFileSync(file) }
-    }
-  }
-  return empty(404)
 }

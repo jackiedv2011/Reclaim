@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reclaim — Find money your business should still have</title>
-<meta name="description" content="Upload an export from your accounting system. Reclaim finds duplicate payments, duplicate bills, overpayments, unused credits and payment mismatches, shows you the evidence, and helps you recover the money once you approve.">
+<meta name="description" content="Upload an export of the payments you made. Reclaim finds duplicate payments, overpayments and unclaimed discounts, shows you the evidence, and helps you ask for duplicate payments back.">
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -123,7 +123,7 @@
     <div class="content the-grid">
       <h1 class="heading heading1 type-h1" data-split="h1">Find money<br>your business<br>should <em>still</em><br>have.</h1>
       <div class="desc">
-        <p class="type-body-large">Upload exports from QuickBooks Online, Xero, Bill, NetSuite or any spreadsheet. Reclaim finds duplicate payments, overpayments and unused credits, shows you the proof, and follows each one through until the money is back.</p>
+        <p class="type-body-large">Upload an export of your payments. Reclaim finds duplicate payments, overpayments and unclaimed discounts, shows you the records behind each one, and helps you get duplicate payments back.</p>
         <div class="hero-ctas">
           <a href="/audit?entry=sample" class="cta cta-button" size="large" theme="black"><span class="hover-loop"><span class="inner">Run a free audit</span></span></a>
           <a href="/how-it-works" class="cta cta-button has-arrow" size="large" theme="none"><span class="hover-loop"><span class="inner">See how it works<svg class="icon"><use href="#i-arrow"/></svg></span></span></a>
@@ -142,8 +142,8 @@
       <section class="section content-columns" theme="black">
         <div class="the-grid">
           <div class="columns">
-            <div class="content-column"><span class="step-no type-mono">01</span><h3 class="heading type-h4" data-split="h2">Upload.</h3><p class="desc type-body-medium">A CSV export of your bills and payments from QuickBooks Online, Xero or any other system.</p></div>
-            <div class="content-column"><span class="step-no type-mono">02</span><h3 class="heading type-h4" data-split="h2">Find.</h3><p class="desc type-body-medium">Duplicate payments, duplicate bills, overpayments, unused credits and payment mismatches, each with the records behind it.</p></div>
+            <div class="content-column"><span class="step-no type-mono">01</span><h3 class="heading type-h4" data-split="h2">Upload.</h3><p class="desc type-body-medium">One CSV or Excel file of the payments you made, from QuickBooks Online, Xero or any other system.</p></div>
+            <div class="content-column"><span class="step-no type-mono">02</span><h3 class="heading type-h4" data-split="h2">Find.</h3><p class="desc type-body-medium">Duplicate payments, overpayments, unclaimed discounts, changed bank details and more, each with the records behind it.</p></div>
             <div class="content-column"><span class="step-no type-mono">03</span><h3 class="heading type-h4" data-split="h2">Follow up.</h3><p class="desc type-body-medium">You approve the request, contact the supplier, and record replies. Optional Gmail sending requires a separate connection and your confirmation.</p></div>
           </div>
         </div>
@@ -181,9 +181,9 @@
         </div>
       </section>
 
-      <!-- The walkthrough: one case, from the first flag to the money back. The laptop is a rendered
-           frame sequence (blender/macbook.py); the dashboard on its screen is live HTML laid over the
-           screen corners of each frame, so it stays sharp when the view zooms in. Each caption names
+      <!-- The walkthrough: one case, from the first flag to the money back. The laptop is one rendered
+           still of it open (blender/macbook.py still=1); the dashboard on its screen is live HTML laid
+           over the glass, so it stays sharp when the view zooms in. Each caption names
            the screen it shows (data-shot) and what to frame (data-focus, data-focus-m on phones: the
            data-f names inside that screen). walkthrough.js drives it; without it, or with reduced
            motion, the section is a still of the open laptop with the five steps listed under it.
@@ -201,12 +201,12 @@
 
           <div class="wt-cam" aria-hidden="true">
             <div class="wt-stage">
-              <canvas class="wt-frames"></canvas>
               <img class="wt-still" alt="" decoding="async">
               <div class="wt-screen">
 
                 <!-- 01 the Overview (src/workspace/views/Dashboard.tsx). Figures add up: 7 open findings =
-                     $11,630 ready to claim (5) + $2,340 needing context (2). -->
+                     $8,720 ready to claim (3, the duplicates) + $5,250 needing context (4: overpayments and discounts,
+                     which never become a claim). -->
                 <div class="wt-shot" data-shot="overview">
                   <div class="app">
                     <!-- dashboard mock-up sidebar, as in src/workspace/WorkspaceShell.tsx.
@@ -242,13 +242,13 @@
                           <div class="app-head-copy">
                             <div class="app-meta"><span>QuickBooks Online</span><span>1,284 payments</span><span>212 vendors</span><span>Apr 1 – Jun 30, 2026</span></div>
                             <div class="app-h1">Overview</div>
-                            <p>7 open findings worth $13,970 in Q2 vendor payments. $11,630 of it is supported by the records and ready to claim.</p>
+                            <p>7 open findings worth $13,970 in Q2 vendor payments. $8,720 of it is duplicate payments the records support.</p>
                           </div>
                           <span class="app-btn is-accent">Review next finding<svg><use href="#d-arrow-r"/></svg></span>
                         </div>
                         <div class="app-totals" data-f="totals">
-                          <div class="app-total"><span class="lbl">Ready to claim</span><strong>$11,630</strong><small>5 findings the records support</small></div>
-                          <div class="app-total"><span class="lbl">Needs more context</span><strong>$2,340</strong><small>2 findings to check against a PO or statement</small></div>
+                          <div class="app-total"><span class="lbl">Ready to claim</span><strong>$8,720</strong><small>3 duplicates the records support</small></div>
+                          <div class="app-total"><span class="lbl">Needs more context</span><strong>$5,250</strong><small>4 findings to check, not money owed</small></div>
                           <div class="app-total"><span class="lbl">In recovery</span><strong>$7,180</strong><small>2 requests out with vendors</small></div>
                           <div class="app-total"><span class="lbl">Recovered</span><strong class="is-back">$3,420</strong><small>From 2 cases</small></div>
                         </div>
@@ -257,16 +257,16 @@
                             <div class="app-card-head"><div><b>Up next</b><small>7 findings waiting on your decision, most worth your time first</small></div><span class="app-more">All findings<svg><use href="#d-arrow-r"/></svg></span></div>
                             <div class="app-row is-lit" data-f="first"><div class="app-row-main"><strong>Example Supply Co.</strong><span><span class="app-chip" data-kind="claim">Exact duplicate payment</span><em>INV-1834 · paid May 4 and May 9</em></span></div><span class="app-amt">$4,280</span><span class="app-go">Review<svg><use href="#d-arrow-r"/></svg></span></div>
                             <div class="app-row"><div class="app-row-main"><strong>Arden Office</strong><span><span class="app-chip" data-kind="claim">Near-duplicate payment</span><em>5521, INV 5521 · paid May 12 and Jun 2</em></span></div><span class="app-amt">$2,900</span><span class="app-go">Review<svg><use href="#d-arrow-r"/></svg></span></div>
-                            <div class="app-row"><div class="app-row-main"><strong>Halden Print Works</strong><span><span class="app-chip" data-kind="claim">Overpayment vs. invoice</span><em>INV-7702 · paid Jun 18</em></span></div><span class="app-amt">$2,400</span><span class="app-go">Review<svg><use href="#d-arrow-r"/></svg></span></div>
-                            <div class="app-row"><div class="app-row-main"><strong>Metro Freight</strong><span><span class="app-chip" data-kind="review">Near-duplicate payment</span><em>BOL-3310 · paid Apr 9 and Apr 23</em></span></div><span class="app-amt">$1,540</span><span class="app-go">Review<svg><use href="#d-arrow-r"/></svg></span></div>
-                            <div class="app-row"><div class="app-row-main"><strong>Kestrel Packaging</strong><span><span class="app-chip" data-kind="claim">Overpayment vs. invoice</span><em>INV-20931 · paid Apr 18</em></span></div><span class="app-amt">$1,200</span><span class="app-go">Review<svg><use href="#d-arrow-r"/></svg></span></div>
+                            <div class="app-row"><div class="app-row-main"><strong>Halden Print Works</strong><span><span class="app-chip" data-kind="review">Overpayment vs. invoice</span><em>INV-7702 · paid Jun 18</em></span></div><span class="app-amt">$2,400</span><span class="app-go">Review<svg><use href="#d-arrow-r"/></svg></span></div>
+                            <div class="app-row"><div class="app-row-main"><strong>Metro Freight</strong><span><span class="app-chip" data-kind="claim">Near-duplicate payment</span><em>BOL-3310 · paid Apr 9 and Apr 23</em></span></div><span class="app-amt">$1,540</span><span class="app-go">Review<svg><use href="#d-arrow-r"/></svg></span></div>
+                            <div class="app-row"><div class="app-row-main"><strong>Kestrel Packaging</strong><span><span class="app-chip" data-kind="review">Overpayment vs. invoice</span><em>INV-20931 · paid Apr 18</em></span></div><span class="app-amt">$1,200</span><span class="app-go">Review<svg><use href="#d-arrow-r"/></svg></span></div>
                           </div>
                           <div class="app-card">
                             <div class="app-card-head"><div><b>Recovery progress</b><small>Claimable findings by stage</small></div></div>
                             <div class="app-flow">
-                              <div class="app-flow-bar"><i data-stage="found" style="flex:5"></i><i data-stage="requested" style="flex:2"></i><i data-stage="recovered" style="flex:2"></i></div>
+                              <div class="app-flow-bar"><i data-stage="found" style="flex:3"></i><i data-stage="requested" style="flex:2"></i><i data-stage="recovered" style="flex:2"></i></div>
                               <div class="app-steps">
-                                <div class="app-step"><span><i data-stage="found"></i>To decide</span><strong>5</strong><small>Supported, not reviewed</small></div>
+                                <div class="app-step"><span><i data-stage="found"></i>To decide</span><strong>3</strong><small>Supported, not reviewed</small></div>
                                 <div class="app-step"><span><i data-stage="confirmed"></i>Confirmed</span><strong>0</strong><small>Request not sent</small></div>
                                 <div class="app-step"><span><i data-stage="requested"></i>Requested</span><strong>2</strong><small>Out with the vendor</small></div>
                                 <div class="app-step"><span><i data-stage="recovered"></i>Recovered</span><strong>2</strong><small>Money came back</small></div>
@@ -480,7 +480,7 @@
                             <div class="app-meta"><span class="app-chip" data-kind="claim">Exact duplicate payment</span><span>Requested Sep 15</span><span class="app-chip" data-tone="done" data-state="before">Refund promised</span><span class="app-chip" data-tone="accent" data-state="after">Recovered</span></div>
                             <div class="app-h1">Example Supply Co.</div>
                             <p data-state="before">Refund promised by ACH. Not counted as recovered until it settles.</p>
-                            <p data-state="after">Refund settled on Sep 26 and matched in QuickBooks Online. Case closed.</p>
+                            <p data-state="after">Refund arrived on Sep 26 and was recorded by Maya Chen. Case closed.</p>
                           </div>
                           <div class="app-amount">$4,280</div>
                         </div>
@@ -493,7 +493,7 @@
                               <div class="app-tr" style="--cols:minmax(0,1fr) 6.5rem 8rem"><span><strong>Request sent</strong><small>From your email, 3 records attached</small></span><span>Sep 15</span><span class="num">$4,280.00</span></div>
                               <div class="app-tr" style="--cols:minmax(0,1fr) 6.5rem 8rem"><span><strong>Vendor agreed</strong><small>Refund by ACH, expected by Sep 30</small></span><span>Sep 17</span><span class="num">$4,280.00</span></div>
                               <div class="app-tr" style="--cols:minmax(0,1fr) 6.5rem 8rem"><span><strong>Follow-up sent</strong><small>Vendor confirmed the ACH was scheduled</small></span><span>Sep 24</span><span class="num">—</span></div>
-                              <div class="app-tr is-new" data-state="after" data-f="settled" style="--cols:minmax(0,1fr) 6.5rem 8rem"><span><strong>Refund settled</strong><small>ACH deposit matched in QuickBooks Online</small></span><span>Sep 26</span><span class="num is-back">$4,280.00</span></div>
+                              <div class="app-tr is-new" data-state="after" data-f="settled" style="--cols:minmax(0,1fr) 6.5rem 8rem"><span><strong>Refund settled</strong><small>Recorded by Maya Chen, with the ACH reference</small></span><span>Sep 26</span><span class="num is-back">$4,280.00</span></div>
                             </div>
                             <dl class="app-kv app-card app-card-body" data-f="money">
                               <div><dt>Recovered so far</dt><dd data-state="before">$0</dd><dd class="is-back" data-state="after">$4,280</dd></div>
@@ -510,14 +510,14 @@
                             <div class="app-card app-next" data-state="after">
                               <span class="app-label">Closed Sep 26</span>
                               <strong>Money back: $4,280</strong>
-                              <p>Matched to the ACH deposit in QuickBooks Online. Nothing left to chase.</p>
-                              <span class="app-btn is-outline">Reconcile in QuickBooks</span>
+                              <p>Recorded with the ACH reference. Nothing left to chase.</p>
+                              <span class="app-btn is-outline">Mark reconciled</span>
                             </div>
                             <div class="app-card">
                               <div class="app-card-head"><div><b>History</b></div></div>
                               <div class="app-card-body">
                                 <ul class="app-feed">
-                                  <li data-state="after"><i class="is-accent"><svg><use href="#d-banknote"/></svg></i><span>Refund settled<small>Matched to a deposit</small></span><time>Sep 26</time></li>
+                                  <li data-state="after"><i class="is-accent"><svg><use href="#d-banknote"/></svg></i><span>Refund settled<small>Recorded by Maya Chen</small></span><time>Sep 26</time></li>
                                   <li><i><svg><use href="#d-clock"/></svg></i><span>Follow-up sent<small>On schedule, 7 days after the reply</small></span><time>Sep 24</time></li>
                                   <li><i><svg><use href="#d-mail"/></svg></i><span>Vendor replied<small>Refund promised by ACH</small></span><time>Sep 17</time></li>
                                   <li><i><svg><use href="#d-send"/></svg></i><span>Request sent<small>With the evidence attached</small></span><time>Sep 15</time></li>
@@ -531,7 +531,7 @@
                   </div>
                 </div>
 
-                <i class="wt-spot"></i>
+                <svg class="wt-spot" aria-hidden="true"><path fill-rule="evenodd"/></svg>
               </div>
             </div>
           </div>
@@ -543,7 +543,7 @@
             </li>
             <li class="wt-cap" data-shot="finding" data-focus="proof" data-focus-m="records" data-side="right">
               <span class="wt-step type-mono"><i></i>02 · Proven</span>
-              <p><strong>The proof comes with it.</strong> Two settled payments, May 4 and May 9, for the same bill. No refund, credit, void or reversal. Every record links back to QuickBooks.</p>
+              <p><strong>The proof comes with it.</strong> Two settled payments, May 4 and May 9, for the same bill. No refund, credit, void or reversal. Every record names where it came from.</p>
             </li>
             <li class="wt-cap" data-shot="approve" data-focus="request" data-focus-m="request" data-side="left">
               <span class="wt-step type-mono"><i></i>03 · Approved</span>
@@ -586,7 +586,7 @@
         <div class="the-grid">
           <div class="fd-copy">
             <h2 class="fd-eyebrow">What Reclaim finds</h2>
-            <p class="fd-text" data-words><span class="fd-money">$4,280</span> was one. Reclaim looks for the rest: a payment bigger than its bill, a credit nobody used, one purchase billed under two numbers. Not a list of maybes. Mistakes your own records can prove.</p>
+            <p class="fd-text" data-words><span class="fd-money">$4,280</span> was one. Reclaim looks for the rest: a payment bigger than its bill, a discount nobody took, one invoice paid under two numbers. Each one comes with the records behind it, so you can check it yourself.</p>
           </div>
         </div>
       </div>
@@ -595,30 +595,31 @@
     <ol class="fd-tiles">
       <li><a href="/what-it-checks#exact-duplicate" class="fd-tile" data-ex="echo"><img src="/media/exhibits/echo/still.webp" srcset="/media/exhibits/echo/still-m.webp 1600w, /media/exhibits/echo/still.webp 2560w" sizes="(max-width: 1023px) 100vw, 50vw" width="2560" height="1440" alt="" loading="lazy" decoding="async"><span class="fd-cap"><span class="fd-title">One payment. Made twice.</span><span class="fd-meta">Duplicate payment · $4,280</span></span></a></li>
       <li><a href="/what-it-checks#overpayment" class="fd-tile" data-ex="overflow"><img src="/media/exhibits/overflow/still.webp" srcset="/media/exhibits/overflow/still-m.webp 1600w, /media/exhibits/overflow/still.webp 2560w" sizes="(max-width: 1023px) 100vw, 50vw" width="2560" height="1440" alt="" loading="lazy" decoding="async"><span class="fd-cap"><span class="fd-title">More than the bill asked for.</span><span class="fd-meta">Overpayment · $1,200</span></span></a></li>
-      <li><a href="/what-it-checks" class="fd-tile" data-ex="piece"><img src="/media/exhibits/piece/still.webp" srcset="/media/exhibits/piece/still-m.webp 1600w, /media/exhibits/piece/still.webp 2560w" sizes="(max-width: 1023px) 100vw, 50vw" width="2560" height="1440" alt="" loading="lazy" decoding="async"><span class="fd-cap"><span class="fd-title">It was yours the whole time.</span><span class="fd-meta">Unused credit · $850</span></span></a></li>
-      <li><a href="/what-it-checks" class="fd-tile" data-ex="shadow"><img src="/media/exhibits/shadow/still.webp" srcset="/media/exhibits/shadow/still-m.webp 1600w, /media/exhibits/shadow/still.webp 2560w" sizes="(max-width: 1023px) 100vw, 50vw" width="2560" height="1440" alt="" loading="lazy" decoding="async"><span class="fd-cap"><span class="fd-title">Two bills. One purchase.</span><span class="fd-meta">Duplicate bill · $2,640</span></span></a></li>
+      <li><a href="/what-it-checks#unclaimed-discount" class="fd-tile" data-ex="piece"><img src="/media/exhibits/piece/still.webp" srcset="/media/exhibits/piece/still-m.webp 1600w, /media/exhibits/piece/still.webp 2560w" sizes="(max-width: 1023px) 100vw, 50vw" width="2560" height="1440" alt="" loading="lazy" decoding="async"><span class="fd-cap"><span class="fd-title">Paid early. Full price anyway.</span><span class="fd-meta">Unclaimed discount · $850</span></span></a></li>
+      <li><a href="/what-it-checks#near-duplicate" class="fd-tile" data-ex="shadow"><img src="/media/exhibits/shadow/still.webp" srcset="/media/exhibits/shadow/still-m.webp 1600w, /media/exhibits/shadow/still.webp 2560w" sizes="(max-width: 1023px) 100vw, 50vw" width="2560" height="1440" alt="" loading="lazy" decoding="async"><span class="fd-cap"><span class="fd-title">Two numbers. One invoice.</span><span class="fd-meta">Near-duplicate payment · $2,640</span></span></a></li>
     </ol>
 
-    <!-- the close: the four put right, as one quarter's recovery summary (the same four, in the same order and amounts) -->
+    <!-- the close: the same four as one quarter's summary. Only duplicates and near-duplicates can become a vendor
+         request (src/recovery/eligibility.ts); the other two (is-open) are shown but never counted as recovered. -->
     <div class="ex-close">
       <div class="ex-close-copy">
-        <p class="ex-close-eyebrow">Example quarter, recovered</p>
-        <h2 class="ex-close-title">One quarter.<br>$8,970 back.</h2>
-        <p class="ex-close-desc type-body-headline">Four mistakes from one quarter of an example company's books, each one proven and put right.</p>
+        <p class="ex-close-eyebrow">Example quarter</p>
+        <h2 class="ex-close-title">One quarter.<br>$6,920 back.</h2>
+        <p class="ex-close-desc type-body-headline">Four mistakes from one quarter of an example company's books. The two duplicates came back. The overpayment and the discount are there for the company to look into.</p>
         <div class="ex-ctas">
           <a href="/audit?entry=sample" class="cta cta-button" size="large" theme="green"><span class="hover-loop"><span class="inner">Run a free audit</span></span></a>
           <a href="/what-it-checks" class="cta cta-button has-arrow" size="large" theme="grey"><span class="hover-loop"><span class="inner">What it checks<svg class="icon"><use href="#i-arrow"/></svg></span></span></a>
         </div>
       </div>
       <div class="ex-sum">
-        <div class="ex-sum-head"><h3>Recovery summary</h3><span class="ex-sum-all"><i></i>4 of 4 recovered</span></div>
+        <div class="ex-sum-head"><h3>Quarter summary</h3><span class="ex-sum-all"><i></i>2 of 4 recovered</span></div>
         <ol class="ex-sum-rows">
           <li class="ex-sum-row" data-ex="echo"><span class="ex-sum-ico" aria-hidden="true"></span><span class="ex-sum-what"><span class="ex-sum-kind">Duplicate payment</span><span class="ex-sum-sub">Example Supply Co. · INV-1834 paid twice</span></span><span class="ex-sum-amt">$4,280</span><span class="ex-sum-state">Refunded</span></li>
-          <li class="ex-sum-row" data-ex="overflow"><span class="ex-sum-ico" aria-hidden="true"></span><span class="ex-sum-what"><span class="ex-sum-kind">Overpayment</span><span class="ex-sum-sub">Invoice for $3,400, paid $4,600</span></span><span class="ex-sum-amt">$1,200</span><span class="ex-sum-state">Refunded</span></li>
-          <li class="ex-sum-row" data-ex="piece"><span class="ex-sum-ico" aria-hidden="true"></span><span class="ex-sum-what"><span class="ex-sum-kind">Unused credit</span><span class="ex-sum-sub">March vendor credit, never applied</span></span><span class="ex-sum-amt">$850</span><span class="ex-sum-state">Credit applied</span></li>
-          <li class="ex-sum-row" data-ex="shadow"><span class="ex-sum-ico" aria-hidden="true"></span><span class="ex-sum-what"><span class="ex-sum-kind">Duplicate bill</span><span class="ex-sum-sub">Same items under two bill numbers</span></span><span class="ex-sum-amt">$2,640</span><span class="ex-sum-state">Refunded</span></li>
+          <li class="ex-sum-row" data-ex="shadow"><span class="ex-sum-ico" aria-hidden="true"></span><span class="ex-sum-what"><span class="ex-sum-kind">Near-duplicate payment</span><span class="ex-sum-sub">Paid as INV-2051 and again as INV2051</span></span><span class="ex-sum-amt">$2,640</span><span class="ex-sum-state">Refunded</span></li>
+          <li class="ex-sum-row is-open" data-ex="overflow"><span class="ex-sum-ico" aria-hidden="true"></span><span class="ex-sum-what"><span class="ex-sum-kind">Overpayment</span><span class="ex-sum-sub">Invoice for $3,400, paid $4,600</span></span><span class="ex-sum-amt">$1,200</span><span class="ex-sum-state">To check</span></li>
+          <li class="ex-sum-row is-open" data-ex="piece"><span class="ex-sum-ico" aria-hidden="true"></span><span class="ex-sum-what"><span class="ex-sum-kind">Unclaimed discount</span><span class="ex-sum-sub">2% off $42,500, paid inside 10 days at full price</span></span><span class="ex-sum-amt">$850</span><span class="ex-sum-state">For next time</span></li>
         </ol>
-        <p class="ex-sum-total"><span>Total recovered<small>Q2 · matched in your books</small></span><strong data-total>$8,970</strong></p>
+        <p class="ex-sum-total"><span>Total recovered<small>Q2 · example company</small></span><strong data-total>$6,920</strong></p>
       </div>
     </div>
   </section>
@@ -628,14 +629,14 @@
     <div class="the-grid">
       <div class="header" style="grid-column-end:span 8">
         <h2 class="heading type-h3" data-split="h2">Start with<br>the records you<br>already have.</h2>
-        <p class="desc type-body-headline">Upload exports of your bills, payments, vendors and credits from QuickBooks Online, Xero, Bill or NetSuite, with step-by-step guides for the common systems. Direct connections are in development.</p>
+        <p class="desc type-body-headline">Upload one CSV or Excel file of your payments. Guides for QuickBooks Online, Xero, NetSuite and BILL show how to get it. Direct connections are in development.</p>
       </div>
       <ul class="content">
-        <li class="grid-item-wrap is-wide"><div class="grid-item grid-item-brand" idx="0"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-quickbooks">quickbooks</span><span class="depth type-mono">CSV export</span></div></div></div></div></li>
-        <li class="grid-item-wrap is-wide"><div class="grid-item grid-item-brand" idx="0"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-xero">XERO</span><span class="depth type-mono">CSV export</span></div></div></div></div></li>
-        <li class="grid-item-wrap"><a href="/guides/netsuite" class="grid-item grid-item-brand" idx="1"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-netsuite">NETSUITE</span><span class="depth type-mono">CSV export</span></div></div></div></a></li>
-        <li class="grid-item-wrap"><a href="/guides/bill" class="grid-item grid-item-brand" idx="2"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-bill">bill</span><span class="depth type-mono">CSV export</span></div></div></div></a></li>
-        <li class="grid-item-wrap"><div class="grid-item grid-item-brand" idx="3"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-ramp">ramp</span><span class="depth type-mono">CSV export</span></div></div></div></div></li>
+        <li class="grid-item-wrap is-wide"><div class="grid-item grid-item-brand" idx="0"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-quickbooks">quickbooks</span><span class="depth type-mono">File export</span></div></div></div></div></li>
+        <li class="grid-item-wrap is-wide"><div class="grid-item grid-item-brand" idx="0"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-xero">XERO</span><span class="depth type-mono">File export</span></div></div></div></div></li>
+        <li class="grid-item-wrap"><a href="/guides/netsuite" class="grid-item grid-item-brand" idx="1"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-netsuite">NETSUITE</span><span class="depth type-mono">File export</span></div></div></div></a></li>
+        <li class="grid-item-wrap"><a href="/guides/bill" class="grid-item grid-item-brand" idx="2"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-bill">bill</span><span class="depth type-mono">File export</span></div></div></div></a></li>
+        <li class="grid-item-wrap"><div class="grid-item grid-item-brand" idx="3"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-ramp">ramp</span><span class="depth type-mono">File export</span></div></div></div></div></li>
         <li class="grid-item-wrap"><a href="/guides" class="grid-item grid-item-brand" idx="4"><div class="m3d"><div class="rotate"><div class="wrap"><span class="wm wm-csv">csv</span><span class="depth type-mono">Any spreadsheet</span></div></div></div></a></li>
       </ul>
     </div>
@@ -683,7 +684,7 @@
       <div class="ft-top">
         <div class="ft-about">
           <a href="/" class="hx-logo" aria-label="Reclaim home"><svg class="wheel" viewBox="0 0 26 23" fill="currentColor"><use href="#hx-wheel"/></svg><span class="word"><span class="letter">R</span><span class="letter">e</span><span class="letter">c</span><span class="letter">l</span><span class="letter">a</span><span class="letter">i</span><span class="letter">m</span></span></a>
-          <p class="ft-line">Finds duplicate payments, overpayments and forgotten credits in your books, and helps you get the money back.</p>
+          <p class="ft-line">Finds duplicate payments, overpayments and unclaimed discounts in your records, and helps you get duplicate payments back.</p>
           <a href="mailto:reclaimbusiness1@gmail.com" class="ft-mail">reclaimbusiness1@gmail.com</a>
         </div>
         <nav class="ft-cols" aria-label="Footer">

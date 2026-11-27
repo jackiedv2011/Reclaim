@@ -1120,6 +1120,47 @@ html[data-surface='workspace'] .wk-import-weaker ul { display: flex; flex-direct
 html[data-surface='workspace'] .wk-import-weaker li { position: relative; padding-left: 16px; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
 html[data-surface='workspace'] .wk-import-weaker li::before { content: ''; position: absolute; top: 7px; left: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--kind-review-dot); }
 
+/* How the file was read, and the step that asks (components/audit/ColumnMatch). */
+html[data-surface='workspace'] .wk-import-reading { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-sunk); }
+html[data-surface='workspace'] .wk-import-reading ul { display: flex; flex-direction: column; gap: 6px; color: var(--text-dim); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+html[data-surface='workspace'] .wk-match-section { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+html[data-surface='workspace'] .wk-match-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+html[data-surface='workspace'] .wk-match-row { display: flex; align-items: center; gap: 8px; color: var(--text-dim); font: 500 13px var(--f-text); }
+html[data-surface='workspace'] .wk-match-row .wk-input { width: auto; }
+html[data-surface='workspace'] .wk-match-note { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+html[data-surface='workspace'] .wk-match-table { max-width: 100%; overflow: auto; box-shadow: none; }
+html[data-surface='workspace'] .wk-match-table:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+html[data-surface='workspace'] .wk-match-table .wk-table { display: table; width: max-content; min-width: 100%; }
+html[data-surface='workspace'] .wk-match-table .wk-table thead { display: table-header-group; min-width: 0; }
+html[data-surface='workspace'] .wk-match-table .wk-table tbody { display: table-row-group; min-width: 0; }
+html[data-surface='workspace'] .wk-match-table .wk-table tr { display: table-row; }
+html[data-surface='workspace'] .wk-match-table .wk-table :is(th, td) { display: table-cell; max-width: 220px; height: auto; padding: 8px 12px; overflow: hidden; font-size: 12.5px; text-align: left; text-overflow: ellipsis; vertical-align: top; white-space: nowrap; }
+html[data-surface='workspace'] .wk-match-table .wk-table thead th { color: var(--text); font-weight: 600; text-transform: none; letter-spacing: 0; }
+html[data-surface='workspace'] .wk-match-table .wk-table thead small { display: block; margin-top: 2px; color: var(--accent-ink); font-size: 11.5px; font-weight: 500; }
+html[data-surface='workspace'] .wk-match-table .wk-table :is(tbody th, td) { color: var(--text-muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+html[data-surface='workspace'] .wk-match-table .wk-table [data-matched] { background: var(--accent-soft); color: var(--text); }
+html[data-surface='workspace'] .wk-match-table .wk-table tbody tr { cursor: default; animation: none; }
+html[data-surface='workspace'] .wk-match-table .wk-table tbody tr:last-child :is(th, td) { border-bottom: 0; }
+html[data-surface='workspace'] .wk-match-details { display: block; min-width: 0; }
+html[data-surface='workspace'] .wk-match-details > summary { width: fit-content; color: var(--text); font: 600 14px/1.5 var(--f-text); cursor: pointer; }
+html[data-surface='workspace'] .wk-match-details > :not(summary) { margin-top: 10px; }
+html[data-surface='workspace'] .wk-match-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 12px; }
+html[data-surface='workspace'] .wk-match-grid .wk-input { width: 100%; min-width: 0; }
+html[data-surface='workspace'] .wk-match-grid .wk-field-hint { color: var(--text-muted); font-size: 12px; line-height: 1.4; }
+html[data-surface='workspace'] .wk-match-check { display: flex; align-items: flex-start; gap: 9px; color: var(--text); font: 500 13.5px/1.4 var(--f-text); cursor: pointer; }
+html[data-surface='workspace'] .wk-match-check input { flex: none; width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--text); }
+html[data-surface='workspace'] .wk-match-check small { display: block; margin-top: 2px; color: var(--text-muted); font-size: 12.5px; font-weight: 400; line-height: 1.45; }
+html[data-surface='workspace'] .wk-match-question { display: flex; min-width: 0; flex-direction: column; gap: 8px; margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-sunk); }
+html[data-surface='workspace'] .wk-match-question > legend { float: left; width: 100%; padding: 0; color: var(--text); font: 600 14px/1.4 var(--f-text); }
+html[data-surface='workspace'] .wk-match-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+html[data-surface='workspace'] .wk-match-options .wk-radio { align-items: flex-start; padding: 12px; }
+html[data-surface='workspace'] .wk-match-options .wk-radio input { flex: none; margin-top: 2px; }
+html[data-surface='workspace'] .wk-match-options .wk-radio span { min-width: 0; color: var(--text); font: 500 13.5px/1.4 var(--f-text); }
+html[data-surface='workspace'] .wk-match-options .wk-radio small { display: block; margin-top: 2px; color: var(--text-muted); font-size: 12.5px; font-weight: 400; line-height: 1.45; }
+@media (max-width: 640px) {
+  html[data-surface='workspace'] :is(.wk-match-grid, .wk-match-options) { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* The required-format reference: the dashboard's table, read-only. */
 html[data-surface='workspace'] .wk-format-table { overflow: auto; box-shadow: none; }
 html[data-surface='workspace'] .wk-format-table .wk-table { display: table; width: 100%; }

@@ -1,17 +1,44 @@
 import type { RecoveryEvidence } from './recovery/eligibility.ts'
+import type { DateOrder } from './lib/format.ts'
 import type { QuickBooksPaymentFact } from '../server/quickbooksFacts.ts'
 
 export type ImportRowStatus = 'newly_imported' | 'exact_duplicate' | 'possible_overlap' | 'rejected' | 'missing_identification_fields'
 export interface SourceProvenance {
   schemaVersion: 2
   rawAvailable: boolean
+  /** The row's cells exactly as they stand in the file. */
   raw: Record<string, string> | null
+  /**
+   * Set when a person matched the columns: `raw` is then keyed by the file's
+   * own headings, and this says which heading supplied each field. Without it,
+   * recognised headings are keyed by field name. Read cells with `sourceCell`.
+   */
+  columns?: Record<string, string>
   parsed: Record<string, string | number | null>
   normalized: { vendor: string; invoiceReference: string | null }
   transformations: Record<string, string[]>
   filename: string | null
   rowNumber: number
   batchId: string
+}
+/** What Reclaim did to read a file beyond taking recognised headings as they are. Absent when there was nothing to do. */
+export interface ImportReading {
+  /** Spreadsheet row the headings were on; 0 when the file has none. */
+  headerRow: number
+  /** Non-blank lines above the headings that were left out. */
+  titleLines: number
+  /** Field → the file's own heading, when a person matched the columns. */
+  columns?: Record<string, string>
+  /** How dates like 04/03/2026 were read, when that was not simply month first. */
+  dateOrder?: DateOrder
+  /** Most amounts paid were negative and the person said they are payments. */
+  signFlipped?: true
+  /** Each payment's vendor came from the line above its group. */
+  vendorGrouped?: true
+  /** Amounts were written 1.234,56. */
+  decimalComma?: true
+  /** The workbook sheet the rows came from. */
+  sheet?: { name: string; others: string[] }
 }
 export interface ImportRowResult {
   rowNumber: number
@@ -20,6 +47,8 @@ export interface ImportRowResult {
   raw: Record<string, string> | null
   fingerprint?: string
   existingRecordId?: string
+  /** The days this file gives the row, when it is already in the audit under its date read the other way round. */
+  readAs?: { paymentDate: string; invoiceDate: string | null }
 }
 export interface APRecord {
   source?: SourceProvenance
@@ -131,4 +160,7 @@ export interface ParseResult {
   detectedColumns: string[]
   /** Header cells present in the file that didn't match any recognized column. */
   unrecognizedHeaders: string[]
+  reading?: ImportReading
+  /** Problems with the file itself, such as a quotation mark that is never closed. */
+  warnings?: string[]
 }

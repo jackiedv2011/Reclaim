@@ -40,9 +40,10 @@ export interface ServerConfig {
    */
   dataKeys: { current: Buffer; previous: Buffer | null } | null
   /**
-   * How many proxies in front of the server append to X-Forwarded-For (0 = none,
-   * the default: the header is ignored). Rate limits key on the client address,
-   * so behind the host's load balancer this must be 1 or every visitor shares one limit.
+   * How many proxies in front of the server append to X-Forwarded-For (0 = none:
+   * the header is ignored). Rate limits key on the client address, so behind the
+   * host's load balancer this must be 1 or every visitor shares one limit.
+   * Production must state it; elsewhere it defaults to 0.
    */
   trustProxy: number
   /**
@@ -62,11 +63,29 @@ export interface ServerConfig {
    * RECLAIM_INTELLIGENCE_API=1; pending founder decisions on release scope.
    */
   intelligenceApi: boolean
+  /**
+   * Server-authoritative ledger API (/api/ledger/*, server/ledgerRoutes.ts).
+   * Off unless RECLAIM_SERVER_LEDGER=true; off, the browser ledger is the only path.
+   */
+  serverLedger?: boolean
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
+export function loadConfig(source: NodeJS.ProcessEnv = process.env): ServerConfig {
+  // `NAME=` in an env file, or a blank field in a host's settings page, means "not set".
+  const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(source).flatMap(([name, value]) => (value?.trim() ? [[name, value.trim()]] : [])))
   const production = env.NODE_ENV === 'production'
-  const port = Number(env.PORT ?? 8787)
+  const invalid: string[] = []
+  const number = (name: string, fallback: number, ok: (n: number) => boolean, expected: string): number => {
+    if (env[name] === undefined) return fallback
+    const value = Number(env[name])
+    if (ok(value)) return value
+    invalid.push(`${name} must be ${expected}.`)
+    return fallback
+  }
+  const days = (n: number) => Number.isFinite(n) && n > 0 && n <= 3650
+  const port = number('PORT', 8787, (n) => Number.isInteger(n) && n >= 0 && n <= 65535, 'a whole port number, such as 8787')
+  const sessionDays = number('SESSION_DAYS', 1, days, 'a number of days without a unit, such as 1')
+  const rememberMeDays = number('REMEMBER_ME_DAYS', 30, days, 'a number of days without a unit, such as 30')
   const appOrigin = (env.APP_ORIGIN ?? `http://localhost:${port}`).replace(/\/$/, '')
   const google = env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET } : null
   const gmail = env.GMAIL_USER && env.GMAIL_APP_PASSWORD ? { user: env.GMAIL_USER, appPassword: env.GMAIL_APP_PASSWORD } : null
@@ -76,17 +95,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error('QBO_ENVIRONMENT=production reads real companies\' books; it needs NODE_ENV=production so the production startup checks run.')
   }
   if (production) {
-    const problems = productionProblems(env, appOrigin)
+    const problems = [...invalid, ...productionProblems(env, appOrigin)]
     if (problems.length) throw new Error(`Refusing to start in production:\n${problems.map((p) => `  - ${p}`).join('\n')}`)
   }
+  if (invalid.length) throw new Error(invalid.join('\n'))
   return {
     port,
     appOrigin,
     databasePath: env.DATABASE_PATH ?? './data/reclaim.sqlite',
     production,
     requireEmailVerification: env.REQUIRE_EMAIL_VERIFICATION !== 'false',
-    sessionDays: Number(env.SESSION_DAYS ?? 1),
-    rememberMeDays: Number(env.REMEMBER_ME_DAYS ?? 30),
+    sessionDays,
+    rememberMeDays,
     google,
     resend,
     gmail,
@@ -104,6 +124,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     trustProxy: trustProxyConfig(env.TRUST_PROXY),
     gmailSend: gmailSendConfig(env, google),
     intelligenceApi: env.RECLAIM_INTELLIGENCE_API === '1',
+    serverLedger: env.RECLAIM_SERVER_LEDGER === 'true',
   }
 }
 
@@ -150,6 +171,14 @@ function productionProblems(env: NodeJS.ProcessEnv, appOrigin: string): string[]
   if (set('RESEND_API_KEY') !== set('EMAIL_FROM')) problems.push('Set both RESEND_API_KEY and EMAIL_FROM, or neither.')
   if (set('GMAIL_USER') !== set('GMAIL_APP_PASSWORD')) problems.push('Set both GMAIL_USER and GMAIL_APP_PASSWORD, or neither.')
   if (!resend && !gmail) problems.push('No email provider. Set RESEND_API_KEY and EMAIL_FROM (or GMAIL_USER and GMAIL_APP_PASSWORD); the dev mailbox is not available in production.')
+
+  if (set('CONTACT_EMAIL') && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(env.CONTACT_EMAIL!)) problems.push('CONTACT_EMAIL must be an email address, or unset.')
+
+  // Rate limits key on the visitor's address. Behind a proxy that hasn't been
+  // declared every visitor has the proxy's, so one person's failed logins lock out everyone.
+  if (!set('TRUST_PROXY')) problems.push('TRUST_PROXY is not set. Set it to the number of proxies in front of the server (usually 1 behind a host\'s load balancer, 0 if visitors connect directly).')
+
+  if (set('GOOGLE_CLIENT_ID') !== set('GOOGLE_CLIENT_SECRET')) problems.push('Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither.')
 
   // The dev mailbox hands password-reset links to anyone who asks.
   if (set('DEV_MAILBOX') && env.DEV_MAILBOX !== 'false') problems.push('DEV_MAILBOX must be unset or false in production.')

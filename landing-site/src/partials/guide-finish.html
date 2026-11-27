@@ -1,0 +1,104 @@
+          <section id="step-3" class="step">
+            <header class="step__head">
+              <span class="step__num">03</span>
+              <h2 class="step__title">Upload the file</h2>
+            </header>
+            <div class="step__body">
+              <div class="prose">
+                <p><a href="/audit">Log in to Reclaim</a>, click <strong>Upload a ledger</strong> and drop the file in. It can be up to 50 MB. If a workbook has more than one sheet of rows, Reclaim asks which one to read.</p>
+              </div>
+              <div class="callout">
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Files it can’t read</p>
+                <p>Old .xls files, workbooks with a password, and Apple Numbers files. Save those as .xlsx or CSV first. A PDF won’t work either.</p>
+              </div>
+            </div>
+          </section>
+
+          <section id="step-4" class="step">
+            <header class="step__head">
+              <span class="step__num">04</span>
+              <h2 class="step__title">Match the columns</h2>
+            </header>
+            <div class="step__body">
+              <div class="prose">
+                <p>You’ll only see this step if Reclaim isn’t sure. It shows the first rows of your file, with a suggestion for each column it thinks it knows. Check every suggestion, fill in anything it left empty, then click <strong>Continue</strong>. Your file isn’t changed.</p>
+              </div>
+              <div class="shot">
+                <div class="shot__frame">
+                  <table>
+                    <thead><tr><th>Reclaim needs</th><th>Your file calls it</th></tr></thead>
+                    <tbody><tr><td>Vendor</td><td>Contact</td></tr><tr><td>Payment date</td><td>Date</td></tr><tr><td>Amount paid</td><td>Credit</td></tr><tr><td>Invoice number</td><td>Reference</td></tr></tbody>
+                  </table>
+                </div>
+                <p class="shot__cap"><span class="shot__cap-id">MADE UP</span><span>One way the columns of an export might match.</span></p>
+              </div>
+              <div class="callout callout--warning">
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>Check the invoice number twice</p>
+                <p>Some reports put a check or payment number in the number column. Reclaim compares the number printed on the vendor’s invoice. If your column is a payment number instead, choose <strong>Not in this file</strong>: matched by mistake, it can hide a bill that was paid twice.</p>
+              </div>
+              <div class="prose">
+                <p>It may also ask:</p>
+              </div>
+              <div class="callout-grid">
+                <div class="callout">
+                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Dates</p>
+                  <p>Which way round they are, if 03/04/2026 could be March 4 or April 3 and nothing else in the file settles it.</p>
+                </div>
+                <div class="callout">
+                  <p class="callout__label"><span class="mark" aria-hidden="true"></span>Amounts</p>
+                  <p>Whether negative amounts are payments. Many reports show money going out as a negative. Reclaim treats a negative as a refund or credit unless you tell it to flip the sign.</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="step-5" class="step">
+            <header class="step__head">
+              <span class="step__num">05</span>
+              <h2 class="step__title">Check it, then run the audit</h2>
+            </header>
+            <div class="step__body">
+              <div class="prose">
+                <p>Before any check runs, Reclaim shows how many payments and vendors it read, the dates they cover, how it read the file, and any rows it skipped. If the numbers don’t look right for the period, choose <strong>Check the column matches</strong> and go back. Otherwise, run the audit.</p>
+              </div>
+              <div class="callout">
+                <p class="callout__label"><span class="mark" aria-hidden="true"></span>One company at a time</p>
+                <p>If you keep more than one set of books, upload each one separately. Mixing them can make ordinary payments look like duplicates. Keep the original export too, so you can trace a result back to it.</p>
+              </div>
+            </div>
+          </section>
+
+            <section id="troubleshooting">
+              <h2 class="blockhead">Troubleshooting</h2>
+              <div class="acc">
+                <details open class="is-open">
+                  <summary>Reclaim can’t find a vendor, date or amount</summary>
+                  <div class="panel"><div class="prose"><p>The file may be a vendor list or a list of unpaid bills, which don’t say what was paid. You need a report with a row for each payment. If yours is one, check that each field in step 4 points at the right column, and that <strong>Headings are on row</strong> shows the right row. You can also compare it with the <a href="/sample-ledger.csv" download>sample CSV</a>.</p></div></div>
+                </details>
+                <details>
+                  <summary>The vendor’s name is only written once</summary>
+                  <div class="panel"><div class="prose"><p>Reports grouped by vendor often put the name on a line above its payments. Tick <strong>Each vendor’s name is written once, above its payments</strong>, if it isn’t ticked already, and Reclaim carries the name down.</p></div></div>
+                </details>
+                <details>
+                  <summary>Some rows were skipped</summary>
+                  <div class="panel"><div class="prose"><p>A row is skipped when it has no vendor, no date Reclaim can read, or no amount. Title and total lines are meant to be skipped. Before you add anything, Reclaim says how many rows it will skip and shows the first few with the reason.</p></div></div>
+                </details>
+                <details>
+                  <summary>Can I upload my bills, vendor list or credits too?</summary>
+                  <div class="panel"><div class="prose"><p>Not as separate files. Reclaim checks payments. If your bills file has invoice dates, amounts or terms, copy those columns next to the matching payments and more checks will run.</p></div></div>
+                </details>
+                <details>
+                  <summary>How far back should I go?</summary>
+                  <div class="panel"><div class="prose"><p>Two years is a sensible first pass. The file can be up to 50 MB. If yours is larger, split it by date and add each part to the same audit.</p></div></div>
+                </details>
+                <details>
+                  <summary>Can Reclaim connect to {{system}} directly instead?</summary>
+                  <div class="panel"><div class="prose"><p>{{connect}}</p></div></div>
+                </details>
+              </div>
+            </section>
+
+            <div class="guide-foot">
+              <a href="/guides" class="cta cta-button" size="large" theme="grey"><span class="hover-loop"><span class="inner">All guides</span></span></a>
+              <a href="#contact" class="cta cta-button has-arrow" size="large" theme="black" data-modal="talk"><span class="hover-loop right"><span class="inner">Ask us instead<svg class="icon"><use href="#i-arrow"/></svg></span></span></a>
+            </div>

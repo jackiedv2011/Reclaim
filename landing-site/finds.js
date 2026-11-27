@@ -72,9 +72,9 @@
   });
 
   // ---------- the summary adds itself up, once, as it comes into view: the rows come in one after another, and
-  // as each lands the total steps up by its amount (to the same total the page shows without this) ----------
+  // as each recovered one lands the total steps up by its amount (to the same total the page shows without this) ----------
   const sum = $('.ex-sum', sec), total = $('[data-total]', sum), lines = $$('.ex-sum-row', sum);
-  const amounts = lines.map(r => +$('.ex-sum-amt', r).textContent.replace(/\D/g, ''));
+  const amounts = lines.map(r => (r.classList.contains('is-open') ? 0 : +$('.ex-sum-amt', r).textContent.replace(/\D/g, '')));
   const tally = { v: 0 };
   const money = () => { total.textContent = '$' + Math.round(tally.v).toLocaleString('en-US'); };
   money();   // starts from nothing: the rows below it are not in yet

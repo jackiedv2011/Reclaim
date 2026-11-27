@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, type ReactElement } from 'react'
 import { AuthProvider, useAuth } from '@/lib/auth/AuthContext'
+import { ErrorBoundary } from '@/pages/ErrorBoundary'
 import { loginUrlFor, redirectTo } from '@/pages/authRedirect'
 import { TermsUpdateGate } from '@/legal/TermsUpdateGate'
 
@@ -104,10 +105,12 @@ function App() {
   const page = (ROUTES[pathname] ?? (() => <NotFoundPage />))()
 
   return (
-    <AuthProvider>
-      <Suspense fallback={<RouteFallback />}>{page}</Suspense>
-      <TermsUpdateGate />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <Suspense fallback={<RouteFallback />}>{page}</Suspense>
+        <TermsUpdateGate />
+      </AuthProvider>
+    </ErrorBoundary>
   )
 }
 
