@@ -138,7 +138,7 @@
     // the spotlight fades out, moves while unseen, and fades back in on the new spot as the view lands
     spot.classList.remove('is-on');
     clearTimeout(spotTimer);
-    if (isStep(k)) spotTimer = setTimeout(() => { drawSpot(); spot.classList.add('is-on'); }, 380);
+    if (isStep(k)) spotTimer = setTimeout(() => { drawSpot(); spot.classList.add('is-on'); }, 220);
     pills.forEach((b, n) => {
       b.classList.toggle('is-current', n === k - 1);
       b.classList.toggle('is-done', n < k - 1);
