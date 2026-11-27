@@ -20,6 +20,9 @@ import { createBilling } from './billing.ts'
 import { createStripeClient, type StripeApi } from './stripe.ts'
 import { createGmailClient, createGmailRoutes, type GmailClient } from './gmail.ts'
 import { createIntelligenceRoutes } from './intelligence.ts'
+import { legacyInsightSourcesLoader, registerInsightRefreshJob } from './intelligenceWorkstream.ts'
+import { InMemoryInsightSnapshotStore } from '../src/intelligence/insightRefresh.ts'
+import { jobSystemFor, type JobSystem } from './jobs/system.ts'
 import { createLedgerRoutes } from './ledgerRoutes.ts'
 import { resealLedger } from './ledger.ts'
 import { OnboardingProfileSchema } from './onboarding.ts'
@@ -109,7 +112,17 @@ export function createApp(deps: AppDependencies): App {
   const gmailRoutes = createGmailRoutes({ db, appOrigin: config.appOrigin, production: config.production, gmail: gmailClient && config.gmailSend ? { client: gmailClient, tokenKey: config.gmailSend.tokenKey } : null, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), getProject: (userId, projectId) => projects.get(userId, projectId), listProjects: (userId) => projects.list(userId), allowSend: (id) => gmailSendLimiter.check(`gmail:${id}`), now: deps.now })
 
   const intelligenceReadLimiter = new RateLimiter(300, 60 * 60 * 1000)
-  const intelligenceRoutes = config.intelligenceApi ? createIntelligenceRoutes({ projects, userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]), allowRead: (id) => intelligenceReadLimiter.check(`intelligence:${id}`), now: deps.now }) : null
+  // Product intelligence (off unless RECLAIM_INTELLIGENCE_API=1). The approval queue and job system
+  // are built further down, so they are resolved at request time.
+  const insightSnapshots = new InMemoryInsightSnapshotStore()
+  let intelligenceApprovals: ApprovalService | null = null
+  let intelligenceJobs: JobSystem | null = null
+  const intelligenceRoutes = config.intelligenceApi ? createIntelligenceRoutes({
+    projects, db, keys: config.dataKeys, serverLedger: config.serverLedger === true,
+    userFor: (req) => auth.userForSession(req.cookies[SESSION_COOKIE]),
+    allowRead: (id) => intelligenceReadLimiter.check(`intelligence:${id}`), now: deps.now,
+    ai, approvals: () => intelligenceApprovals, jobs: () => intelligenceJobs, snapshots: insightSnapshots,
+  }) : null
 
   const sessionCookie = (token: string, maxAge: number) => serializeCookie(SESSION_COOKIE, token, { maxAge, secure: config.production })
   const clearSessionCookie = () => serializeCookie(SESSION_COOKIE, '', { maxAge: 0, secure: config.production })
@@ -703,6 +716,12 @@ export function createApp(deps: AppDependencies): App {
   }
   const recovery = createRecoveryRoutes(workstream)
   const workstreamRoutes = [recovery.route, createJobRoutes(workstream), createInboundRoutes(workstream), createDocumentRoutes(workstream)]
+  if (config.intelligenceApi) {
+    intelligenceApprovals = approvals
+    intelligenceJobs = jobSystemFor(db)
+    // Read-only insight refresh on the shared runner; tenants load from their saved audits.
+    if (intelligenceJobs) registerInsightRefreshJob(intelligenceJobs, { loadTenant: legacyInsightSourcesLoader(projects), snapshots: insightSnapshots })
+  }
 
   const server = createServer(async (rawReq, rawRes) => {
     const options = { noStore: (rawReq.url ?? '').startsWith('/api/'), hsts: config.production }

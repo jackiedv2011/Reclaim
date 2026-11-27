@@ -1,7 +1,9 @@
 # Interface requests from the product-intelligence workstream
 
 **From:** CPO workstream (Aditya) · **Contract version:** `src/intelligence/contracts.ts` `0.1.2` · **Base commit:** `b27ee30` (main)
-**Status:** proposals awaiting owner sign-off. Nothing here is agreed. Until each item is agreed, the product-intelligence layer reads saved audit snapshots through `src/intelligence/adapters/legacyAudit.ts`, labelled `origin: 'legacy_audit_snapshot'`, and reports the gap as coverage `limited` / `upstream_contract_pending`.
+**Status (26 Nov, contract 0.1.3):** S-1, S-3, S-4, S-5, S-8 and S-10 are met by Sid's foundation and wired through `server/intelligenceLedger.ts`. J-2, J-4 and J-5 are met by Jagan's services and wired through `server/intelligenceWorkstream.ts`. Open items: README §13. The original text follows.
+
+**Original status:** proposals awaiting owner sign-off. Nothing here is agreed. Until each item is agreed, the product-intelligence layer reads saved audit snapshots through `src/intelligence/adapters/legacyAudit.ts`, labelled `origin: 'legacy_audit_snapshot'`, and reports the gap as coverage `limited` / `upstream_contract_pending`.
 
 Each request says what the consumer needs, not how the owner should build it. The read models depend only on the ports (`FinancialSourcePort`, `CaseReadPort`, `ReturnMatchPort`). Replacing the adapter does not change any read-model code.
 

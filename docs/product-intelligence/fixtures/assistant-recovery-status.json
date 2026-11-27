@@ -3,7 +3,7 @@
   "question": "What is my recovery status?",
   "response": {
     "version": "account-assistant-v0.1",
-    "contractVersion": "0.1.2",
+    "contractVersion": "0.1.3",
     "tenantId": "tenant_fixture_a",
     "intent": "recovery_status",
     "status": "answered",

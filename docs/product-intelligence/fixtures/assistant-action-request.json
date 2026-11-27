@@ -3,7 +3,7 @@
   "question": "Email the vendor and get the duplicate refunded",
   "response": {
     "version": "account-assistant-v0.1",
-    "contractVersion": "0.1.2",
+    "contractVersion": "0.1.3",
     "tenantId": "tenant_fixture_a",
     "intent": "investigation_or_action_request",
     "status": "needs_clarification",

@@ -49,8 +49,8 @@ async function signedIn(input: ReturnType<typeof person>): Promise<{ client: Cli
   return { client, userId: verified.body.user.id }
 }
 
-async function start(enabled: boolean) {
-  const config = loadConfig({ ...baseEnv, ...(enabled ? { RECLAIM_INTELLIGENCE_API: '1' } : {}) })
+async function start(enabled: boolean, extraEnv: Record<string, string> = {}) {
+  const config = loadConfig({ ...baseEnv, ...(enabled ? { RECLAIM_INTELLIGENCE_API: '1' } : {}), ...extraEnv })
   const db = openDatabase(':memory:')
   app = createApp({ config, db, mailer: new DevMailer(db), google: null, drafts: null, now: () => NOW })
   base = `http://127.0.0.1:${await app.listen(0)}`
@@ -231,3 +231,43 @@ describe('intelligence API', () => {
     expect(JSON.stringify(sealed.body.coverage)).toContain('unreadable_saved_audit')
   })
 })
+
+describe('intelligence API wired to the financial and recovery workstreams', () => {
+  it('reads the attention queue through the recovery approval service', async () => {
+    const store = await start(true)
+    const owner = await signedIn(person('Ora', 'ora@example.test'))
+    const { project } = authorizedProject('p_ora', { vendor: 'Fixture Coffee Co', invoice: 'INV-9', amount: 120, requested: 120 })
+    store.upsert(owner.userId, project)
+    const res = await owner.client.get('/api/intelligence/attention')
+    expect(res.status).toBe(200)
+    expect(res.body.metricDefinitionVersion).toBe('attention-1+approvals-1')
+    expect(res.body.result.items.map((i: { caseId: string }) => i.caseId)).toEqual(['p_ora/exact_duplicate-p_ora'])
+  })
+
+  it('queues insight refresh on the shared job runner once per day and serves the latest snapshot', async () => {
+    const store = await start(true)
+    const owner = await signedIn(person('Pia', 'pia@example.test'))
+    for (const audit of (await fixtures()).tenantAAudits()) store.upsert(owner.userId, { ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: 1, updatedAt: 2 })
+    const first = await owner.client.post('/api/intelligence/insights/refresh', {})
+    expect(first.status).toBe(200)
+    expect(first.body.queued).toBe(true)
+    const again = await owner.client.post('/api/intelligence/insights/refresh', {})
+    expect(again.body).toMatchObject({ queued: false, jobId: first.body.jobId })
+    expect((await owner.client.get('/api/intelligence/insights/latest')).status).toBe(200)
+  })
+
+  it('with the server ledger on, answers for the person\'s organisation and keeps user-keyed services out', async () => {
+    const store = await start(true, { RECLAIM_SERVER_LEDGER: 'true' })
+    const owner = await signedIn(person('Quin', 'quin@example.test'))
+    for (const audit of (await fixtures()).tenantAAudits()) store.upsert(owner.userId, { ...audit, sourceLabel: `${audit.id}.csv`, mode: 'upload', createdAt: 1, updatedAt: 2 })
+    const spend = await owner.client.get('/api/intelligence/spend/summary')
+    expect(spend.status).toBe(200)
+    expect(spend.body.tenantId).not.toBe(owner.userId)
+    expect(spend.body.tenantId).toMatch(/^org_/)
+    const attention = await owner.client.get('/api/intelligence/attention')
+    expect(attention.status).toBe(200)
+    expect(JSON.stringify(attention.body.coverage)).toContain('recovery_services_not_organisation_scoped')
+    expect((await owner.client.get('/api/intelligence/spend/summary?tenant=org_not-mine')).status).toBe(404)
+  })
+})
+

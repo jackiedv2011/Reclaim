@@ -22,7 +22,7 @@
  *    anything or calls an external model.
  */
 
-export const INTELLIGENCE_CONTRACT_VERSION = '0.1.2' as const
+export const INTELLIGENCE_CONTRACT_VERSION = '0.1.3' as const
 
 // ---------------------------------------------------------------- tenancy
 
@@ -47,7 +47,7 @@ export interface TenantContext {
    * under the system actor. It never holds the implicit owner rights that a
    * signed-in single-user session has (e.g. proposed case approval).
    */
-  source: 'single_user_session' | 'job_runner' | 'test_fixture'
+  source: 'single_user_session' | 'organisation_member' | 'job_runner' | 'test_fixture'
 }
 
 export const SINGLE_USER_PERMISSIONS: readonly Permission[] = ['financial:read', 'cases:read', 'feedback:write', 'insights:refresh', 'assistant:ask']
@@ -121,6 +121,16 @@ export const COVERAGE_REASONS = {
   WINDOW_NOT_COVERED: 'window_not_covered',
   VENDOR_NOT_FOUND: 'vendor_not_found',
   INSIGHT_INPUT_TRUNCATED: 'insight_input_truncated',
+  // Server ledger adapter (server/intelligenceLedger.ts), contract 0.1.3.
+  WITHIN_IMPORT_REPEATS_NOT_STORED: 'within_import_repeats_not_stored',
+  RECURRING_DETECTION_SKIPPED: 'recurring_detection_skipped',
+  SAVED_AUDITS_NOT_IN_LEDGER: 'saved_audits_not_in_ledger',
+  SAVED_AUDITS_NOT_SHARED_WITH_ORGANISATION: 'saved_audits_not_shared_with_organisation',
+  // Approval queue adapter (server/intelligenceWorkstream.ts).
+  APPROVAL_STALE: 'approval_stale',
+  APPROVAL_QUEUE_TRUNCATED: 'approval_queue_truncated',
+  APPROVAL_CASE_NOT_FOUND: 'approval_case_not_found',
+  RECOVERY_SERVICES_NOT_ORGANISATION_SCOPED: 'recovery_services_not_organisation_scoped',
 } as const
 
 export interface Exclusion {

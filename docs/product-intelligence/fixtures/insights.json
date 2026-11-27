@@ -2,7 +2,7 @@
   "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
   "response": {
     "model": "insights",
-    "contractVersion": "0.1.2",
+    "contractVersion": "0.1.3",
     "metricDefinitionVersion": "insights-v0.1",
     "tenantId": "tenant_fixture_a",
     "origin": "legacy_audit_snapshot",
@@ -267,7 +267,7 @@
           },
           "provenance": {
             "insightsVersion": "insights-v0.1",
-            "contractVersion": "0.1.2",
+            "contractVersion": "0.1.3",
             "origin": "legacy_audit_snapshot",
             "readModels": [
               {
@@ -429,7 +429,7 @@
           },
           "provenance": {
             "insightsVersion": "insights-v0.1",
-            "contractVersion": "0.1.2",
+            "contractVersion": "0.1.3",
             "origin": "legacy_audit_snapshot",
             "readModels": [
               {
@@ -577,7 +577,7 @@
           },
           "provenance": {
             "insightsVersion": "insights-v0.1",
-            "contractVersion": "0.1.2",
+            "contractVersion": "0.1.3",
             "origin": "legacy_audit_snapshot",
             "readModels": [
               {
@@ -639,7 +639,7 @@
               "source": {
                 "model": "recurring_series",
                 "field": "amount",
-                "metricDefinitionVersion": "0.1.2"
+                "metricDefinitionVersion": "0.1.3"
               }
             }
           ],
@@ -651,7 +651,7 @@
               "source": {
                 "model": "recurring_series",
                 "field": "cadenceDays",
-                "metricDefinitionVersion": "0.1.2"
+                "metricDefinitionVersion": "0.1.3"
               }
             },
             {
@@ -661,7 +661,7 @@
               "source": {
                 "model": "recurring_series",
                 "field": "paymentCount",
-                "metricDefinitionVersion": "0.1.2"
+                "metricDefinitionVersion": "0.1.3"
               }
             }
           ],
@@ -711,12 +711,12 @@
           },
           "provenance": {
             "insightsVersion": "insights-v0.1",
-            "contractVersion": "0.1.2",
+            "contractVersion": "0.1.3",
             "origin": "legacy_audit_snapshot",
             "readModels": [
               {
                 "model": "recurring_series",
-                "metricDefinitionVersion": "0.1.2"
+                "metricDefinitionVersion": "0.1.3"
               }
             ]
           },

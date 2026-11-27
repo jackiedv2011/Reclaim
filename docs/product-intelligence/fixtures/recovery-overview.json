@@ -2,7 +2,7 @@
   "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
   "response": {
     "model": "recovery.overview",
-    "contractVersion": "0.1.2",
+    "contractVersion": "0.1.3",
     "metricDefinitionVersion": "recovery-v0.1",
     "tenantId": "tenant_fixture_a",
     "origin": "legacy_audit_snapshot",

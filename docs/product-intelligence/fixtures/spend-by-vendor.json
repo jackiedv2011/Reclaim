@@ -2,7 +2,7 @@
   "_note": "SYNTHETIC FIXTURE: fictional data for design work. Not customer data.",
   "response": {
     "model": "spend.by_vendor",
-    "contractVersion": "0.1.2",
+    "contractVersion": "0.1.3",
     "metricDefinitionVersion": "spend-v0.1",
     "tenantId": "tenant_fixture_a",
     "origin": "legacy_audit_snapshot",
