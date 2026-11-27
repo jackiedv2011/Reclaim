@@ -1,3 +1,4 @@
+// @vitest-environment jsdom-server
 /**
  * Front end + real server: what happens to an account's audits when a save is
  * large, refused, raced by another tab or device, or the account can't be read.
