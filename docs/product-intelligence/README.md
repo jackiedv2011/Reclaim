@@ -1,6 +1,6 @@
 # Product intelligence (CPO workstream): integration report and execution ledger
 
-**Branch:** `claude/pensive-thompson-rnchb6` · **Base:** `main` @ `b27ee30` · **Contract:** `src/intelligence/contracts.ts` `0.1.2` · **Date:** 25 Nov 2026
+**Branch:** `claude/pensive-thompson-rnchb6` · **Base:** `main` @ `b27ee30` · **Contract:** `src/intelligence/contracts.ts` `0.1.3` · **Date:** 25 Nov 2026
 **Status:** verified locally on synthetic data only. Not merged, not deployed, not exercised with a live provider, real ledger or real customer. The read-only API is **off by default** (`RECLAIM_INTELLIGENCE_API=1` turns it on). No customer-facing screen was added or changed.
 
 ## 1. Execution ledger (P0–P7)
@@ -20,7 +20,7 @@
 | P6 design brief, view models, design fixtures | Delivered; **visual implementation blocked on Aditya's design decisions D1–D10** | `design-brief.md`, `screen-inventory.md`, `viewModels.ts`, `fixtures/*.json` | Fixtures regenerate deterministically |
 | P7 gated server API | Verified locally; wiring awaits CTO review (S-9) | `server/intelligence.ts`; 6 lines each in `server/app.ts` and `server/config.ts` | `server/intelligence.test.ts` |
 | P7 synthetic end-to-end | Verified locally | `server/intelligence.e2e.test.ts` | Saved audit → evidence → approval proposal → real case command → send → promise → partial return → visibility; second tenant refused |
-| P7 cross-workstream integration | **Blocked**: no financial-foundation or recovery-AI branch or contract exists yet | `interface-requests.md` | — |
+| P7 cross-workstream integration | **Verified locally**: all three workstreams are in `main` (#4, #5, #6); real adapters wired behind the flags (§13) | `server/intelligenceLedger.ts`, `server/intelligenceWorkstream.ts` | `intelligenceLedger.test.ts` (19), `intelligenceWorkstream.test.ts` (21), wiring tests in `server/intelligence.test.ts` |
 
 ## 2. What was built
 
@@ -221,3 +221,35 @@ The ledger above is current at the final commit on this branch. To continue:
 1. Read `interface-requests.md` for upstream status.
 2. Pick the next unblocked row in section 1.
 3. Keep the "fixture is not an integration" rule: an item counts as integrated only after it runs against a real port.
+
+## 13. Integration with Sid's and Jagan's services (contract 0.1.3)
+
+All three workstreams are merged into `main`:
+- Sid's financial foundation (#4);
+- Jagan's recovery and AI work (#5);
+- this layer (#6).
+
+The adapters below are on the follow-up PR. Every flag keeps its default: `RECLAIM_INTELLIGENCE_API` and Sid's `RECLAIM_SERVER_LEDGER` are both off, and AI stays off unless a task is registered, the tenant's policy allows it and the person consents.
+
+| Stand-in | Replaced by | Status |
+|---|---|---|
+| Saved-audit `FinancialSourcePort` | Sid's server ledger (`server/intelligenceLedger.ts`, origin `canonical_ledger`) when `RECLAIM_SERVER_LEDGER=true` and the organisation has an import; otherwise saved audits, never summed with the ledger | Wired; tested |
+| Single-user `TenantContext` | Sid's organisations (`tenantContextFromMembership`): tenant = organisation, viewer / member / admin / owner permissions, new source `organisation_member` with no implicit owner rights | Wired when the ledger flag is on |
+| `NO_RETURN_MATCHING` | Sid's `src/reconciliation/returnMatching.ts`, mapped to proposed / ambiguous / reversed | Wired. **`verified` needs the case gate's accepted links from Jagan**; until then matched returns read 0 (available) and matches show as proposed |
+| Case-derived approvals | Jagan's `ApprovalService` read-only queue (`attentionWithApprovals`). Fresh pending approvals become the item's single approval path; stale ones are shown but not actionable | Wired |
+| Local job interface | Jagan's durable runner: `insights.refresh` registered at startup; `POST /api/intelligence/insights/refresh` queues one per tenant per day; `GET /api/intelligence/insights/latest` | Wired |
+| `DISABLED_AI_GATEWAY` | Jagan's `AiExecutionService` (`aiGatewayFromExecutionService`): his policy, consent, packet schema, budget, ledger and validators all apply, plus `rejectUnsupportedAiText` | Wired. **Both intelligence AI tasks are proposed but not registered**: that needs Jagan's sign-off, so AI cannot run |
+
+**Interaction handled:** with the ledger flag on, the tenant is the organisation, but Jagan's approval queue, AI and jobs are keyed by user. They are only used when the two tenants agree, which is the owner of a personal organisation. Otherwise the answer falls back and carries `recovery_services_not_organisation_scoped`.
+
+**Remaining gaps:**
+1. Jagan: register `summarize_insight` and `interpret_question` (definitions in `server/intelligenceWorkstream.ts`). Also add an account-level AI scope; the adapter uses the sentinel project `intelligence:account`.
+2. Jagan: supply accepted return links from the case gate so a match can become `verified`.
+3. Sid and Jagan: organisation-scope the approval queue, AI and jobs.
+4. Three job interfaces exist (Sid's contract, Jagan's runner, ours). Recommend converging on Jagan's runner.
+5. Sid:
+   - return `recurringSeries` from ledger detection (the adapter rebuilds it today);
+   - add category and memo fields to his `SourceRecord`;
+   - decide whether identical rows within one file should be kept as separate records.
+6. Persistence (S-7): insight snapshots, dismissals and business memory are still in memory per process.
+
