@@ -313,6 +313,8 @@ describe('AI drafting failures', () => {
   it('a model error becomes a clear, retryable 502 — never a 500 with details', async () => {
     await start(baseConfig, { drafts: { draft: vi.fn(async () => { throw new Error('upstream 529 overloaded: request_id=abc secret') }) } })
     const c = await account(alice, 'growth', saved.project)
+    await c.call('/api/ai/policy', { method: 'PUT', json: { mode: 'on_demand', acknowledged: true } })
+    await c.post('/api/ai/tasks/draft_recovery_request/consent', { scope: 'field_set' })
     const res = await c.post('/api/ai/draft', payload)
     expect(res.status).toBe(502)
     expect(res.body.code).toBe('ai_failed')
@@ -322,6 +324,8 @@ describe('AI drafting failures', () => {
   it('a draft that states an amount the case data does not contain is refused', async () => {
     await start(baseConfig, { drafts: { draft: vi.fn(async () => ({ subject: 'Refund request', body: 'Please refund $12,000.00 for invoice A-1.' })) } })
     const c = await account(alice, 'growth', saved.project)
+    await c.call('/api/ai/policy', { method: 'PUT', json: { mode: 'on_demand', acknowledged: true } })
+    await c.post('/api/ai/tasks/draft_recovery_request/consent', { scope: 'field_set' })
     const res = await c.post('/api/ai/draft', payload)
     expect(res.status).toBe(502)
     expect(res.body.code).toBe('ai_unsupported_amount')
@@ -331,6 +335,8 @@ describe('AI drafting failures', () => {
     const body = 'We paid invoice A-1 ($1,200.00) twice. Please refund $1,000.00.'
     await start(baseConfig, { drafts: { draft: vi.fn(async () => ({ subject: 'Refund request — $1,000', body })) } })
     const c = await account(alice, 'growth', saved.project)
+    await c.call('/api/ai/policy', { method: 'PUT', json: { mode: 'on_demand', acknowledged: true } })
+    await c.post('/api/ai/tasks/draft_recovery_request/consent', { scope: 'field_set' })
     const res = await c.post('/api/ai/draft', payload)
     expect(res.status).toBe(200)
     expect(res.body.body).toBe(body)
@@ -340,6 +346,8 @@ describe('AI drafting failures', () => {
     const draft = vi.fn(async () => ({ subject: 's', body: 'b' }))
     await start(baseConfig, { drafts: { draft } })
     const c = await account(alice, 'growth', saved.project)
+    await c.call('/api/ai/policy', { method: 'PUT', json: { mode: 'on_demand', acknowledged: true } })
+    await c.post('/api/ai/tasks/draft_recovery_request/consent', { scope: 'field_set' })
     const res = await c.post('/api/ai/draft', { ...payload, amountRequested: 5000 })
     expect(res.status).toBe(400)
     expect(draft).not.toHaveBeenCalled()

@@ -8,7 +8,7 @@ import { accountRoutes } from './account.ts'
 import { AuthService, normalizeEmail } from './auth.ts'
 import { DevMailer, GmailMailer, ResendMailer, type Mailer } from './mailer.ts'
 import { createGoogleClient, type GoogleClient } from './google.ts'
-import { createDraftService, DraftError, DraftRequestSchema, unsupportedAmounts, type DraftService } from './ai.ts'
+import { DraftRequestSchema, type DraftService } from './ai.ts'
 import { answerCaseQuestion } from './assistant.ts'
 import type { ServerConfig } from './config.ts'
 import { HttpError, RateLimiter, compressed, isCrossSiteWrite, json, redirect, serializeCookie, toRequest, writeResponse, type Request, type Response } from './http.ts'
@@ -16,7 +16,6 @@ import { newToken, openSecret, sealSecret } from './crypto.ts'
 import { createQuickBooksClient, migrateQuickBooksLink, syncLedger, QuickBooksReconnectError, QuickBooksUnauthorizedError, type QuickBooksClient, type QuickBooksTokens } from './quickbooks.ts'
 import { entitlementsFor, isPlan, monthStart, planOf, PLAN_LIMITS, type Plan } from './plans.ts'
 import { AUDIT_TOO_LARGE, MAX_AUDIT_BYTES, checkRepeat, repeatMessage, rowFingerprint } from './uploads.ts'
-import { authorizedDraftFacts } from './caseFacts.ts'
 import { createBilling } from './billing.ts'
 import { createStripeClient, type StripeApi } from './stripe.ts'
 import { createGmailClient, createGmailRoutes, type GmailClient } from './gmail.ts'
@@ -24,6 +23,19 @@ import { createLedgerRoutes } from './ledgerRoutes.ts'
 import { resealLedger } from './ledger.ts'
 import { OnboardingProfileSchema } from './onboarding.ts'
 import { serveStatic } from './staticFiles.ts'
+// Recovery automation and secure AI workstream (docs/workstream-recovery-ai).
+import { tenantForUser } from './tenant.ts'
+import { createSealer } from './sealedJson.ts'
+import { AiExecutionService } from './aiGateway/service.ts'
+import { createAnthropicProvider, type AiProvider } from './aiGateway/providers.ts'
+import { draftServiceProvider } from './aiGateway/legacyDraft.ts'
+import { registerAiTasks } from './aiGateway/tasks/index.ts'
+import { ApprovalService } from './approvals.ts'
+import { createRecoveryRoutes } from './recoveryRoutes.ts'
+import { createJobRoutes } from './jobs/routes.ts'
+import { createInboundRoutes } from './inbound/routes.ts'
+import { createDocumentRoutes } from './documents/routes.ts'
+import { DEFAULT_WORKSTREAM_SETTINGS, type WorkstreamDeps, type WorkstreamSettings } from './workstream.ts'
 
 const SESSION_COOKIE = 'reclaim_session'
 const OAUTH_STATE_COOKIE = 'reclaim_oauth_state'
@@ -35,7 +47,12 @@ export interface AppDependencies {
   db?: DatabaseSync
   mailer?: Mailer
   google?: GoogleClient | null
+  /** The original draft service; now a provider for the draft task only, fed the minimised packet. */
   drafts?: DraftService | null
+  /** The provider for every AI task (tests pass a mock). Defaults to Anthropic when ANTHROPIC_API_KEY is set. */
+  aiProvider?: AiProvider | null
+  /** Inbound webhook and reply-domain switches; all off unless a test or a founder-approved setup passes them. */
+  workstream?: Partial<WorkstreamSettings>
   quickbooks?: QuickBooksClient | null
   /** Stripe (tests pass FakeStripe). Defaults to the REST client when STRIPE_SECRET_KEY is set. */
   stripe?: StripeApi | null
@@ -69,7 +86,8 @@ export function createApp(deps: AppDependencies): App {
   caseCommands.migrateLegacy()
   const mailer = deps.mailer ?? (config.resend ? new ResendMailer(config.resend.apiKey, config.resend.from) : config.gmail ? new GmailMailer(config.gmail.user, config.gmail.appPassword) : new DevMailer(db))
   const google = deps.google !== undefined ? deps.google : config.google ? createGoogleClient(config.google.clientId, config.google.clientSecret) : null
-  const drafts = deps.drafts !== undefined ? deps.drafts : config.anthropicApiKey ? createDraftService(config.anthropicApiKey, config.anthropicModel) : null
+  const aiProvider = deps.aiProvider !== undefined ? deps.aiProvider : config.anthropicApiKey ? createAnthropicProvider(config.anthropicApiKey, config.anthropicModel) : null
+  const ai = registerAiTasks(new AiExecutionService({ db, providers: [deps.drafts ? draftServiceProvider(deps.drafts) : null, aiProvider], getProject: (tenantId, projectId) => projects.get(tenantId, projectId), now: deps.now }))
   const quickbooks = deps.quickbooks !== undefined ? deps.quickbooks : config.quickbooks ? createQuickBooksClient(config.quickbooks.clientId, config.quickbooks.clientSecret, fetch, config.quickbooks.environment) : null
   const auth = new AuthService(db, mailer, {
     appOrigin: config.appOrigin,
@@ -211,7 +229,7 @@ export function createApp(deps: AppDependencies): App {
 
     // ---------- discovery ----------
     if (path === '/api/auth/providers' && method === 'GET') {
-      return json(200, { google: google !== null, ai: drafts !== null, emailDelivery: mailer.kind, requireEmailVerification: config.requireEmailVerification, devMailbox: config.devMailbox })
+      return json(200, { google: google !== null, ai: ai.providerFor('draft_recovery_request') !== null, emailDelivery: mailer.kind, requireEmailVerification: config.requireEmailVerification, devMailbox: config.devMailbox })
     }
 
     // ---------- landing-site contact form ----------
@@ -629,28 +647,14 @@ export function createApp(deps: AppDependencies): App {
     if (path === '/api/ai/draft' && method === 'POST') {
       const user = requireUser(req)
       if (!entitlements(user).limits.aiDrafts) throw new HttpError(402, 'AI recovery drafts are part of the Pro plan.', 'plan_limit', { feature: 'ai' })
-      if (!drafts) throw new HttpError(503, 'AI drafting is not configured on this server.', 'ai_unavailable')
+      if (!ai.providerFor('draft_recovery_request')) throw new HttpError(503, 'AI drafting is not configured on this server.', 'ai_unavailable')
       requireJson(req)
       limit(draftLimiter, `draft:${user.id}`)
       const parsed = DraftRequestSchema.safeParse(await req.json())
       if (!parsed.success) throw new HttpError(400, 'The case data is malformed.', 'validation')
-      const { projectId, findingId, ...clientFacts } = parsed.data
-      const facts = authorizedDraftFacts(projects.get(user.id, projectId), findingId, clientFacts.amountRequested)
-      if (!facts.ok) throw new HttpError(403, facts.reason, 'recovery_not_authorized')
-      // Only the reviewer's tone/context and sender may come from the browser.
-      const request = { ...facts.facts, userContext: clientFacts.userContext, sender: clientFacts.sender }
-      let draft
-      try {
-        draft = await drafts.draft(request)
-      } catch (err) {
-        const code = err instanceof DraftError ? err.code : 'ai_failed'
-        console.error('ai draft failed:', code)
-        throw new HttpError(502, err instanceof DraftError ? err.message : 'AI drafting failed. The generated letter is still there.', code)
-      }
-      if (unsupportedAmounts(draft, request).length > 0) {
-        throw new HttpError(502, 'The AI draft mentioned an amount that is not in the records, so it was discarded. Use the generated letter or try again.', 'ai_unsupported_amount')
-      }
-      return json(200, draft)
+      // Only the ids, the amount and method asked for, the tone note and the sender's names are used; every fact comes from the stored case.
+      const { projectId, findingId, amountRequested, method: resolution, userContext, sender } = parsed.data
+      return recovery.draft(req, user, { projectId, findingId, amountRequested, method: resolution, userContext, sender: { businessName: sender.businessName, senderName: sender.senderName } })
     }
 
     // ---------- dev mailbox ----------
@@ -667,6 +671,10 @@ export function createApp(deps: AppDependencies): App {
 
     const ledgerResponse = await ledgerRoutes.route(req)
     if (ledgerResponse) return ledgerResponse
+    for (const group of workstreamRoutes) {
+      const handled = await group(req)
+      if (handled) return handled
+    }
 
     if (path.startsWith('/api/')) throw new HttpError(404, 'Not found.')
 
@@ -674,6 +682,21 @@ export function createApp(deps: AppDependencies): App {
     if (deps.staticDir && (method === 'GET' || method === 'HEAD')) return serveStatic(deps.staticDir, req)
     throw new HttpError(404, 'Not found.')
   }
+
+  // ---------- recovery automation and secure AI (workstream J1–J5) ----------
+  const approvals = new ApprovalService({ db, sealer: createSealer(config.dataKeys), getProject: (tenantId, projectId) => projects.get(tenantId, projectId), revision: (tenantId, projectId) => projects.revision(tenantId, projectId), now: deps.now })
+  approvals.recoverInterrupted()
+  const workstream: WorkstreamDeps = {
+    db, projects, caseCommands, ai, approvals, sealer: createSealer(config.dataKeys),
+    requireUser, tenantFor: tenantForUser,
+    afterCaseCommand: (userId, project) => billing.recordRecoveries(userId, project),
+    // An internal call to this server's own routes, as the same signed-in person and with the same checks.
+    dispatch: (req, method, path, payload) => route({ ...req, method, url: new URL(path, req.url), headers: { ...req.headers, 'content-type': 'application/json' }, json: async <T>() => payload as T, text: async () => JSON.stringify(payload) }),
+    now: deps.now ?? Date.now,
+    settings: { ...DEFAULT_WORKSTREAM_SETTINGS, ...deps.workstream },
+  }
+  const recovery = createRecoveryRoutes(workstream)
+  const workstreamRoutes = [recovery.route, createJobRoutes(workstream), createInboundRoutes(workstream), createDocumentRoutes(workstream)]
 
   const server = createServer(async (rawReq, rawRes) => {
     const options = { noStore: (rawReq.url ?? '').startsWith('/api/'), hsts: config.production }
