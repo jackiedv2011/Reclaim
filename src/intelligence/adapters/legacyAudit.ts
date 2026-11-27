@@ -151,9 +151,17 @@ function parseAudit(audit: StoredAudit): Parsed | null {
  * (server route or browser) is responsible for loading only this tenant's
  * audits; every port method also refuses a context for any other tenant.
  */
-export function createLegacyAuditSource(tenantId: string, audits: StoredAudit[], options: { revisions?: Record<string, number | null> } = {}): LegacyAuditSource {
+export function createLegacyAuditSource(
+  tenantId: string,
+  audits: StoredAudit[],
+  options: {
+    revisions?: Record<string, number | null>
+    /** Audits the store itself could not open (ProjectStore.listAll().unreadable); reported like shape failures. */
+    unreadableAuditIds?: string[]
+  } = {},
+): LegacyAuditSource {
   const parsed: Parsed[] = []
-  const unreadableAuditIds: string[] = []
+  const unreadableAuditIds: string[] = [...(options.unreadableAuditIds ?? [])]
   for (const audit of [...audits].sort((a, b) => a.id.localeCompare(b.id))) {
     const p = parseAudit(audit)
     if (p) parsed.push(p)

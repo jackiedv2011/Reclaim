@@ -62,7 +62,7 @@ export const CASE_COMMAND_ROUTE = '/api/projects/:id/case-commands' as const
 export const CASE_COMMAND_TYPES = [
   'decision', 'evidence', 'approve', 'approve_and_request', 'request', 'email_sent', 'followup_sent', 'followup_days',
   'contact_hold', 'followup', 'vendor_update', 'settlement', 'historical_settlement', 'begin_new_request_review',
-  'close', 'reconcile', 'reopen', 'reopen_balance',
+  'close', 'file_internal_review', 'close_internal_review', 'reconcile', 'reopen', 'reopen_balance',
 ] as const
 export type CaseCommandType = (typeof CASE_COMMAND_TYPES)[number]
 
@@ -384,7 +384,7 @@ const RESOLVED_BY: Readonly<Record<AttentionKind, CaseCommandType[]>> = {
   historical_request_review: ['begin_new_request_review', 'historical_settlement'],
   contact_on_hold: ['contact_hold', 'decision'],
   unreviewed_finding: ['decision', 'evidence'],
-  internal_review: ['request', 'close', 'decision'],
+  internal_review: ['file_internal_review', 'close_internal_review', 'decision'],
   unmapped_case_state: [],
 }
 

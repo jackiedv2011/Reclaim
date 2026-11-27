@@ -156,17 +156,11 @@ export function createIntelligenceRoutes(deps: IntelligenceDeps) {
 
   /** Only this tenant's audits; the adapter refuses any other tenant's context as a second check. */
   function sourceFor(ctx: TenantContext): LegacyAuditSource {
-    let audits: StoredAudit[]
-    try {
-      audits = deps.projects.list(ctx.tenantId) as unknown as StoredAudit[]
-    } catch {
-      // ProjectStore.list fails as a whole when one saved audit cannot be decrypted (the same
-      // failure affects GET /api/projects). Per-row reading is requested from the CTO; until then
-      // say so plainly rather than answer from a partial, unlabelled set.
-      throw new HttpError(503, 'A saved audit could not be read, so account-wide views are unavailable.', 'saved_audit_unreadable')
-    }
+    // listAll leaves out audits that cannot be opened and names them; they become a coverage limit.
+    const { projects: stored, unreadable: failed } = deps.projects.listAll(ctx.tenantId)
+    const audits = stored as unknown as StoredAudit[]
     const revisions = Object.fromEntries(audits.map((a) => [a.id, deps.projects.revision(ctx.tenantId, a.id)]))
-    return createLegacyAuditSource(ctx.tenantId, audits, { revisions })
+    return createLegacyAuditSource(ctx.tenantId, audits, { revisions, unreadableAuditIds: failed.map((u) => u.id) })
   }
 
   async function route(req: Request): Promise<Response | null> {

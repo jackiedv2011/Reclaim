@@ -224,10 +224,10 @@ describe('intelligence API', () => {
       expect(JSON.stringify(res.body.coverage), path).toContain('unreadable_saved_audit')
     }
     expect((await owner.client.get('/api/intelligence/vendors/%E0%A4%A')).status).toBe(400)
-    // A sealed payload that cannot be opened: a clear, typed refusal instead of a bare 500.
+    // A sealed payload that cannot be opened: the other audits still answer, and the gap is named.
     app.db.prepare("INSERT INTO projects (user_id, id, name, source_label, mode, created_at, updated_at, payload) VALUES (?, 'sealed', '', '', 'upload', 1, 2, 'v1.not-a-real-sealed-payload')").run(owner.userId)
     const sealed = await owner.client.get('/api/intelligence/attention')
-    expect(sealed.status).toBe(503)
-    expect(JSON.stringify(sealed.body)).toContain('saved_audit_unreadable')
+    expect(sealed.status).toBe(200)
+    expect(JSON.stringify(sealed.body.coverage)).toContain('unreadable_saved_audit')
   })
 })
